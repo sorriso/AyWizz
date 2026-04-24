@@ -1,0 +1,52 @@
+# =============================================================================
+# File: services.yml
+# Version: 2
+# Path: infra/c1_gateway/dynamic/services.yml
+# Description: Traefik backend service definitions (local dev URLs).
+#              Service names match Docker Compose service names.
+#              v2: added c7 (memory) and c9 (mcp) — both are now reachable via
+#              Traefik. c8 stays internal (LLM proxy access from C4 only).
+# =============================================================================
+
+http:
+  services:
+
+    c2:
+      loadBalancer:
+        servers:
+          - url: "http://c2:8000"
+
+    c3:
+      loadBalancer:
+        servers:
+          - url: "http://c3:8000"
+
+    c4:
+      loadBalancer:
+        servers:
+          - url: "http://c4:8000"
+
+    c5:
+      loadBalancer:
+        servers:
+          - url: "http://c5:8000"
+
+    c6:
+      loadBalancer:
+        servers:
+          - url: "http://c6:8000"
+
+    c7:
+      loadBalancer:
+        servers:
+          - url: "http://c7:8000"
+
+    c9:
+      loadBalancer:
+        servers:
+          - url: "http://c9:8000"
+
+    c12:
+      loadBalancer:
+        servers:
+          - url: "http://c12:5678"

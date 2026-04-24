@@ -1,0 +1,152 @@
+# =============================================================================
+# File: routers.yml
+# Version: 2
+# Path: infra/c1_gateway/dynamic/routers.yml
+# Description: Traefik HTTP router definitions. v2 aligns with real router
+#              paths and adds C7 / C9 public surfaces.
+#
+#   Route table (matches actual FastAPI routers as of session of 2026-04-23):
+#     /auth/login     POST → C2 [rate-limit-auth]                          public
+#     /auth/token     POST → C2 [rate-limit-auth]                          public
+#     /auth/*              → C2  []                                        public
+#     /api/v1/conversations/*          → C3 [forward-auth-c2, secure-hdrs]
+#     /api/v1/orchestrator/*           → C4 [forward-auth-c2, secure-hdrs]
+#     /api/v1/projects/*/requirements/* → C5 [forward-auth-c2, secure-hdrs]
+#     /api/v1/validation/*             → C6 [forward-auth-c2, secure-hdrs]
+#     /api/v1/memory/*                 → C7 [forward-auth-c2, secure-hdrs]
+#     /api/v1/mcp, /api/v1/mcp/*       → C9 [forward-auth-c2, secure-hdrs]
+#     /uploads/*                       → C12 [forward-auth-c2, secure-hdrs]
+#
+# @relation R-100-039 R-100-042 R-100-015 A-C1-1
+# =============================================================================
+
+http:
+  routers:
+
+    # -------------------------------------------------------------------------
+    # C2 — Auth Service (public endpoints, rate-limited login/token)
+    # -------------------------------------------------------------------------
+
+    c2-auth-login:
+      rule: "Path(`/auth/login`) && Method(`POST`)"
+      service: c2
+      entryPoints:
+        - web
+      middlewares:
+        - rate-limit-auth
+      priority: 100
+
+    c2-auth-token:
+      rule: "Path(`/auth/token`) && Method(`POST`)"
+      service: c2
+      entryPoints:
+        - web
+      middlewares:
+        - rate-limit-auth
+      priority: 100
+
+    c2-auth:
+      rule: "PathPrefix(`/auth`)"
+      service: c2
+      entryPoints:
+        - web
+      priority: 10
+
+    # -------------------------------------------------------------------------
+    # C3 — Conversation Service
+    # -------------------------------------------------------------------------
+
+    c3-conversations:
+      rule: "PathPrefix(`/api/v1/conversations`)"
+      service: c3
+      entryPoints:
+        - web
+      middlewares:
+        - forward-auth-c2
+        - secure-headers
+      priority: 50
+
+    # -------------------------------------------------------------------------
+    # C4 — Orchestrator
+    # -------------------------------------------------------------------------
+
+    c4-orchestrator:
+      rule: "PathPrefix(`/api/v1/orchestrator`)"
+      service: c4
+      entryPoints:
+        - web
+      middlewares:
+        - forward-auth-c2
+        - secure-headers
+      priority: 50
+
+    # -------------------------------------------------------------------------
+    # C5 — Requirements Service
+    # (routes live under /api/v1/projects/<pid>/requirements/*)
+    # -------------------------------------------------------------------------
+
+    c5-requirements:
+      rule: "PathPrefix(`/api/v1/projects`)"
+      service: c5
+      entryPoints:
+        - web
+      middlewares:
+        - forward-auth-c2
+        - secure-headers
+      priority: 50
+
+    # -------------------------------------------------------------------------
+    # C6 — Validation Pipeline Registry
+    # -------------------------------------------------------------------------
+
+    c6-validation:
+      rule: "PathPrefix(`/api/v1/validation`)"
+      service: c6
+      entryPoints:
+        - web
+      middlewares:
+        - forward-auth-c2
+        - secure-headers
+      priority: 50
+
+    # -------------------------------------------------------------------------
+    # C7 — Memory Service
+    # -------------------------------------------------------------------------
+
+    c7-memory:
+      rule: "PathPrefix(`/api/v1/memory`)"
+      service: c7
+      entryPoints:
+        - web
+      middlewares:
+        - forward-auth-c2
+        - secure-headers
+      priority: 50
+
+    # -------------------------------------------------------------------------
+    # C9 — MCP Server (public MCP surface for external LLM agents)
+    # -------------------------------------------------------------------------
+
+    c9-mcp:
+      rule: "PathPrefix(`/api/v1/mcp`)"
+      service: c9
+      entryPoints:
+        - web
+      middlewares:
+        - forward-auth-c2
+        - secure-headers
+      priority: 50
+
+    # -------------------------------------------------------------------------
+    # C12 — n8n Ingestion Workflow (upload reception)
+    # -------------------------------------------------------------------------
+
+    c12-uploads:
+      rule: "PathPrefix(`/uploads`)"
+      service: c12
+      entryPoints:
+        - web
+      middlewares:
+        - forward-auth-c2
+        - secure-headers
+      priority: 50

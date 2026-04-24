@@ -1,0 +1,101 @@
+# =============================================================================
+# File: Dockerfile.python-service
+# Version: 2
+# Path: infra/docker/Dockerfile.python-service
+# Description: Shared multi-stage build for every ay_platform_core FastAPI
+#              component (C2, C3, C4, C5, C6, C7, C9) plus the mock LLM.
+#              One parameterised Dockerfile avoids drift across eight
+#              near-identical files; compose services build with their own
+#              COMPONENT_MODULE arg.
+#
+#              v2 changes:
+#                - Dependencies are now installed exclusively from
+#                  ay_platform_core/pyproject.toml — no more hard-coded
+#                  `pip install fastapi uvicorn …` line. Single source of
+#                  truth for runtime deps.
+#                - The package is installed in EDITABLE mode
+#                  (`pip install -e .`). Combined with a bind-mount of
+#                  `ay_platform_core/src` from the host (declared in the
+#                  compose file), this lets developers edit Python code on
+#                  the host and see the changes in running containers
+#                  without rebuilding the image. The COPY of `src/` into
+#                  the image remains so the image is still self-contained
+#                  when run without the bind-mount.
+#                - uvicorn is invoked with `--reload --reload-dir` so file
+#                  changes pushed through the bind-mount are picked up.
+#                  uvicorn's `watchfiles` dependency is pulled in via the
+#                  `uvicorn[standard]` extra declared in pyproject.toml.
+#
+#              Build context is the monorepo ROOT (not infra/). This lets
+#              the Dockerfile reference `ay_platform_core/` directly.
+# =============================================================================
+
+ARG PYTHON_VERSION=3.13-slim
+FROM python:${PYTHON_VERSION} AS builder
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# System build deps for wheels without prebuilt binaries (cryptography,
+# argon2-cffi, watchfiles, …).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential \
+      libffi-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the sub-project. Only ay_platform_core/ is needed; the monorepo's
+# other top-levels (requirements/, infra/) are not part of the runtime.
+# Keep the on-image path stable (`/app/ay_platform_core/src`) so the
+# compose bind-mount from the host resolves cleanly onto it.
+COPY ay_platform_core/pyproject.toml /app/ay_platform_core/pyproject.toml
+COPY ay_platform_core/src /app/ay_platform_core/src
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+RUN pip install --upgrade pip setuptools wheel
+# Editable install from pyproject.toml: all runtime deps are resolved from
+# the [project].dependencies table. `-e` registers the source path via a
+# .pth file so bind-mounting ay_platform_core/src over /app/ay_platform_core/src
+# is picked up without a rebuild.
+RUN pip install -e /app/ay_platform_core
+
+
+# ---------------------------------------------------------------------------
+# Runtime stage
+# ---------------------------------------------------------------------------
+
+FROM python:${PYTHON_VERSION} AS runtime
+
+ARG COMPONENT_MODULE=c2_auth
+ENV COMPONENT_MODULE=${COMPONENT_MODULE} \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:${PATH}"
+
+# The editable install stored a .pth file in /opt/venv pointing at
+# /app/ay_platform_core/src, so both must survive into the runtime stage
+# for Python to find the package. The host bind-mount in compose swaps the
+# content of /app/ay_platform_core/src at runtime for live iteration.
+COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /app /app
+
+RUN groupadd --system app && useradd --system --gid app --no-create-home app \
+    && chown -R app:app /app
+
+USER app
+WORKDIR /app
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=5 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)" || exit 1
+
+# --reload + --reload-dir are safe-by-default for the dev/test image: when
+# the bind-mount is absent, uvicorn simply watches the baked-in source and
+# the overhead is negligible. For production images, override CMD or drop
+# these flags via a compose override.
+CMD exec uvicorn "ay_platform_core.${COMPONENT_MODULE}.main:app" \
+      --host 0.0.0.0 --port 8000 \
+      --reload --reload-dir /app/ay_platform_core/src

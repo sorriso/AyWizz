@@ -1,0 +1,75 @@
+// =============================================================================
+// VS Code Dev Container Configuration
+// Version: 4
+// Path: .devcontainer/devcontainer.json
+// Description: Dev container for Python/K8s development with Claude Code.
+// v4: postCreateCommand simplified — no more ay_platform_core re-install.
+//     Dockerfile v1.6.0 installs editable directly at /workspace/..., so
+//     the .pth file is already correct when the bind mount comes up.
+// =============================================================================
+{
+  "name": "Ubuntu Dev Environment",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "..",
+    "args": { "TARGETOS": "linux", "TARGETARCH": "amd64" }
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+  },
+  "mounts": [
+    // Workspace bind
+    "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+    // Host kube config (read-only; copied to a writable location in postStartCommand)
+    "source=${localEnv:HOME}/.kube,target=/tmp/host-kube,type=bind,consistency=cached,readonly",
+    // Claude Code auth persistence (shared with host Claude Code)
+    "source=${localEnv:HOME}/.claude,target=/home/developer/.claude,type=bind,consistency=cached"
+  ],
+  "workspaceFolder": "/workspace",
+  "runArgs": ["--init", "--privileged=false", "--platform=linux/amd64"],
+
+  "containerEnv": {
+    "TZ": "Europe/Paris",
+    "KUBECONFIG": "/home/developer/.kube-local/config",
+    // Testcontainers via docker-outside-of-docker
+    "TESTCONTAINERS_RYUK_DISABLED": "true",
+    "DOCKER_HOST": "unix:///var/run/docker.sock"
+  },
+
+  // Align docker group GID with the host socket + ensure developer is a member.
+  "postCreateCommand": "bash -c 'DOCKER_SOCK_GID=$(stat -c \"%g\" /var/run/docker.sock 2>/dev/null || echo 999); sudo groupmod -g $DOCKER_SOCK_GID docker 2>/dev/null || sudo groupadd -g $DOCKER_SOCK_GID docker; sudo usermod -aG docker developer; echo \"Docker group configured with GID $DOCKER_SOCK_GID\"'",
+
+  // Copy read-only host kube config to a writable location + rewrite API URL for Docker Desktop K8s
+  "postStartCommand": "set -e; mkdir -p ~/.kube-local; if [ -f /tmp/host-kube/config ]; then cp -rf /tmp/host-kube/* ~/.kube-local/; fi; if [ -f ~/.kube-local/config ]; then sed -i 's#https://127\\.0\\.0\\.1:6443#https://kubernetes.docker.internal:6443#g' ~/.kube-local/config || true; sed -i 's#https://host\\.docker\\.internal:6443#https://kubernetes.docker.internal:6443#g' ~/.kube-local/config || true; fi",
+
+  "remoteUser": "developer",
+  "updateRemoteUserUID": "on",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "anthropic.claude-code",
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "ms-kubernetes-tools.vscode-kubernetes-tools",
+        "tamasfe.even-better-toml",
+        "redhat.vscode-yaml"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "python.defaultInterpreterPath": "/usr/bin/python3.13",
+        "python.terminal.activateEnvironment": true,
+        "[python]": {
+          "editor.defaultFormatter": "charliermarsh.ruff",
+          "editor.formatOnSave": true,
+          "editor.codeActionsOnSave": {
+            "source.organizeImports.ruff": "explicit"
+          }
+        },
+        "files.trimTrailingWhitespace": true,
+        "files.insertFinalNewline": true
+      }
+    }
+  }
+}

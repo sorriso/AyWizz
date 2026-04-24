@@ -1,0 +1,436 @@
+# =============================================================================
+# File: docker-compose.yml
+# Version: 2
+# Path: ay_platform_core/tests/docker-compose.yml
+# Description: End-to-end local stack for system tests. Brings up:
+#                - ArangoDB (C11)
+#                - MinIO (C10)
+#                - Mock LLM (stands in for C8 LiteLLM in CI; real C8 behind
+#                            a profile)
+#                - C2 (auth), C3 (conversation), C4 (orchestrator),
+#                  C5 (requirements), C6 (validation), C7 (memory),
+#                  C9 (mcp) — all built from the shared
+#                  infra/docker/Dockerfile.python-service
+#                - C1 Traefik — the ONLY publicly exposed HTTP port (80).
+#                  Internal services are not published to the host; all
+#                  system tests go through http://localhost.
+#
+# Location discipline:
+#   This file lives under ay_platform_core/tests/ but requires the MONOREPO
+#   ROOT as build context (see `context: ../..` below) because the shared
+#   Dockerfile copies `ay_platform_core/` from there. The Traefik bind
+#   mounts are also relative to this file's directory: `../../infra/...`.
+#
+# Usage (from anywhere — `-f` takes an absolute or relative path):
+#   docker compose -f ay_platform_core/tests/docker-compose.yml up -d
+# Or via the helper:
+#   ./ay_platform_core/scripts/e2e_stack.sh full
+#
+# Profiles:
+#   default       core platform + mock LLM (for CI, free, no API keys)
+#   real-llm      swap mock_llm for a real LiteLLM proxy (needs API keys in .env)
+#
+# @relation implements:R-100-039 R-100-100 R-100-015
+# =============================================================================
+
+name: ay-platform
+
+# Shared build template. `context: ../..` is the MONOREPO ROOT relative to
+# THIS compose file's location (ay_platform_core/tests/). The Dockerfile path
+# below is relative to that build context, so it resolves to
+# /<monorepo>/infra/docker/Dockerfile.python-service.
+x-python-build: &python-build
+  context: ../..
+  dockerfile: infra/docker/Dockerfile.python-service
+
+# Python-runtime env shared by all Python services. Application-level
+# settings (anything Pydantic-settings reads) live in `.env.test` and are
+# injected via each service's `env_file:` — keeping `x-common-env` free of
+# app config means compose can't accidentally override a Pydantic default.
+x-common-env: &common-env
+  PYTHONUNBUFFERED: "1"
+
+# Every Python service declares its `volumes:` list starting with this
+# mount via `- *python-src-mount`. The host's `ay_platform_core/src` is
+# bind-mounted (read-only) over the image's editable-install path so
+# source edits are picked up live by uvicorn's --reload watcher without
+# rebuilding the image. The image stays self-contained when run without
+# the mount (the COPY in the Dockerfile remains).
+x-python-src-mount: &python-src-mount
+  type: bind
+  source: ../../ay_platform_core/src
+  target: /app/ay_platform_core/src
+  read_only: true
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Storage layer — shared ArangoDB + MinIO (C10 + C11)
+  # ---------------------------------------------------------------------------
+
+  arangodb:
+    image: arangodb/arangodb:3.12
+    container_name: ay-arangodb
+    environment:
+      ARANGO_ROOT_PASSWORD: "password"
+    volumes:
+      - arangodb_data:/var/lib/arangodb3
+    networks:
+      - platform
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8529/_api/version -u root:password || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  minio:
+    image: minio/minio:RELEASE.2025-01-20T14-49-07Z
+    container_name: ay-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: "minioadmin"
+      MINIO_ROOT_PASSWORD: "minioadmin"
+    volumes:
+      - minio_data:/data
+    networks:
+      - platform
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/ready || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # Mock LLM (default profile) — stand-in for C8 in tests without real keys
+  # ---------------------------------------------------------------------------
+
+  mock_llm:
+    build:
+      <<: *python-build
+      args:
+        COMPONENT_MODULE: _mock_llm
+    image: ay-mock-llm:local
+    container_name: ay-mock-llm
+    # Mock LLM reads no Pydantic settings — env_file omitted intentionally.
+    environment:
+      <<: *common-env
+    volumes:
+      - *python-src-mount
+    # Port 8001 on the host maps to the mock-LLM admin endpoints so system
+    # tests running on the host can script per-test LLM responses via
+    # POST /admin/enqueue and reset state via POST /admin/reset. This is
+    # TEST infrastructure — not part of the platform public surface.
+    ports:
+      - "8001:8000"
+    networks:
+      - platform
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)\" || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # C2 — Auth
+  # ---------------------------------------------------------------------------
+
+  c2:
+    build:
+      <<: *python-build
+      args:
+        COMPONENT_MODULE: c2_auth
+    image: ay-c2-auth:local
+    container_name: ay-c2-auth
+    env_file:
+      - .env.test
+    environment:
+      <<: *common-env
+    volumes:
+      - *python-src-mount
+    depends_on:
+      arangodb:
+        condition: service_healthy
+    networks:
+      - platform
+
+  # ---------------------------------------------------------------------------
+  # C3 — Conversation
+  # ---------------------------------------------------------------------------
+
+  c3:
+    build:
+      <<: *python-build
+      args:
+        COMPONENT_MODULE: c3_conversation
+    image: ay-c3-conversation:local
+    container_name: ay-c3-conversation
+    env_file:
+      - .env.test
+    environment:
+      <<: *common-env
+    volumes:
+      - *python-src-mount
+    depends_on:
+      arangodb:
+        condition: service_healthy
+    networks:
+      - platform
+
+  # ---------------------------------------------------------------------------
+  # C4 — Orchestrator
+  # ---------------------------------------------------------------------------
+
+  c4:
+    build:
+      <<: *python-build
+      args:
+        COMPONENT_MODULE: c4_orchestrator
+    image: ay-c4-orchestrator:local
+    container_name: ay-c4-orchestrator
+    env_file:
+      - .env.test
+    environment:
+      <<: *common-env
+    volumes:
+      - *python-src-mount
+    depends_on:
+      arangodb:
+        condition: service_healthy
+      mock_llm:
+        condition: service_healthy
+    networks:
+      - platform
+
+  # ---------------------------------------------------------------------------
+  # C5 — Requirements
+  # ---------------------------------------------------------------------------
+
+  c5:
+    build:
+      <<: *python-build
+      args:
+        COMPONENT_MODULE: c5_requirements
+    image: ay-c5-requirements:local
+    container_name: ay-c5-requirements
+    env_file:
+      - .env.test
+    environment:
+      <<: *common-env
+    volumes:
+      - *python-src-mount
+    depends_on:
+      arangodb:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - platform
+
+  # ---------------------------------------------------------------------------
+  # C6 — Validation
+  # ---------------------------------------------------------------------------
+
+  c6:
+    build:
+      <<: *python-build
+      args:
+        COMPONENT_MODULE: c6_validation
+    image: ay-c6-validation:local
+    container_name: ay-c6-validation
+    env_file:
+      - .env.test
+    environment:
+      <<: *common-env
+    volumes:
+      - *python-src-mount
+    depends_on:
+      arangodb:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - platform
+
+  # ---------------------------------------------------------------------------
+  # C7 — Memory
+  # ---------------------------------------------------------------------------
+
+  c7:
+    build:
+      <<: *python-build
+      args:
+        COMPONENT_MODULE: c7_memory
+    image: ay-c7-memory:local
+    container_name: ay-c7-memory
+    env_file:
+      - .env.test
+    environment:
+      <<: *common-env
+    volumes:
+      - *python-src-mount
+    depends_on:
+      arangodb:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - platform
+
+  # ---------------------------------------------------------------------------
+  # C9 — MCP Server (thin HTTP wrapper over C5 + C6)
+  # ---------------------------------------------------------------------------
+
+  c9:
+    build:
+      <<: *python-build
+      args:
+        COMPONENT_MODULE: c9_mcp
+    image: ay-c9-mcp:local
+    container_name: ay-c9-mcp
+    env_file:
+      - .env.test
+    environment:
+      <<: *common-env
+    volumes:
+      - *python-src-mount
+    depends_on:
+      c5:
+        condition: service_started
+      c6:
+        condition: service_started
+    networks:
+      - platform
+
+  # ---------------------------------------------------------------------------
+  # C12 — Workflow Engine (n8n) for external source ingestion
+  #   Traefik routes /uploads/* → this service. n8n is configured to expose
+  #   its webhook endpoints under that prefix via N8N_ENDPOINT_WEBHOOK so
+  #   the public contract is /uploads/<workflow-path>.
+  #   The n8n UI (port 5678 root /) is NOT published to the host — use
+  #   `docker compose exec c12 n8n …` to manage workflows in dev.
+  #   See R-100-080..088 for the ingestion contract (C12 ↔ C7).
+  # ---------------------------------------------------------------------------
+
+  c12:
+    image: n8nio/n8n:1.74.0
+    container_name: ay-c12-workflow
+    environment:
+      <<: *common-env
+      # Public webhook URL — Traefik fronts n8n on port 80 of the host.
+      WEBHOOK_URL: "http://localhost/"
+      # Make webhooks reachable at /uploads/<path> rather than /webhook/<path>
+      # so the Traefik PathPrefix(`/uploads`) rule matches.
+      N8N_ENDPOINT_WEBHOOK: "uploads"
+      N8N_ENDPOINT_WEBHOOK_TEST: "uploads-test"
+      # No basic-auth inside the cluster — Traefik forward-auth gates the
+      # public surface. Keep the UI closed off by not publishing 5678.
+      N8N_SECURE_COOKIE: "false"
+      N8N_RUNNERS_ENABLED: "true"
+      N8N_HOST: "c12"
+      N8N_PORT: "5678"
+      # Use SQLite at a known path on the persistent volume.
+      DB_TYPE: "sqlite"
+      DB_SQLITE_DATABASE: "/home/node/.n8n/database.sqlite"
+      # Disable telemetry/diagnostics in CI.
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+    volumes:
+      - c12_data:/home/node/.n8n
+      # Read-only mount of the seed-workflow bundle. The c12_workflow_seed
+      # one-shot container below imports these at stack-start.
+      - ../../infra/c12_workflow/workflows:/workflows:ro
+    networks:
+      - platform
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:5678/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+
+  # One-shot helper: imports every workflow JSON under /workflows into the
+  # running n8n, then exits. Idempotent — re-importing an existing workflow
+  # updates it in place. Runs AFTER c12 reports healthy so the import RPC
+  # is accepted.
+  c12_workflow_seed:
+    image: n8nio/n8n:1.74.0
+    container_name: ay-c12-workflow-seed
+    depends_on:
+      c12:
+        condition: service_healthy
+    environment:
+      N8N_HOST: "c12"
+      N8N_PORT: "5678"
+      DB_TYPE: "sqlite"
+      # Share the same sqlite DB file as the c12 service by mounting the
+      # same named volume below. The import CLI writes directly to the DB.
+      DB_SQLITE_DATABASE: "/home/node/.n8n/database.sqlite"
+    volumes:
+      - c12_data:/home/node/.n8n
+      - ../../infra/c12_workflow/workflows:/workflows:ro
+    entrypoint:
+      - "/bin/sh"
+      - "-c"
+      - |
+        set -e
+        echo "Seeding n8n workflows from /workflows"
+        for f in /workflows/*.json; do
+          [ -e "$$f" ] || continue
+          echo "Importing $$f"
+          n8n import:workflow --input="$$f" || exit 1
+        done
+        echo "Activating imported workflows"
+        n8n update:workflow --all --active=true || true
+        echo "Seeding done."
+    networks:
+      - platform
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # C1 — Traefik (the ONLY publicly exposed port)
+  # Traefik config mounts are relative to THIS compose file's directory.
+  # ---------------------------------------------------------------------------
+
+  c1:
+    image: traefik:v3.3
+    container_name: ay-c1-gateway
+    restart: unless-stopped
+    ports:
+      - "80:80"          # public platform entry point
+      - "8080:8080"      # Traefik dashboard (local dev only)
+    volumes:
+      - ../../infra/c1_gateway/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ../../infra/c1_gateway/dynamic:/etc/traefik/dynamic:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      c2:
+        condition: service_started
+      c3:
+        condition: service_started
+      c4:
+        condition: service_started
+      c5:
+        condition: service_started
+      c6:
+        condition: service_started
+      c7:
+        condition: service_started
+      c9:
+        condition: service_started
+      c12:
+        condition: service_started
+    networks:
+      - platform
+
+networks:
+  platform:
+    driver: bridge
+
+volumes:
+  arangodb_data:
+  minio_data:
+  c12_data:

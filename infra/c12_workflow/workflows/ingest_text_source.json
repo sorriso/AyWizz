@@ -1,0 +1,68 @@
+{
+  "_comment": "Version: 1 | Path: infra/c12_workflow/workflows/ingest_text_source.json | Description: Minimal n8n workflow that wires the public POST /uploads/ingest-text endpoint to C7's memory-source ingestion API. Demonstrates the C12 -> C7 contract per R-100-081. Import via `docker compose exec c12 n8n import:workflow --input=/workflows/ingest_text_source.json` after bringing the stack up.",
+  "name": "Ingest text source (C12 -> C7)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ingest-text",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-ingest-text",
+      "name": "Webhook — POST /uploads/ingest-text",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300],
+      "webhookId": "ingest-text-v1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://c7:8000/api/v1/memory/projects/{{$json.project_id}}/sources",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-User-Id", "value": "={{$json.uploaded_by}}" },
+            { "name": "X-Tenant-Id", "value": "={{$json.tenant_id}}" },
+            { "name": "X-User-Roles", "value": "project_editor,project_owner,admin" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"source_id\": \"{{$json.source_id}}\",\n  \"project_id\": \"{{$json.project_id}}\",\n  \"mime_type\": \"text/plain\",\n  \"content\": {{JSON.stringify($json.content)}},\n  \"size_bytes\": {{$json.content.length}},\n  \"uploaded_by\": \"{{$json.uploaded_by}}\"\n}",
+        "options": {}
+      },
+      "id": "forward-to-c7",
+      "name": "POST C7 /memory/sources",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [550, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"accepted\": true,\n  \"source_id\": \"{{$('forward-to-c7').item.json.source_id}}\",\n  \"chunk_count\": {{$('forward-to-c7').item.json.chunk_count}}\n}",
+        "options": {}
+      },
+      "id": "respond-to-caller",
+      "name": "Respond to caller",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [850, 300]
+    }
+  ],
+  "connections": {
+    "Webhook — POST /uploads/ingest-text": {
+      "main": [[{ "node": "POST C7 /memory/sources", "type": "main", "index": 0 }]]
+    },
+    "POST C7 /memory/sources": {
+      "main": [[{ "node": "Respond to caller", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {},
+  "active": true,
+  "staticData": null,
+  "pinData": {}
+}

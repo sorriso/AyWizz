@@ -1,0 +1,87 @@
+# =============================================================================
+# File: litellm-config.yaml
+# Version: 1
+# Path: infra/c8_gateway/config/litellm-config.yaml
+# Description: Sample LiteLLM configuration for local development. The shape
+#              mirrors Appendix 8.1 of 800-SPEC-LLM-ABSTRACTION and validates
+#              against ay_platform_core.c8_llm.config.LiteLLMConfig.
+#              API keys are references to environment variables; production
+#              deployments SHALL populate these via Kubernetes Secrets + ESO
+#              (R-800-021).
+# =============================================================================
+
+model_list:
+  - model_name: claude-opus-flagship
+    litellm_params:
+      model: anthropic/claude-opus-4-7
+      api_key: os.environ/ANTHROPIC_API_KEY
+    model_info:
+      display_name: "Claude Opus 4.7"
+      features:
+        - chat_completion
+        - streaming
+        - long_context
+        - prompt_caching
+        - extended_thinking
+        - tool_calling
+        - structured_outputs
+        - vision
+      context_window: 200000
+      cost_per_million_input: 15.00
+      cost_per_million_output: 75.00
+      rate_limit_rpm: 4000
+      rate_limit_tpm: 400000
+
+  - model_name: claude-sonnet-midtier
+    litellm_params:
+      model: anthropic/claude-sonnet-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+    model_info:
+      display_name: "Claude Sonnet 4.6"
+      features:
+        - chat_completion
+        - streaming
+        - long_context
+        - prompt_caching
+        - tool_calling
+        - structured_outputs
+      context_window: 200000
+      cost_per_million_input: 3.00
+      cost_per_million_output: 15.00
+
+  - model_name: claude-haiku-fast
+    litellm_params:
+      model: anthropic/claude-haiku-4-5-20251001
+      api_key: os.environ/ANTHROPIC_API_KEY
+    model_info:
+      display_name: "Claude Haiku 4.5"
+      features:
+        - chat_completion
+        - streaming
+        - tool_calling
+      context_window: 200000
+      cost_per_million_input: 0.80
+      cost_per_million_output: 4.00
+
+agent_routes:
+  architect: claude-opus-flagship
+  planner: claude-sonnet-midtier
+  implementer: claude-sonnet-midtier
+  spec-reviewer: claude-sonnet-midtier
+  quality-reviewer: claude-sonnet-midtier
+  sub-agent: claude-haiku-fast
+  default: claude-sonnet-midtier
+
+budgets:
+  default_hard_cap_usd_per_month: 100.0
+  default_soft_cap_ratio: 0.8
+  window: calendar_month_utc
+
+archival:
+  enabled: false
+  minio_bucket: llm-archive
+  encryption: none
+
+rate_limits:
+  per_tenant_rpm: 1000
+  per_user_rpm: 100

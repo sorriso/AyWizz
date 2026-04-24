@@ -1,0 +1,144 @@
+{
+  "_comment_header": "File: .claude/settings.json | Version: 5 | Path: .claude/settings.json | Claude Code permissions for the ay_monorepo. Evaluation order: deny > ask > allow. v5 adds: e2e_stack.sh wrapper (4 forms). docker compose remains denied; the wrapper script encapsulates the intent.",
+
+  "permissions": {
+    "allow": [
+      "Bash(pytest:*)",
+      "Bash(ruff:*)",
+      "Bash(mypy:*)",
+      "Bash(./scripts/run_tests.sh:*)",
+      "Bash(ay_platform_core/scripts/run_tests.sh:*)",
+      "Bash(bash scripts/run_tests.sh:*)",
+      "Bash(bash ay_platform_core/scripts/run_tests.sh:*)",
+      "Bash(./scripts/run_coherence_checks.sh:*)",
+      "Bash(ay_platform_core/scripts/run_coherence_checks.sh:*)",
+      "Bash(bash scripts/run_coherence_checks.sh:*)",
+      "Bash(bash ay_platform_core/scripts/run_coherence_checks.sh:*)",
+      "Bash(./scripts/e2e_stack.sh:*)",
+      "Bash(ay_platform_core/scripts/e2e_stack.sh:*)",
+      "Bash(bash scripts/e2e_stack.sh:*)",
+      "Bash(bash ay_platform_core/scripts/e2e_stack.sh:*)",
+
+      "Bash(python -m pytest:*)",
+      "Bash(python -m ruff:*)",
+      "Bash(python -m mypy:*)",
+      "Bash(python -c:*)",
+      "Bash(python --version)",
+      "Bash(python3 --version)",
+
+      "Bash(pip install -e .[all])",
+      "Bash(pip install -e .)",
+      "Bash(pip show:*)",
+      "Bash(pip list:*)",
+      "Bash(pip freeze:*)",
+
+      "Bash(ls:*)",
+      "Bash(tree:*)",
+      "Bash(cat:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(wc:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(find:*)",
+      "Bash(file:*)",
+      "Bash(stat:*)",
+      "Bash(du:*)",
+      "Bash(diff:*)",
+      "Bash(pwd:*)",
+      "Bash(cd:*)",
+      "Bash(echo:*)",
+      "Bash(env)",
+      "Bash(env | grep:*)",
+      "Bash(which:*)",
+      "Bash(date)",
+      "Bash(whoami)",
+      "Bash(uname:*)",
+
+      "Bash(sed -n:*)",
+
+      "Bash(ping:*)",
+      "Bash(getent:*)",
+
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git ls-files:*)",
+
+      "Bash(kubectl get:*)",
+      "Bash(kubectl describe:*)",
+      "Bash(kubectl logs:*)",
+      "Bash(kubectl config view:*)",
+      "Bash(kubectl config current-context)",
+      "Bash(kubectl version:*)",
+      "Bash(kubectl cluster-info)",
+
+      "Bash(docker ps:*)",
+      "Bash(docker images:*)",
+      "Bash(docker logs:*)",
+      "Bash(docker inspect:*)",
+      "Bash(docker info:*)",
+      "Bash(docker version)",
+
+      "Bash(mkdir -p:*)",
+      "Bash(touch:*)",
+      "Bash(chmod +x:*)"
+    ],
+
+    "deny": [
+      "Bash(rm -rf:*)",
+      "Bash(rm -r:*)",
+      "Bash(sudo:*)",
+
+      "Bash(sed -i:*)",
+      "Bash(sed --in-place:*)",
+
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git clean:*)",
+      "Bash(git checkout -- :*)",
+      "Bash(git checkout .)",
+
+      "Bash(pip install:*)",
+      "Bash(pip uninstall:*)",
+      "Bash(npm install:*)",
+      "Bash(npm uninstall:*)",
+      "Bash(npm update:*)",
+
+      "Bash(kubectl apply:*)",
+      "Bash(kubectl delete:*)",
+      "Bash(kubectl create:*)",
+      "Bash(kubectl patch:*)",
+      "Bash(kubectl replace:*)",
+      "Bash(kubectl exec:*)",
+      "Bash(kubectl run:*)",
+
+      "Bash(docker run:*)",
+      "Bash(docker rm:*)",
+      "Bash(docker rmi:*)",
+      "Bash(docker build:*)",
+      "Bash(docker exec:*)",
+      "Bash(docker prune:*)",
+      "Bash(docker system:*)",
+      "Bash(docker compose:*)",
+
+      "Bash(curl:*)",
+      "Bash(wget:*)",
+
+      "Read(.env)",
+      "Read(.env.*)",
+      "Read(**/.env)",
+      "Read(**/secrets/**)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Read(/home/developer/.claude/**)",
+      "Read(/home/developer/.kube/**)"
+    ],
+
+    "ask": []
+  }
+}
