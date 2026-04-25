@@ -1,15 +1,19 @@
 ---
 document: 100-SPEC-ARCHITECTURE
-version: 9
+version: 11
 path: requirements/100-SPEC-ARCHITECTURE.md
 language: en
 status: draft
-derives-from: [D-002, D-003, D-007, D-008, D-010, D-011, D-012, D-013]
+derives-from: [D-002, D-003, D-007, D-008, D-010, D-011, D-012, D-013, D-014]
 ---
 
 # Architecture Specification — Platform Components & Contracts
 
 > **Purpose of this document.** Define the macro-level component decomposition of the platform, where each type of requirement lives, the contracts between components, the scaling model, and the deployment targets. This spec defines the **what** and the **why** of each component — concrete technology choices and implementation details belong to component-specific engineering work.
+
+> **Version 11 changes.** New **R-100-123** §5 (NFR): CI/CD pipeline contract — `push main` triggers `ci-tests.yml` (test wrapper + coherence wrapper, parallel jobs, both blocking, coverage gate enforced by `pyproject.toml`); `ci-build-images.yml` is gated on test success via `workflow_run` and publishes the `ay-api` image to GHCR (`ghcr.io/<owner>/aywizz-api`). Derives from D-014.
+
+> **Version 10 changes.** Host-published port scheme formalised (Q reposed by user). New **R-100-122** §10.7: a single `PORT_BASE` (default 56000) anchors a deterministic offset table — public ingress at BASE+0, dashboard at BASE+80, per-component direct (debug-only) at BASE+n*100, backends at BASE+1000+, test sidecars at BASE+9000+. Avoids collisions with universally-claimed 80/443/8080. **R-100-115** bumped to v2: still "exactly one public port in production", but the dev/test stack MAY publish additional slots from the documented ranges (mock-LLM admin, _observability, optional debug overrides) — explicitly marked as test infrastructure.
 
 > **Version 9 changes.** Phase-3 workflow envelope synthesiser shipped (Q-100-014 resolved). New module `ay_platform_core/_observability/synthesis.py` — pure functions `parse_span_summary`, `group_by_trace`, `synthesise_workflow`, `list_recent_traces`. New `GET /workflows/<trace_id>` and `GET /workflows?recent=N` endpoints on `_observability` (test-tier). Synthesis is **storage-agnostic**: local stack reads the in-memory ring buffer; K8s production will read from Loki / ES via the same algorithm (Q-100-015 tracks the adapter). Q-100-016 added for trace propagation into Kubernetes Jobs (C15 sub-agent runtime).
 
@@ -1079,6 +1083,28 @@ External source ingestion throughput SHALL be sufficient to process a typical 50
 
 **Rationale.** Establishes a user-observable performance expectation for the ingestion UX. Longer waits degrade the "upload and go back to work" experience.
 
+### R-100-123
+
+```yaml
+id: R-100-123
+version: 1
+status: approved
+category: nfr
+derives-from: [D-014, R-100-100, R-100-117]
+```
+
+The platform SHALL enforce a continuous-integration pipeline on every push to the default branch (`main`). The pipeline SHALL:
+
+1. **Test gate.** Invoke `ay_platform_core/scripts/run_tests.sh` and fail the run if any of: a unit/contract/integration test fails, the `--cov-fail-under` threshold (currently 80%, owned by `ay_platform_core/pyproject.toml`) is not met, or the test wrapper itself returns a non-zero exit code.
+2. **Coherence gate.** In parallel, invoke `ay_platform_core/scripts/run_coherence_checks.sh` and fail the run if any coherence check (spec↔code or code↔code) returns non-zero.
+3. **Reports.** Surface line-coverage percentage and pytest summary in the GitHub Actions job summary; upload `ay_platform_core/reports/latest/` as a build artifact retained for at least 14 days.
+4. **Image publication.** Build the API tier image from `infra/docker/Dockerfile.api` (per R-100-117) with the monorepo root as build context, and push to **GHCR** under `ghcr.io/<owner>/aywizz-api` with tags `:latest`, `:main`, and `:sha-<short>`. Image publication SHALL be gated on test-gate success — no `:latest` SHALL be advanced from a commit whose `ci-tests` run did not conclude successfully.
+5. **UI tier deferral.** When `infra/docker/Dockerfile.ui` exists, the same image-publication contract SHALL apply to `ghcr.io/<owner>/aywizz-ui`.
+
+**Rationale.** Codifies the supply-chain gate so the contract between "a green main commit" and "a publishable :latest image" is explicit and machine-checkable, rather than depending on the workflow YAML alone.
+
+**Non-goals.** This requirement does NOT cover deployment to staging or production (AKS), release tagging beyond `:latest` / `:sha-*`, or multi-arch builds. Those are deferred to a future deployment-focused spec push.
+
 ---
 
 ## 6. Interfaces & Contracts
@@ -1511,24 +1537,41 @@ is opt-in at the orchestration layer.
 
 ```yaml
 id: R-100-115
-version: 1
+version: 2
 status: approved
 category: security
 derives-from: [R-100-039]
 ```
 
-The platform docker-compose topology SHALL expose **exactly one
-public host port** — the one bound to C1 Traefik. All internal
-services are unreachable from the host network; operators access
-them only through the gateway. The single exception is test-only
-infrastructure (e.g. the mock-LLM admin port) which MAY publish
-additional ports explicitly marked as non-production.
+The platform topology SHALL expose **exactly one production-grade
+public host port** — the one bound to C1 Traefik (`PORT_C1_PUBLIC`,
+default 56000 per R-100-122). All internal services are unreachable
+from the host network; production clients access them only through
+the gateway.
 
-**Rationale.** A single ingress enforces the forward-auth chain
-(C2) and applies Traefik's cross-cutting middlewares (rate limit,
-secure headers, CORS) to every inter-component call originating
-from outside the cluster. Multiple public ports would create auth
-side-channels.
+The dev/test compose stack MAY publish **additional** host ports for
+test-only services, taken from the **test sidecar range**
+(`PORT_BASE + 9000..9999`) defined in R-100-122. The current set:
+
+- `PORT_C1_DASHBOARD` (Traefik dashboard, BASE+80) — local debug
+  only; production manifests SHALL NOT expose it.
+- `PORT_MOCK_LLM` (mock-LLM admin, BASE+9800) — test-tier per
+  R-100-116; absent in staging/production.
+- `PORT_OBSERVABILITY` (test-tier collector, BASE+9900) — per
+  R-100-121, never deployed in staging/production.
+
+A debug compose override MAY also publish per-component direct
+ports (`PORT_BASE + n*100`, n ∈ 1..9). These are local-developer
+conveniences only; the default compose does NOT publish them.
+
+**Rationale.** A single production ingress enforces the forward-auth
+chain (C2) and applies Traefik's cross-cutting middlewares (rate
+limit, secure headers, CORS) to every inter-component call
+originating from outside the cluster. Multiple public ports would
+create auth side-channels. The test-tier exception is bounded: an
+explicit, documented set of additional ports, all in a dedicated
+range, all marked test-only — and all forbidden from production
+manifests by R-100-121.
 
 #### R-100-116
 
@@ -1881,4 +1924,71 @@ Codifying the guard at three levels (manifests, CI, runtime) makes
 
 ---
 
-**End of 100-SPEC-ARCHITECTURE.md v9.**
+### 10.7 Host-published port scheme
+
+#### R-100-122
+
+```yaml
+id: R-100-122
+version: 1
+status: approved
+category: tooling
+derives-from: [R-100-110, R-100-115]
+```
+
+Every host-published port the platform's compose / K8s manifests
+expose SHALL follow the deterministic `PORT_BASE + offset` scheme
+defined below. `PORT_BASE` is operator-overridable via the env file
+(`PORT_BASE` declarative documentation only — Compose interpolation
+uses the per-slot vars, since YAML cannot perform arithmetic). The
+canonical value is **56000** (high range, away from the 0..49151
+well-known + registered range, away from the 80/443/3000/3306/5432/
+6379/8000/8080/8443/9000 universally-claimed dev ports).
+
+| Slot offset | Service / role | Default | Range owner |
+|---|---|---|---|
+| `+0`     | C1 Traefik public ingress (`PORT_C1_PUBLIC`)    | 56000 | production |
+| `+80`    | C1 Traefik dashboard (`PORT_C1_DASHBOARD`)      | 56080 | dev/test only |
+| `+n*100` (n ∈ 1..9) | Cn direct access — debug compose override only | 56100..56900 | dev/test only, NOT in default compose |
+| `+1000`  | C10 MinIO API                                   | 57000 | reserved (debug override) |
+| `+1001`  | C10 MinIO console                               | 57001 | reserved |
+| `+1100`  | C11 ArangoDB                                    | 57100 | reserved |
+| `+1200`  | C12 n8n                                         | 57200 | reserved |
+| `+1300`  | Ollama (C7's embedding helper, no Cn)           | 57300 | reserved |
+| `+9000..9999` | Test sidecars (R-100-121)                  | 59000..59999 | dev/test only |
+| `+9800`  | `_mock_llm` admin (`PORT_MOCK_LLM`) — "test C8" | 59800 | dev/test only |
+| `+9900`  | `_observability` (`PORT_OBSERVABILITY`)         | 59900 | dev/test only |
+
+**Naming for non-numbered components**:
+
+- **Backend dependencies without a Cn id** (Ollama, future Redis /
+  NATS / etc.) take a slot in the `+1000..+1999` range, assigned
+  contiguously and documented in this table on addition.
+- **Test sidecars** (any module with a leading underscore in its
+  Python module name — `_mock_llm`, `_observability`, future
+  `_*`) take a slot in the `+9000..+9999` range. The convention is
+  that the lower three digits mirror what the prod slot WOULD be
+  if the sidecar were the prod version: `_mock_llm` is "test C8" →
+  `+9800` (mirror of C8's `+800` slot).
+
+**Internal cluster ports unchanged.** Container-internal listen ports
+(uvicorn 8000, ArangoDB 8529, MinIO 9000, n8n 5678, Ollama 11434)
+remain at their image-default values. Each container has its own
+network namespace, so two services listening on `0.0.0.0:8000` do
+not collide. Compose / K8s DNS routes by `hostname:port`. The host
+port mapping is the only place collisions matter, and it is the
+only place this scheme applies.
+
+**Rationale.** Operators routinely run the dev stack on machines
+where 80, 443, 3000, 8000, 8080 are taken by other tooling
+(personal nginx, Skype, SonarQube, Jenkins, …). A high, parametrable
+`PORT_BASE` lets a single env var rotate every host port to a free
+range without editing the compose. The deterministic offset (n*100
+for components, 9000+ for test sidecars) makes any port memorisable
+from the component identifier — `c5` → 56500 even without consulting
+this table.
+
+
+---
+
+**End of 100-SPEC-ARCHITECTURE.md v10.**

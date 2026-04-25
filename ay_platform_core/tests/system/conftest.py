@@ -1,11 +1,12 @@
 # =============================================================================
 # File: conftest.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/tests/system/conftest.py
 # Description: Fixtures for the `system` test tier. Assumes the platform
 #              docker-compose stack is ALREADY running (use
 #              `ay_platform_core/scripts/e2e_stack.sh up && … seed` to
-#              bring it up). All tests hit Traefik on `http://localhost`
+#              bring it up). All tests hit Traefik on the host port
+#              published per R-100-122 — default `http://localhost:56000`
 #              (override via STACK_BASE_URL env var).
 # =============================================================================
 
@@ -21,20 +22,21 @@ import pytest_asyncio
 
 
 def _base_url() -> str:
-    return os.environ.get("STACK_BASE_URL", "http://localhost").rstrip("/")
+    return os.environ.get("STACK_BASE_URL", "http://localhost:56000").rstrip("/")
 
 
 def _mock_llm_admin_url() -> str | None:
     """Mock-LLM admin URL for per-test queue manipulation.
 
     The admin endpoint is NOT part of the Traefik public surface — it is
-    exclusively test infrastructure. `tests/docker-compose.yml` exposes the
-    mock service on host port 8001 so system tests running outside the
-    compose network can still script LLM responses. Override via
-    ``MOCK_LLM_ADMIN_URL`` when running pytest inside the network (in
-    which case you'd use http://mock_llm:8000).
+    exclusively test infrastructure. `tests/docker-compose.yml` exposes
+    the mock service on host port `${PORT_MOCK_LLM}` (default 59800,
+    R-100-122) so system tests running outside the compose network can
+    still script LLM responses. Override via ``MOCK_LLM_ADMIN_URL`` when
+    running pytest inside the network (in which case you'd use
+    http://mock_llm:8000).
     """
-    return os.environ.get("MOCK_LLM_ADMIN_URL", "http://localhost:8001")
+    return os.environ.get("MOCK_LLM_ADMIN_URL", "http://localhost:59800")
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -73,21 +75,32 @@ async def gateway_client(
         yield client
 
 
-@pytest_asyncio.fixture(scope="function")
-async def admin_token(gateway_client: httpx.AsyncClient) -> str:
-    """Obtain a token for the seeded admin user.
+@pytest_asyncio.fixture(scope="session")
+async def admin_token(stack_ready: None) -> str:
+    """Obtain a JWT for the bootstrap admin (alice / seed-password).
 
-    In AUTH_MODE=none, /auth/login accepts any credentials and issues a
-    token. In local/sso modes the system tests must be rerun with
-    AUTH_MODE aligned on the stack configuration.
+    **Session-scoped** so the suite issues a single `/auth/login` for
+    the whole run. C1 Traefik rate-limits `/auth/login` to 10 RPM per
+    source IP (R-100-039); function-scoped login from N tests blows
+    that budget and the rest of the suite gets 429s. Token TTL is
+    `C2_TOKEN_TTL_SECONDS` (default 3600s in `.env.test`), comfortably
+    longer than any local run.
+
+    The compose stack runs C2 in `local` auth mode. The C2 lifespan
+    bootstraps the admin user from `C2_LOCAL_ADMIN_USERNAME` /
+    `C2_LOCAL_ADMIN_PASSWORD` (defaults `alice` / `seed-password` in
+    `.env.test`); login with those credentials issues a JWT with
+    global role `admin`, which clears the project-scoped permission
+    checks the gateway applies downstream.
     """
-    resp = await gateway_client.post(
-        "/auth/login",
-        json={"username": "alice", "password": "seed-password"},
-    )
-    if resp.status_code != 200:
-        pytest.fail(f"/auth/login failed: {resp.status_code} {resp.text}")
-    return str(resp.json()["access_token"])
+    async with httpx.AsyncClient(base_url=_base_url(), timeout=10.0) as client:
+        resp = await client.post(
+            "/auth/login",
+            json={"username": "alice", "password": "seed-password"},
+        )
+        if resp.status_code != 200:
+            pytest.fail(f"/auth/login failed: {resp.status_code} {resp.text}")
+        return str(resp.json()["access_token"])
 
 
 @pytest_asyncio.fixture(scope="function")

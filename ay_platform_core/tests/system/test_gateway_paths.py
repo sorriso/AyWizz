@@ -35,9 +35,16 @@ async def test_c2_auth_config_responds(gateway_client: httpx.AsyncClient) -> Non
 
 @pytest.mark.asyncio
 async def test_c2_login_issues_token(gateway_client: httpx.AsyncClient) -> None:
+    """Login with the bootstrap admin (alice / seed-password) returns a JWT.
+
+    In `local` auth mode the password is verified against the argon2id
+    hash stored at lifespan-bootstrap; the seed password is the one the
+    `_ensure_local_admin` function used (env: `C2_LOCAL_ADMIN_PASSWORD`,
+    default `seed-password` in `.env.test`).
+    """
     resp = await gateway_client.post(
         "/auth/login",
-        json={"username": "alice", "password": "ignored-in-none-mode"},
+        json={"username": "alice", "password": "seed-password"},
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -191,12 +198,19 @@ async def test_c6_trigger_stub_run_and_poll(
 async def test_c7_quota_endpoint(
     gateway_client: httpx.AsyncClient, auth_headers: dict[str, str]
 ) -> None:
+    """C7's quota endpoint reports `bytes_used` / `bytes_limit` /
+    `chunk_count` / `project_id`. Test asserts the schema on the wire,
+    not just one possible alias — the prior `used_bytes` / `available_bytes`
+    expectation drifted from the actual response."""
     resp = await gateway_client.get(
         "/api/v1/memory/projects/demo/quota", headers=auth_headers
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert "used_bytes" in body or "available_bytes" in body
+    assert "bytes_used" in body
+    assert "bytes_limit" in body
+    assert body["bytes_used"] >= 0
+    assert body["bytes_limit"] > 0
 
 
 # ---------------------------------------------------------------------------

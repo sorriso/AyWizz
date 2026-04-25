@@ -35,7 +35,7 @@ MONOREPO_ROOT="$(cd "$AY_CORE/.." && pwd)"                # .../<monorepo>
 COMPOSE_FILE="$AY_CORE/tests/docker-compose.yml"
 ENV_FILE="$AY_CORE/tests/.env.test"
 
-STACK_BASE_URL="${STACK_BASE_URL:-http://localhost}"
+STACK_BASE_URL="${STACK_BASE_URL:-http://localhost:56000}"
 
 _require_docker() {
   if ! command -v docker >/dev/null 2>&1; then
@@ -51,8 +51,10 @@ cmd_up() {
   echo "    build ctx:    $MONOREPO_ROOT"
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --build
   echo "==> Stack is starting; services will report healthy shortly"
-  echo "    Traefik dashboard: http://localhost:8080"
-  echo "    Public API:        $STACK_BASE_URL"
+  echo "    Public API:        $STACK_BASE_URL          # R-100-122 BASE+0"
+  echo "    Traefik dashboard: http://localhost:56080   # R-100-122 BASE+80"
+  echo "    Mock-LLM admin:    http://localhost:59800   # R-100-122 BASE+9800 (test only)"
+  echo "    Observability:     http://localhost:59900   # R-100-122 BASE+9900 (test only)"
 }
 
 cmd_down() {
@@ -78,9 +80,14 @@ cmd_logs() {
 
 cmd_seed() {
   echo "==> Seeding test data via $STACK_BASE_URL"
+  # Invoke seed_e2e.py as a script (not via `python -m`) — `scripts/`
+  # is intentionally NOT a Python package (no __init__.py: it mixes
+  # bash + Python), so `python -m ay_platform_core.scripts.seed_e2e`
+  # raises ModuleNotFoundError. Direct script invocation is the
+  # contract.
   (cd "$AY_CORE" && \
     STACK_BASE_URL="$STACK_BASE_URL" \
-    python -m ay_platform_core.scripts.seed_e2e --base-url "$STACK_BASE_URL")
+    python scripts/seed_e2e.py --base-url "$STACK_BASE_URL")
 }
 
 cmd_system() {

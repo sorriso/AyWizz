@@ -47,6 +47,7 @@ from ay_platform_core.observability.context import (
     build_traceparent,
     new_trace_context,
     parse_traceparent,
+    set_auth_context,
     set_trace_context,
 )
 
@@ -87,6 +88,16 @@ class TraceContextMiddleware:
                 parent_span_id=inbound.span_id,
             )
         set_trace_context(ctx)
+
+        # Capture the auth context Traefik forward-auth injected (R-100-118).
+        # When a downstream component (e.g. C9 → C5) calls another via
+        # `make_traced_client`, the outbound httpx hook re-injects these
+        # so the next hop's auth guard sees the same identity.
+        set_auth_context(
+            user_id=_find_header(scope, b"x-user-id") or "",
+            user_roles=_find_header(scope, b"x-user-roles") or "",
+            tenant_id=_find_header(scope, b"x-tenant-id") or "",
+        )
 
         method = scope.get("method", "")
         # raw_path is bytes; decode lossily — log readability beats correctness.

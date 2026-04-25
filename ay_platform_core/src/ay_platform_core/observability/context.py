@@ -37,6 +37,13 @@ _trace_id_var: ContextVar[str] = ContextVar("ay_trace_id", default="")
 _span_id_var: ContextVar[str] = ContextVar("ay_span_id", default="")
 _parent_span_id_var: ContextVar[str] = ContextVar("ay_parent_span_id", default="")
 _tenant_id_var: ContextVar[str] = ContextVar("ay_tenant_id", default="")
+# Auth context (R-100-118) propagated by Traefik forward-auth into the
+# inbound request as X-User-Id / X-User-Roles. Components that fan out
+# to other components MUST forward these so the downstream's auth
+# guard sees the same identity (otherwise the downstream returns 401
+# "X-User-Id header missing").
+_user_id_var: ContextVar[str] = ContextVar("ay_user_id", default="")
+_user_roles_var: ContextVar[str] = ContextVar("ay_user_roles", default="")
 
 
 @dataclass(frozen=True)
@@ -132,6 +139,15 @@ def set_tenant_id(tenant_id: str) -> None:
     _tenant_id_var.set(tenant_id)
 
 
+def set_auth_context(*, user_id: str, user_roles: str, tenant_id: str) -> None:
+    """Set the auth context bundle (called by `TraceContextMiddleware` once
+    per inbound request after parsing X-User-Id / X-User-Roles /
+    X-Tenant-Id forwarded by Traefik forward-auth)."""
+    _user_id_var.set(user_id)
+    _user_roles_var.set(user_roles)
+    _tenant_id_var.set(tenant_id)
+
+
 def current_trace_id() -> str:
     """Empty string when no request scope is active."""
     return _trace_id_var.get()
@@ -148,6 +164,15 @@ def current_parent_span_id() -> str:
 
 def current_tenant_id() -> str:
     return _tenant_id_var.get()
+
+
+def current_user_id() -> str:
+    return _user_id_var.get()
+
+
+def current_user_roles() -> str:
+    """Comma-separated list of role names (matches the X-User-Roles header)."""
+    return _user_roles_var.get()
 
 
 def current_traceparent() -> str:

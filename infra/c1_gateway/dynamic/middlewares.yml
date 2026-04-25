@@ -36,10 +36,14 @@ http:
     forward-auth-c2:
       forwardAuth:
         address: "http://c2:8000/auth/verify"
+        # Traefik forwards ONLY headers listed here from C2's response into
+        # the request that reaches backend services. Backends that route on
+        # tenant_id (C7 quota, C5 per-project routes) require X-Tenant-Id.
         authResponseHeaders:
           - "X-User-Id"
           - "X-User-Roles"
           - "X-Platform-Auth-Mode"
+          - "X-Tenant-Id"
         trustForwardHeader: false
 
     # -------------------------------------------------------------------------

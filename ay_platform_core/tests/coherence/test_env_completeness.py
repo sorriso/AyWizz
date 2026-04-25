@@ -90,6 +90,14 @@ _INFRA_BOOTSTRAP_VARS: frozenset[str] = frozenset(
         "ARANGO_ROOT_USERNAME",
         "MINIO_ROOT_PASSWORD",
         "MINIO_ROOT_USER",
+        # Host-published port mapping (R-100-122). Consumed by Compose
+        # via ${VAR} substitution + by the n8n WEBHOOK_URL composition.
+        # No Pydantic Settings field reads them — Python services bind
+        # 0.0.0.0:8000 inside their container regardless of host mapping.
+        "PORT_C1_DASHBOARD",
+        "PORT_C1_PUBLIC",
+        "PORT_MOCK_LLM",
+        "PORT_OBSERVABILITY",
     }
 )
 

@@ -68,9 +68,16 @@ def _require_admin_or_tenant_admin(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/config", response_model=AuthConfigResponse)
+@router.api_route(
+    "/config", methods=["GET", "HEAD"], response_model=AuthConfigResponse
+)
 async def get_config(service: AuthService = Depends(get_service)) -> AuthConfigResponse:
-    """Return current auth mode. No authentication required."""
+    """Return current auth mode. No authentication required.
+
+    HEAD is supported for connectivity / liveness probes that don't
+    want a body — Starlette strips the body automatically when the
+    method is HEAD.
+    """
     return service.config_response()
 
 
@@ -103,10 +110,17 @@ async def verify(
     response: Response,
     claims: JWTClaims = Depends(_get_current_claims),
 ) -> JWTClaims:
-    """Verify bearer token, return parsed claims, and emit Traefik forward-auth headers."""
+    """Verify bearer token, return parsed claims, and emit Traefik forward-auth
+    headers — these are picked up by Traefik's forward-auth middleware and
+    injected into the request forwarded to backend services. Backends rely
+    on `X-User-Id`, `X-User-Roles`, AND `X-Tenant-Id` (some require all
+    three; missing `X-Tenant-Id` triggers 401 on tenant-scoped routes).
+    """
     response.headers["X-User-Id"] = claims.sub
     response.headers["X-User-Roles"] = ",".join(claims.roles)
     response.headers["X-Platform-Auth-Mode"] = claims.auth_mode
+    if claims.tenant_id:
+        response.headers["X-Tenant-Id"] = claims.tenant_id
     return claims
 
 

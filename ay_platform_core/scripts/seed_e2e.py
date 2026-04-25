@@ -36,7 +36,7 @@ from typing import Any
 
 import httpx
 
-DEFAULT_BASE_URL = "http://localhost"
+DEFAULT_BASE_URL = "http://localhost:56000"  # R-100-122 PORT_C1_PUBLIC
 # The mock-LLM admin endpoint is NOT routed through Traefik; it is reachable
 # only from inside the compose network or when the mock service is
 # temporarily exposed to the host for seeding.
@@ -115,11 +115,19 @@ async def wait_stack_ready(
 
 
 async def obtain_token(client: httpx.AsyncClient, base_url: str) -> str:
-    """In AUTH_MODE=none C2 issues a token for any credentials.
+    """Login as the bootstrap admin and return the issued JWT.
 
-    The seeder uses this token for calls that traverse forward-auth-c2.
-    In local/prod modes the seeder would read AUTH_ADMIN_USERNAME /
-    AUTH_ADMIN_PASSWORD from env vars.
+    The compose stack runs C2 in `local` auth mode (set in `.env.test`
+    via `C2_AUTH_MODE=local`). The C2 lifespan calls
+    `_ensure_local_admin()` which creates the user identified by
+    `C2_LOCAL_ADMIN_USERNAME` / `C2_LOCAL_ADMIN_PASSWORD` and grants
+    the global `admin` role.
+
+    The seeder logs in with the SAME username / password — both
+    default to `alice` / `seed-password`, matching the env file. The
+    resulting JWT carries `roles=[admin]`, which clears the
+    project-scoped permission checks (`requires one of:
+    project_editor, project_owner, admin`) downstream services apply.
     """
     resp = await client.post(
         f"{base_url}/auth/login",
@@ -171,6 +179,7 @@ async def ensure_memory_source(
         "mime_type": "text/plain",
         "content": "The platform validates seeded requirements through C6.",
         "size_bytes": 62,
+        "uploaded_by": ADMIN_USER,  # C7 requires explicit uploader attribution
     }
     resp = await client.post(
         f"{base_url}/api/v1/memory/projects/{DEMO_PROJECT}/sources",
@@ -246,13 +255,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--base-url",
         default=DEFAULT_BASE_URL,
-        help="Public Traefik URL (default: http://localhost)",
+        help="Public Traefik URL (default: http://localhost:56000 — R-100-122 PORT_C1_PUBLIC)",
     )
     parser.add_argument(
         "--mock-llm-url",
         default=None,
         help=(
-            "Mock-LLM admin URL (e.g. http://localhost:8001). Omit to skip "
+            "Mock-LLM admin URL (e.g. http://localhost:59800 — R-100-122 PORT_MOCK_LLM). Omit to skip "
             "LLM enqueue step. The mock-LLM admin endpoint is NOT public; "
             "it is only reachable from the compose network, or when the "
             "mock container is temporarily exposed for seeding."

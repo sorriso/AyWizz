@@ -1,0 +1,78 @@
+# Version: 1
+# Path: .github/workflows/ci-build-images.yml
+#
+# CI - build the API tier image (infra/docker/Dockerfile.api per
+# CLAUDE.md §4.5) and push it to GitHub Container Registry (GHCR).
+#
+# Triggered ONLY when ci-tests succeeds on main, so we never publish
+# :latest from a broken commit. The UI tier (infra/docker/Dockerfile.ui)
+# is not built here yet — it will be added when that scaffold lands.
+
+name: ci-build-images
+
+on:
+  workflow_run:
+    workflows: [ci-tests]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ci-build-images-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-api:
+    name: build & push api (GHCR)
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout (sha that triggered ci-tests)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Lowercase repository owner
+        # GHCR namespaces are case-sensitive and must be lowercase.
+        run: echo "OWNER_LC=${OWNER,,}" >> "$GITHUB_ENV"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ env.OWNER_LC }}/aywizz-api
+          tags: |
+            type=raw,value=latest
+            type=raw,value=main
+            type=sha,format=short,prefix=sha-
+
+      - name: Build and push api image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.api
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false

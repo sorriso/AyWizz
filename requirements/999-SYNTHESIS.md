@@ -1,6 +1,6 @@
 ---
 document: 999-SYNTHESIS
-version: 4
+version: 5
 path: requirements/999-SYNTHESIS.md
 language: en
 status: draft
@@ -11,6 +11,8 @@ status: draft
 > **Purpose of this document.** Anchor the cross-cutting decisions that constrain all detailed specs (`100`–`800`) and `meta/`. This is the single source of truth for platform-wide trade-offs. Detailed technical specifications live in their respective documents; this document holds the **why** and the **what**, not the **how**.
 
 > **Version 4 changes.** Clarification of `D-001` (bumped to `version: 2`): StrictDoc is adopted as a **tooling library** (validation, traceability matrices, export), not as the **native storage format**. The native storage format is Markdown with YAML frontmatter, already used by the delivered specs. This clarification resolves an ambiguity surfaced during the `300-SPEC-REQUIREMENTS-MGMT` design discussion; no other decision is impacted.
+
+> **Version 5 changes.** New `D-014`: CI/CD platform decision — GitHub Actions on `push` to `main` for the test/coherence pipeline + GHCR (`ghcr.io/<owner>/aywizz-api`) for the API image, with image publication gated on test success via `workflow_run`. Cross-cuts §5 by introducing the supply-chain decision that was implicit until now.
 
 ---
 
@@ -479,6 +481,33 @@ No new component is introduced. Parsing, chunking strategy, and schema details S
 - `500-SPEC-UI-UX.md` includes the upload UX (drag-and-drop, progress, error handling, source management).
 - RBAC extension: per-project source visibility and ownership, aligned with existing project roles (E-100-002).
 - Quotas: storage quota per project/tenant for external sources (deferred details to Q-100 / `400`).
+
+### D-014 — CI/CD platform: GitHub Actions + GHCR
+
+```yaml
+id: D-014
+version: 1
+status: approved
+category: tooling
+impacts: [R-100-100, R-100-117, R-100-123]
+```
+
+**Decision.** The platform's continuous integration and image publication SHALL run on **GitHub Actions** with images published to **GitHub Container Registry (GHCR)** under `ghcr.io/<owner>/aywizz-<tier>`.
+
+**Pipeline shape.**
+- `ci-tests.yml` triggered on `push` to `main`. Two parallel jobs: (a) `tests` — installs `ay_platform_core[all]`, invokes `ay_platform_core/scripts/run_tests.sh ci`, surfaces line-coverage and pytest summary in `$GITHUB_STEP_SUMMARY`, uploads `reports/latest/` as artifact, optionally publishes a coverage badge to a gist; (b) `coherence` — invokes `run_coherence_checks.sh`. Both jobs are blocking. The `--cov-fail-under=80` gate is enforced by `pyproject.toml` (R-100-123) — the workflow does not re-encode the threshold.
+- `ci-build-images.yml` triggered by `workflow_run` of `ci-tests` (`conclusion == 'success'`). Builds `infra/docker/Dockerfile.api` with the monorepo root as context (per CLAUDE.md §4.5) and pushes `:latest`, `:main`, and `:sha-<short>` tags. The future `Dockerfile.ui` will follow the same pattern.
+
+**Rationale.**
+- GitHub Actions and GHCR are integrated with the repository, eliminate third-party credentials, and run on free minutes for public repos.
+- Coupling image publication to test success via `workflow_run` keeps `:latest` from ever being published from a broken commit, without forcing a single-workflow design that would block the build job artificially.
+- The CI invokes the same wrappers (`run_tests.sh`, `run_coherence_checks.sh`) that local development uses, preserving the parity goal of the wrapper-script pattern (CLAUDE.md §5.3).
+
+**Consequences.**
+- New top-level `.github/workflows/` directory in the monorepo (the only legitimate exception to the top-level whitelist of CLAUDE.md §5.2, imposed by the GitHub Actions runtime).
+- A new non-functional requirement `R-100-123` in `100-SPEC-ARCHITECTURE.md` formalises the gate semantics and the image-naming convention.
+- Production deployment to AKS is **out of scope** for this decision — it requires Azure credentials and is deferred until a deployment push.
+- Coverage badge on the README depends on a one-time operator setup (gist + PAT in `secrets.GIST_SECRET` + gist id in `vars.COVERAGE_GIST_ID`). Until configured, the workflow status badges (native, zero-setup) are sufficient.
 
 ---
 

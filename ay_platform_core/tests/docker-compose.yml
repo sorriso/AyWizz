@@ -1,6 +1,6 @@
 # =============================================================================
 # File: docker-compose.yml
-# Version: 6
+# Version: 7
 # Path: ay_platform_core/tests/docker-compose.yml
 # Description: End-to-end local stack for system tests. Brings up:
 #                - ArangoDB (C11) and MinIO (C10)
@@ -12,7 +12,8 @@
 #                  N peer containers differing only by their
 #                  `COMPONENT_MODULE` runtime env var.
 #                - n8n (C12) for ingestion workflows.
-#                - C1 Traefik — the ONLY publicly exposed HTTP port (80).
+#                - C1 Traefik — the ONLY publicly exposed HTTP port
+#                  (`${PORT_C1_PUBLIC}`, default 56000 per R-100-122).
 #
 # Build context discipline:
 #   This file lives under ay_platform_core/tests/ but requires the MONOREPO
@@ -38,6 +39,14 @@
 #   real-llm      swap mock_llm for a real LiteLLM proxy (needs API keys)
 #
 # Versions:
+#   v7 (2026-04-25): host-published ports moved to the R-100-122 scheme
+#       (PORT_BASE=56000). C1 public 80→56000, C1 dashboard 8080→56080,
+#       mock_llm 8001→59800, _observability 8002→59900. Avoids collisions
+#       with the universally-used 80/8080 and the loose 800x dev ports.
+#       Internal cluster ports unchanged (Python services on 8000,
+#       arangodb on 8529, minio on 9000, etc.) — Docker namespace
+#       isolation makes per-component listen-port standardisation
+#       unnecessary.
 #   v6 (2026-04-25): explicit CPU/RAM limits + reservations on every
 #       long-running service (R-100-106 v2 + R-100-119). Aggregate
 #       budget ≤ 7 vCPU / 9 GB peak across all services, ≤ 4 vCPU /
@@ -378,17 +387,19 @@ services:
     environment:
       <<: *common-env
       COMPONENT_MODULE: _mock_llm
-    # Port 8001 on the host maps to the mock-LLM admin endpoints so system
-    # tests running on the host can script per-test LLM responses via
-    # POST /admin/enqueue and reset state via POST /admin/reset. This is
-    # TEST infrastructure — not part of the platform public surface.
+    # Host port `${PORT_MOCK_LLM}` (default 59800 per R-100-122) maps
+    # to the mock-LLM admin endpoints so system tests running on the
+    # host can script per-test LLM responses via POST /admin/enqueue
+    # and reset state via POST /admin/reset. TEST infrastructure —
+    # not part of the platform public surface.
     ports:
-      - "8001:8000"
+      - "${PORT_MOCK_LLM}:8000"
 
   # Test-tier log aggregator (R-100-120). Subscribes to live Docker log
   # streams from every `ay-*` container, buffers per service in a ring
   # buffer, and exposes /logs /errors /digest /clear endpoints on host
-  # port 8002 for the test harness. NOT routed via Traefik (test infra,
+  # port `${PORT_OBSERVABILITY}` (default 59900 per R-100-122) for the
+  # test harness. NOT routed via Traefik (test infra,
   # not public surface). Mounts the Docker socket READ-ONLY: the module
   # only calls `containers.list()` and `container.logs()`. Production
   # K8s manifests SHALL NOT deploy this service (R-100-121).
@@ -416,7 +427,7 @@ services:
       - *python-src-mount
       - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
-      - "8002:8000"
+      - "${PORT_OBSERVABILITY}:8000"
 
   # ---------------------------------------------------------------------------
   # API sub-tier — every Python backbone component. ONE image, N containers.
@@ -559,7 +570,9 @@ services:
     container_name: ay-c12-workflow
     environment:
       <<: *common-env
-      WEBHOOK_URL: "http://localhost/"
+      # Public URL n8n stamps onto its registered webhooks. Must match
+      # the host port Traefik publishes (`${PORT_C1_PUBLIC}`).
+      WEBHOOK_URL: "http://localhost:${PORT_C1_PUBLIC}/"
       N8N_ENDPOINT_WEBHOOK: "uploads"
       N8N_ENDPOINT_WEBHOOK_TEST: "uploads-test"
       N8N_SECURE_COOKIE: "false"
@@ -644,8 +657,8 @@ services:
     container_name: ay-c1-gateway
     restart: unless-stopped
     ports:
-      - "80:80"          # public platform entry point
-      - "8080:8080"      # Traefik dashboard (local dev only)
+      - "${PORT_C1_PUBLIC}:80"        # public platform entry point (R-100-122)
+      - "${PORT_C1_DASHBOARD}:8080"   # Traefik dashboard (local dev only)
     volumes:
       - ../../infra/c1_gateway/traefik.yml:/etc/traefik/traefik.yml:ro
       - ../../infra/c1_gateway/dynamic:/etc/traefik/dynamic:ro

@@ -1,6 +1,6 @@
 ---
 document: 050-ARCHITECTURE-OVERVIEW
-version: 3
+version: 4
 path: requirements/050-ARCHITECTURE-OVERVIEW.md
 language: en
 status: draft
@@ -252,7 +252,23 @@ e2e_stack.sh logs <s>  # tail one service's logs
 ```
 
 The wrapper passes `--env-file ay_platform_core/tests/.env.test` to
-every Compose invocation so the bootstrap-admin credentials resolve.
+every Compose invocation so the bootstrap-admin credentials AND the
+host-port scheme resolve.
+
+**Default host ports** (R-100-122, `PORT_BASE=56000`):
+
+| URL | Role |
+|---|---|
+| `http://localhost:56000` | Public API ingress (Traefik) — production-grade |
+| `http://localhost:56080` | Traefik dashboard — dev only |
+| `http://localhost:59800` | `_mock_llm` admin — test only |
+| `http://localhost:59900` | `_observability` (logs, traces, workflows) — test only |
+
+Deterministic offsets — `c5` direct (debug override) is **56500**,
+`c9` direct is **56900**. Cn → `BASE + n*100` is the rule; "test"
+sidecars take `BASE + 9000+`. Override `PORT_C1_PUBLIC` etc. in the
+env file when 56xxx collides on a specific operator's machine — the
+spec only requires the SCHEME to be respected, not the absolute base.
 
 ---
 
