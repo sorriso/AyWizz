@@ -33,6 +33,8 @@ from ay_platform_core.c5_requirements.models import (
     EntityPublic,
     EntityUpdate,
     HistoryListResponse,
+    ImportReport,
+    ImportRequest,
     ReindexJob,
     RelationListResponse,
     RelationType,
@@ -446,20 +448,32 @@ async def export_corpus(
 
 
 # ---------------------------------------------------------------------------
-# Import — still a stub (R-300-080 deferred)
+# Import — R-300-080 (md format, v1 scope). ReqIF still deferred.
 # ---------------------------------------------------------------------------
 
 
 @router.post(
     "/api/v1/projects/{project_id}/requirements/import",
-    response_model=None,
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
+    response_model=ImportReport,
+    status_code=status.HTTP_201_CREATED,
 )
 async def import_corpus(
-    project_id: str, _actor: str = Depends(_require_actor)
-) -> None:
-    _ = project_id
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="corpus import deferred to C5 v2 (R-300-080 roadmap)",
-    )
+    project_id: str,
+    payload: ImportRequest,
+    format: str = Query(default="md"),
+    actor: str = Depends(_require_actor),
+    x_user_roles: str | None = Header(default=None),
+    service: RequirementsService = Depends(get_service),
+) -> ImportReport:
+    # RBAC: writing to the corpus requires project_editor or project_owner.
+    _require_role(x_user_roles, required=("project_editor", "project_owner", "admin"))
+    if format != "md":
+        # ReqIF support is tracked as a v2 work item per R-300-080.
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=(
+                f"format={format!r} not implemented in v1 "
+                "(only 'md' is supported; ReqIF deferred)"
+            ),
+        )
+    return await service.import_corpus(project_id, payload, actor)

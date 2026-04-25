@@ -1,11 +1,18 @@
 # =============================================================================
 # Dockerfile for Ubuntu Dev Environment
-# Version: 1.6.0
+# Version: 1.7.0
 # Path: .devcontainer/Dockerfile
 # Description: Development container with Python 3.13, Node.js LTS, kubectl,
 #              Claude Code CLI. Python 3.13 installed via deadsnakes PPA.
 #
 # Versions:
+#   1.7.0: parameterise the build/runtime install path via the
+#          `LOCAL_WORKSPACE_FOLDER` build arg. devcontainer.json v5 aligns
+#          the bind-mount target with the host workspace path so that
+#          docker-outside-of-docker bind mounts in compose files resolve
+#          on the host daemon. The Dockerfile must use the SAME path for
+#          its build-time editable install so the `.pth` stays valid once
+#          the runtime mount comes up.
 #   1.6.0: install all ay_platform_core dependencies (main + [test] + [dev])
 #          from pyproject.toml at build time AGAINST the same path that is
 #          bind-mounted at runtime (`/workspace/ay_platform_core`). pip
@@ -20,7 +27,9 @@
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
+ARG LOCAL_WORKSPACE_FOLDER=/workspace
 FROM --platform=${TARGETOS}/${TARGETARCH} ubuntu:22.04
+ARG LOCAL_WORKSPACE_FOLDER=/workspace
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Europe/Paris
@@ -66,16 +75,17 @@ RUN npm install -g @anthropic-ai/claude-code \
 # ay_platform_core build-time install.
 # Build context is the monorepo root (see devcontainer.json `context: ".."`),
 # so we can COPY `ay_platform_core/` directly. The copy goes to the SAME
-# path that is bind-mounted at runtime (`/workspace/ay_platform_core`) so
-# the `.pth` file written by `pip install -e` keeps pointing to a valid
+# path that is bind-mounted at runtime (LOCAL_WORKSPACE_FOLDER, e.g.
+# `/Users/<user>/.../ay-monorepo` on macOS docker-outside-of-docker) so the
+# `.pth` file written by `pip install -e` keeps pointing to a valid
 # location after the mount — the directory CONTENTS change (build-time
-# snapshot → live host source), but `/workspace/ay_platform_core/src`
+# snapshot → live host source), but `${LOCAL_WORKSPACE_FOLDER}/ay_platform_core/src`
 # still resolves, and Python reads the live code.
 # Installs: main `dependencies` + [test] + [dev] via the `all` extra.
 # -----------------------------------------------------------------------------
-COPY ay_platform_core/pyproject.toml /workspace/ay_platform_core/pyproject.toml
-COPY ay_platform_core/src /workspace/ay_platform_core/src
-RUN python3.13 -m pip install --no-cache-dir -e '/workspace/ay_platform_core[all]'
+COPY ay_platform_core/pyproject.toml ${LOCAL_WORKSPACE_FOLDER}/ay_platform_core/pyproject.toml
+COPY ay_platform_core/src ${LOCAL_WORKSPACE_FOLDER}/ay_platform_core/src
+RUN python3.13 -m pip install --no-cache-dir -e "${LOCAL_WORKSPACE_FOLDER}/ay_platform_core[all]"
 
 # Docker group (GID will be re-aligned at container start by postCreateCommand)
 RUN getent group docker || groupadd -g 999 docker
@@ -87,6 +97,6 @@ RUN useradd -m -s /bin/bash developer \
  && echo "developer ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
 USER developer
-WORKDIR /workspace
+WORKDIR ${LOCAL_WORKSPACE_FOLDER}
 
 CMD ["/bin/bash"]

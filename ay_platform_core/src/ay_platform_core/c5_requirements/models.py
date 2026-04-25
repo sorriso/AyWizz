@@ -318,6 +318,62 @@ class DocumentReplace(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Bulk import (R-300-080..083)
+# ---------------------------------------------------------------------------
+
+
+class ImportConflictMode(StrEnum):
+    """Behaviour when an incoming document or entity already exists."""
+
+    FAIL = "fail"
+    REPLACE = "replace"
+
+
+class ImportDocument(BaseModel):
+    """One document in an import package — raw Markdown + YAML body."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    slug: str
+    content: str
+
+    @field_validator("slug")
+    @classmethod
+    def _validate_slug(cls, v: str) -> str:
+        if not _DOCUMENT_SLUG.match(v):
+            raise ValueError(f"invalid document slug: {v!r}")
+        return v
+
+
+class ImportRequest(BaseModel):
+    """POST /api/v1/projects/{pid}/requirements/import body (format=md)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    documents: list[ImportDocument] = Field(min_length=1)
+    on_conflict: ImportConflictMode = ImportConflictMode.FAIL
+
+
+class ImportSummary(BaseModel):
+    """Counts surface in the response for quick diagnostics."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    documents: int
+    entities: int
+
+
+class ImportReport(BaseModel):
+    """Response body for a successful import."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    imported_documents: list[str]
+    imported_entities: list[str]
+    summary: ImportSummary
+
+
+# ---------------------------------------------------------------------------
 # History, tailoring, reindex, import/export (mostly stub surfaces in v1)
 # ---------------------------------------------------------------------------
 

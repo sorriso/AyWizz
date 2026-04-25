@@ -103,6 +103,49 @@ services:
       start_period: 5s
 
   # ---------------------------------------------------------------------------
+  # Ollama — real embedding provider used by C7. Chat completions stay on
+  # the mock LLM below; only embeddings go through Ollama so C7's vectors
+  # are semantically meaningful end-to-end without spending on hosted APIs.
+  # Models are cached on the ollama_data volume across compose up/down.
+  # ---------------------------------------------------------------------------
+
+  ollama:
+    image: ollama/ollama:0.5.4
+    container_name: ay-ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - platform
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/ || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 40
+      start_period: 10s
+
+  # One-shot: pull the embedding model once Ollama is healthy. Idempotent;
+  # subsequent `compose up` cycles skip the download thanks to ollama_data.
+  ollama_model_seed:
+    image: ollama/ollama:0.5.4
+    container_name: ay-ollama-seed
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: "http://ollama:11434"
+    entrypoint:
+      - "/bin/sh"
+      - "-c"
+      - |
+        set -e
+        echo "Pulling embedding model all-minilm"
+        ollama pull all-minilm
+        echo "Seed done."
+    networks:
+      - platform
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
   # Mock LLM (default profile) — stand-in for C8 in tests without real keys
   # ---------------------------------------------------------------------------
 
@@ -276,6 +319,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      ollama_model_seed:
+        condition: service_completed_successfully
     networks:
       - platform
 
@@ -434,3 +479,4 @@ volumes:
   arangodb_data:
   minio_data:
   c12_data:
+  ollama_data:

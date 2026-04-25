@@ -75,9 +75,11 @@ async def test_ingested_source_rows_land_in_arango(
     assert row["chunk_count"] == source.chunk_count
     assert row["uploaded_by"] == "alice"
     assert row["mime_type"] == "text/plain"
-    # The model_id recorded in the source row SHALL match the fixture's
-    # deterministic embedder.
-    assert row["model_id"].startswith("deterministic-hash")
+    # The model_id recorded in the source row SHALL match the active
+    # embedder reported by the service. With Ollama it's the pulled
+    # model id (e.g. "all-minilm"); with the deterministic baseline it
+    # starts with "deterministic-hash".
+    assert row["model_id"] == c7_service._embedder.model_id
 
     # --- memory_chunks rows: count matches + vector dimension + content hash ---
     cursor = db.aql.execute(
@@ -94,10 +96,10 @@ async def test_ingested_source_rows_land_in_arango(
         f"memory_chunks count {len(chunks)} disagrees with source.chunk_count "
         f"{source.chunk_count}"
     )
+    expected_dim = c7_service._embedder.dimension
     for c in chunks:
-        # The fixture's DeterministicHashEmbedder uses dimension=64.
-        assert len(c["vector"]) == 64, (
-            f"vector dimension drift: {len(c['vector'])} != 64"
+        assert len(c["vector"]) == expected_dim, (
+            f"vector dimension drift: {len(c['vector'])} != {expected_dim}"
         )
         expected_hash = "sha256:" + hashlib.sha256(c["content"].encode("utf-8")).hexdigest()
         assert c["content_hash"] == expected_hash, (

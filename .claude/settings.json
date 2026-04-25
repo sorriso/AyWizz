@@ -1,5 +1,5 @@
 {
-  "_comment_header": "File: .claude/settings.json | Version: 5 | Path: .claude/settings.json | Claude Code permissions for the ay_monorepo. Evaluation order: deny > ask > allow. v5 adds: e2e_stack.sh wrapper (4 forms). docker compose remains denied; the wrapper script encapsulates the intent.",
+  "_comment_header": "File: .claude/settings.json | Version: 7 | Path: .claude/settings.json | Claude Code permissions for the ay_monorepo. Evaluation order: deny > ask > allow. v7 adds 3 belt-and-braces entries for the `./ay_platform_core/scripts/X` path form (hybrid form observed in Claude Code VS Code runs when the 'Always allow' option is unavailable). The canonical forms remain per CLAUDE.md v15 §5.7; these extra entries are a safety net, not the primary path Claude should use.",
 
   "permissions": {
     "allow": [
@@ -8,14 +8,17 @@
       "Bash(mypy:*)",
       "Bash(./scripts/run_tests.sh:*)",
       "Bash(ay_platform_core/scripts/run_tests.sh:*)",
+      "Bash(./ay_platform_core/scripts/run_tests.sh:*)",
       "Bash(bash scripts/run_tests.sh:*)",
       "Bash(bash ay_platform_core/scripts/run_tests.sh:*)",
       "Bash(./scripts/run_coherence_checks.sh:*)",
       "Bash(ay_platform_core/scripts/run_coherence_checks.sh:*)",
+      "Bash(./ay_platform_core/scripts/run_coherence_checks.sh:*)",
       "Bash(bash scripts/run_coherence_checks.sh:*)",
       "Bash(bash ay_platform_core/scripts/run_coherence_checks.sh:*)",
       "Bash(./scripts/e2e_stack.sh:*)",
       "Bash(ay_platform_core/scripts/e2e_stack.sh:*)",
+      "Bash(./ay_platform_core/scripts/e2e_stack.sh:*)",
       "Bash(bash scripts/e2e_stack.sh:*)",
       "Bash(bash ay_platform_core/scripts/e2e_stack.sh:*)",
 
@@ -50,6 +53,7 @@
       "Bash(echo:*)",
       "Bash(env)",
       "Bash(env | grep:*)",
+      "Bash(export:*)",
       "Bash(which:*)",
       "Bash(date)",
       "Bash(whoami)",
@@ -130,8 +134,15 @@
       "Bash(wget:*)",
 
       "Read(.env)",
-      "Read(.env.*)",
       "Read(**/.env)",
+      "Read(.env.local)",
+      "Read(**/.env.local)",
+      "Read(.env.prod)",
+      "Read(**/.env.prod)",
+      "Read(.env.production)",
+      "Read(**/.env.production)",
+      "Read(.env.secret)",
+      "Read(**/.env.secret)",
       "Read(**/secrets/**)",
       "Read(**/*.pem)",
       "Read(**/*.key)",

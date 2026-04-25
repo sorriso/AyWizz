@@ -68,6 +68,11 @@ from ay_platform_core.c5_requirements.models import (
     EntityType,
     EntityUpdate,
     HistoryEntry,
+    ImportConflictMode,
+    ImportDocument,
+    ImportReport,
+    ImportRequest,
+    ImportSummary,
     ReindexJob,
     ReindexJobStatus,
     RelationEdge,
@@ -256,6 +261,105 @@ class RequirementsService:
         await self._publish(
             project_id, f"requirements.{project_id}.document.deleted",
             {"slug": slug, "actor": actor_id},
+        )
+
+    # ------------------------------------------------------------------
+    # Bulk import (R-300-080..083)
+    # ------------------------------------------------------------------
+
+    async def import_corpus(
+        self,
+        project_id: str,
+        payload: ImportRequest,
+        actor_id: str,
+    ) -> ImportReport:
+        """Bulk import a set of `.md` documents into the project.
+
+        Implements R-300-080..083 for the `md` format. `reqif` is a
+        separate v2 work item (endpoint returns 501 with `format=reqif`).
+
+        Atomicity: validation happens up-front over the whole batch. If
+        any document fails validation or triggers a conflict in `fail`
+        mode, NO writes are performed. Once the pre-checks pass, writes
+        are issued sequentially; a partial-write failure surfaces as a
+        500 with the already-committed slugs listed for operator triage.
+        """
+        # --- Phase 1: parse + validate every document in isolation ---
+        parsed_docs: list[tuple[ImportDocument, Any, list[Any]]] = []
+        all_issues: list[str] = []
+        for doc in payload.documents:
+            try:
+                fm, body = parse_document(doc.content)
+                parsed_entities = parse_entities(body)
+            except AdapterError as exc:
+                all_issues.append(f"{doc.slug}: parse failed — {exc}")
+                continue
+            if fm.document != doc.slug:
+                all_issues.append(
+                    f"{doc.slug}: frontmatter document={fm.document!r} does not match payload slug"
+                )
+                continue
+            parsed_docs.append((doc, fm, parsed_entities))
+
+        if all_issues:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={"validation_errors": all_issues},
+            )
+
+        # --- Phase 2: conflict check against existing corpus ---
+        conflicts: list[str] = []
+        for doc, _, _ in parsed_docs:
+            existing = await self._repo.get_document(project_id, doc.slug)
+            if existing is not None and payload.on_conflict == ImportConflictMode.FAIL:
+                conflicts.append(doc.slug)
+        if conflicts and payload.on_conflict == ImportConflictMode.FAIL:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "conflicts": conflicts,
+                    "hint": "Re-submit with on_conflict=replace to overwrite",
+                },
+            )
+
+        # --- Phase 3: write sequentially ---
+        imported_docs: list[str] = []
+        imported_entities: list[str] = []
+        for doc, _fm, parsed_entities in parsed_docs:
+            if_match_etag: str | None = None
+            if payload.on_conflict == ImportConflictMode.REPLACE:
+                existing = await self._repo.get_document(project_id, doc.slug)
+                if existing is not None:
+                    # Pin the current version; replace_document increments it.
+                    if_match_etag = f'"{doc.slug}@v{existing["version"]}"'
+            try:
+                await self._persist_document(
+                    project_id=project_id,
+                    slug=doc.slug,
+                    raw_content=doc.content,
+                    actor_id=actor_id,
+                    if_match=if_match_etag,
+                )
+            except HTTPException:
+                # Partial-write abort: surface what landed before the failure.
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail={
+                        "partially_imported_documents": imported_docs,
+                        "partially_imported_entities": imported_entities,
+                        "failed_slug": doc.slug,
+                    },
+                ) from None
+            imported_docs.append(doc.slug)
+            imported_entities.extend(e.frontmatter.id for e in parsed_entities)
+
+        return ImportReport(
+            imported_documents=imported_docs,
+            imported_entities=imported_entities,
+            summary=ImportSummary(
+                documents=len(imported_docs),
+                entities=len(imported_entities),
+            ),
         )
 
     # ------------------------------------------------------------------

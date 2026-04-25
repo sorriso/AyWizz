@@ -1,27 +1,39 @@
 # =============================================================================
 # File: conftest.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/tests/integration/c7_memory/conftest.py
-# Description: Fixtures for C7 integration tests. Real ArangoDB via
-#              testcontainers, real deterministic embedder (no ML dep), C7
-#              service wired in-process.
+# Description: Fixtures for C7 integration tests.
+#              v2: default embedder flipped from DeterministicHashEmbedder
+#              to the real OllamaEmbedder (per radical option ratified
+#              2026-04-24 — platform is multi-LLM and we test the real
+#              adapter that production uses). Tests that genuinely need
+#              deterministic vectors opt in via `c7_deterministic_embedder`.
+#              Model: all-minilm (384-dim); pulled once at session start
+#              by the `ollama_container` fixture.
 # =============================================================================
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 
 import pytest
+import pytest_asyncio
 from arango import ArangoClient  # type: ignore[attr-defined]
 from fastapi import FastAPI
 
 from ay_platform_core.c7_memory.config import MemoryConfig
 from ay_platform_core.c7_memory.db.repository import MemoryRepository
+from ay_platform_core.c7_memory.embedding.base import EmbeddingProvider
 from ay_platform_core.c7_memory.embedding.deterministic import DeterministicHashEmbedder
+from ay_platform_core.c7_memory.embedding.ollama import OllamaEmbedder
 from ay_platform_core.c7_memory.router import router
 from ay_platform_core.c7_memory.service import MemoryService
-from tests.fixtures.containers import ArangoEndpoint, cleanup_arango_database
+from tests.fixtures.containers import (
+    ArangoEndpoint,
+    OllamaEndpoint,
+    cleanup_arango_database,
+)
 
 
 @pytest.fixture(scope="function")
@@ -39,18 +51,47 @@ def c7_repo(arango_container: ArangoEndpoint) -> Iterator[MemoryRepository]:
         cleanup_arango_database(arango_container, db_name)
 
 
+@pytest_asyncio.fixture(scope="function")
+async def c7_embedder(
+    ollama_container: OllamaEndpoint,
+) -> AsyncIterator[EmbeddingProvider]:
+    """Default embedder for C7 integration tests: real Ollama (all-minilm).
+
+    The dimension is probed on first call and cached on the embedder
+    instance. Tests that need deterministic vectors instead SHALL depend
+    on `c7_deterministic_embedder` (opt-in).
+    """
+    embedder = OllamaEmbedder(
+        base_url=ollama_container.base_url,
+        model_id=ollama_container.embed_model_id,
+    )
+    # Probe dimension so downstream fixtures can read embedder.dimension.
+    await embedder.embed_one("fixture-warmup")
+    try:
+        yield embedder
+    finally:
+        await embedder.aclose()
+
+
 @pytest.fixture(scope="function")
-def c7_embedder() -> DeterministicHashEmbedder:
+def c7_deterministic_embedder() -> DeterministicHashEmbedder:
+    """Opt-in reproducible embedder for tests that assert on specific
+    vector properties. Kept for regression coverage of the hash-based
+    baseline."""
     return DeterministicHashEmbedder(dimension=64)
 
 
-@pytest.fixture(scope="function")
-def c7_config() -> MemoryConfig:
+@pytest_asyncio.fixture(scope="function")
+async def c7_config(c7_embedder: EmbeddingProvider) -> MemoryConfig:
+    """Config aligned with the real embedder's dimension. `c7_embedder`
+    has already probed Ollama, so `embedder.dimension` is accurate."""
     return MemoryConfig(
-        embedding_dimension=64,
+        embedding_adapter="ollama",
+        embedding_model_id=c7_embedder.model_id,
+        embedding_dimension=c7_embedder.dimension,
         chunk_token_size=20,
         chunk_overlap=4,
-        default_quota_bytes=1024 * 1024,  # 1 MiB for tests
+        default_quota_bytes=1024 * 1024,
         retrieval_scan_cap=1000,
     )
 
@@ -59,7 +100,7 @@ def c7_config() -> MemoryConfig:
 def c7_service(
     c7_config: MemoryConfig,
     c7_repo: MemoryRepository,
-    c7_embedder: DeterministicHashEmbedder,
+    c7_embedder: EmbeddingProvider,
 ) -> MemoryService:
     return MemoryService(config=c7_config, repo=c7_repo, embedder=c7_embedder)
 

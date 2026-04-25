@@ -1,31 +1,41 @@
 // =============================================================================
 // VS Code Dev Container Configuration
-// Version: 4
+// Version: 5
 // Path: .devcontainer/devcontainer.json
 // Description: Dev container for Python/K8s development with Claude Code.
-// v4: postCreateCommand simplified — no more ay_platform_core re-install.
-//     Dockerfile v1.6.0 installs editable directly at /workspace/..., so
-//     the .pth file is already correct when the bind mount comes up.
+// v5: align the bind-mount target with the host source path
+//     (`${localWorkspaceFolder}`). With docker-outside-of-docker, compose
+//     bind-mount sources resolved inside the devcontainer must also exist
+//     on the host docker daemon — keeping the path identical on both sides
+//     makes relative-path mounts in `tests/docker-compose.yml` work direct.
+//     The Dockerfile (v1.7.0) receives the same path via the
+//     `LOCAL_WORKSPACE_FOLDER` build arg so the editable install's `.pth`
+//     stays valid after the mount.
 // =============================================================================
 {
   "name": "Ubuntu Dev Environment",
   "build": {
     "dockerfile": "Dockerfile",
     "context": "..",
-    "args": { "TARGETOS": "linux", "TARGETARCH": "amd64" }
+    "args": {
+      "TARGETOS": "linux",
+      "TARGETARCH": "amd64",
+      "LOCAL_WORKSPACE_FOLDER": "${localWorkspaceFolder}"
+    }
   },
   "features": {
     "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
   },
   "mounts": [
-    // Workspace bind
-    "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+    // Workspace bind — target == source so docker-outside-of-docker bind
+    // mounts in tests/docker-compose.yml resolve to a real host path.
+    "source=${localWorkspaceFolder},target=${localWorkspaceFolder},type=bind,consistency=cached",
     // Host kube config (read-only; copied to a writable location in postStartCommand)
     "source=${localEnv:HOME}/.kube,target=/tmp/host-kube,type=bind,consistency=cached,readonly",
     // Claude Code auth persistence (shared with host Claude Code)
     "source=${localEnv:HOME}/.claude,target=/home/developer/.claude,type=bind,consistency=cached"
   ],
-  "workspaceFolder": "/workspace",
+  "workspaceFolder": "${localWorkspaceFolder}",
   "runArgs": ["--init", "--privileged=false", "--platform=linux/amd64"],
 
   "containerEnv": {

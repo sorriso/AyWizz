@@ -330,12 +330,7 @@ async def test_write_without_role_returns_403(c5_app: FastAPI) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_import_still_deferred_to_v2(c5_app: FastAPI) -> None:
-    async with _client(c5_app) as client:
-        resp = await client.post(
-            "/api/v1/projects/demo/requirements/import",
-            headers=_ACTOR_HEADERS,
-        )
-    assert resp.status_code == 501
-    assert "R-300-080" in resp.json()["detail"]
+# The "import is deferred" assertion used to live here. It was removed
+# when R-300-080 was implemented in v1.5; see
+# `tests/integration/c5_requirements/test_import.py` for the real
+# behaviour coverage.

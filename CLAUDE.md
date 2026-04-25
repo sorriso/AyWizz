@@ -1,6 +1,6 @@
 <!-- =============================================================================
 File: CLAUDE.md
-Version: 13
+Version: 15
 Path: CLAUDE.md
 Description: Operating instructions for Claude Code in this monorepo.
              Read at session start. Keep dense - every line costs tokens.
@@ -187,6 +187,57 @@ monorepo root, in the comment syntax native to the file format:
 `#` for YAML/shell/Dockerfile, `//` for JSON with comments if
 applicable).
 
+### 4.6 Environment files discipline
+
+Environment files (`.env*`) follow a clear sensitivity gradient.
+Claude's read/edit permissions and behavioural rules differ by tier.
+
+**Tier 1 — Versioned, non-secret (editable by Claude via Edit tool)**:
+- `.env.test`, `.env.dev`, `.env.development`, `.env.example`,
+  `.env.template`.
+- These files are committed to git and SHALL NOT contain real
+  secrets. Test keys, dummy tokens, placeholder URLs are fine;
+  production-grade API keys are NOT.
+- Claude MAY read and edit these via `Edit` / `str_replace` (diff
+  review in VS Code before accept).
+
+**Tier 2 — Sensitive, denied**:
+- `.env` (root / production), `.env.local` (developer personal),
+  `.env.prod`, `.env.production`, `.env.secret`.
+- These are denied for read in `.claude/settings.json`. Claude
+  cannot read, cannot edit, cannot create. Any legitimate need to
+  touch these is a task for the user, not for Claude.
+
+**Behavioural rules**:
+
+- **No secrets in Tier 1 files**. If a variable requires a real
+  credential (API key, token, password), Claude SHALL use a
+  placeholder like `REPLACE_ME`, `changeme-for-prod`, or a
+  deterministic test value. Real credentials go to Tier 2 files,
+  authored by the user.
+- **No edits via shell**. Per §5.2, `.env*` edits SHALL go through
+  Claude Code's native Edit / `str_replace` tool, not via `sed -i`,
+  `python heredoc`, `echo >>`, or any other in-place shell write.
+  The diff must be visible in VS Code before acceptance.
+- **Semantic changes are architectural decisions**. A change to a
+  Tier 1 `.env*` file that alters **test or runtime semantics**
+  (switching adapters, changing model IDs, enabling/disabling
+  features, toggling backends) is NOT a config tweak. It counts
+  as an architectural decision and SHALL:
+  1. Be proposed to the user with rationale before application.
+  2. Be traced as a §3 entry in `SESSION-STATE.md`.
+  3. If it contradicts a spec or prior decision, trigger §8.1 (spec
+     gap handling) before proceeding.
+
+Typical non-semantic changes (no decision gate): adding a new
+variable with a placeholder, adjusting a port number to match a
+renamed service, correcting a typo in a variable name.
+
+Typical semantic changes (decision gate applies): switching
+`C7_EMBEDDING_ADAPTER` from `deterministic-hash` to `ollama`,
+changing `C8_LLM_PROVIDER` from `mock` to `anthropic`, enabling
+`C2_SSO_ENABLED=true`.
+
 ---
 
 ## 5. Claude Code Workflow in This Repo
@@ -261,9 +312,13 @@ allowlisted entry point; the inner call to the destructive tool is
 **not** matched by Claude Code (it runs as a sub-process of the
 wrapper). This keeps intent explicit and auditable while still
 permitting automation. New wrappers SHALL be added to
-`.claude/settings.json` allow-list via the standard 4 forms
-(`./scripts/X`, `ay_platform_core/scripts/X`, `bash scripts/X`,
-`bash ay_platform_core/scripts/X`).
+`.claude/settings.json` allow-list via the standard 5 forms:
+- `./scripts/X` (from `ay_platform_core/`, canonical per §5.7)
+- `ay_platform_core/scripts/X` (from monorepo root, canonical per §5.7)
+- `./ay_platform_core/scripts/X` (hybrid form, safety net only —
+  Claude SHALL prefer the two canonical forms above)
+- `bash scripts/X` (from `ay_platform_core/`)
+- `bash ay_platform_core/scripts/X` (from monorepo root)
 
 ### 5.4 Expected interaction pattern
 1. User states goal.
@@ -321,6 +376,20 @@ matchable form:
 - **Prefer absolute simplicity over cleverness.** A plain
   `python -m pytest tests/unit/c2_auth/ -v` is preferred over any
   variation that adds shell machinery "for convenience".
+- **Canonical path forms for wrapper scripts.** Wrapper scripts
+  under `ay_platform_core/scripts/` SHALL be invoked in one of
+  the two canonical forms matching the allow-list:
+  - From the **monorepo root** (most common cwd): write
+    `ay_platform_core/scripts/X.sh ...` — no leading `./`.
+  - From inside **`ay_platform_core/`**: write
+    `./scripts/X.sh ...`.
+  The **hybrid form** `./ay_platform_core/scripts/X.sh` (leading
+  `./` combined with a sub-project-qualified path) is a known
+  matcher pitfall — the VS Code matcher does not normalise the
+  leading `./` and the pattern fails to match. `.claude/settings.json`
+  v7 contains belt-and-braces entries for this hybrid form as a
+  safety net, but Claude SHALL NOT rely on them. Pick a cwd,
+  use the canonical form.
 
 This discipline is a **workaround** for a known Claude Code VS Code
 limitation, not a preference. When the matcher is fixed upstream, this
@@ -787,4 +856,4 @@ a spec gap (C: stop, clarify), or an intentional non-behaviour
 
 ---
 
-*End of `CLAUDE.md` v13.*
+*End of `CLAUDE.md` v15.*

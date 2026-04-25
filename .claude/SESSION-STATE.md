@@ -1,6 +1,6 @@
 <!-- =============================================================================
 File: SESSION-STATE.md
-Version: 17
+Version: 19
 Path: .claude/SESSION-STATE.md
 Description: Current project state. Single source of truth for "where are we".
              Updated in place at the end of each significant session.
@@ -10,7 +10,7 @@ Discipline: this file SHALL NOT exceed 150 lines.
             When approaching the limit, archive the outdated portions into
             a new .claude/sessions/YYYY-MM-DD-<slug>.md entry and trim here.
 
-Autonomous write policy: per CLAUDE.md v13 §9.1, Claude MAY write this
+Autonomous write policy: per CLAUDE.md v15 §9.1, Claude MAY write this
             file autonomously only for trivial deltas (date bump,
             §6 archive append, cosmetic fixes). All other changes
             require explicit user validation of the diff.
@@ -18,7 +18,7 @@ Autonomous write policy: per CLAUDE.md v13 §9.1, Claude MAY write this
 
 # Project State — ay_monorepo
 
-**Last updated:** 2026-04-24 (requirements corpus status refresh — CHANGELOG rewrite, 100-SPEC §10 Configuration & Deployment +7 entities, meta/100-SPEC §13 Test Tier Topology +10 entities; 728 tests, coverage 90.90%)
+**Last updated:** 2026-04-24 (wrapper script path forms: CLAUDE.md v14→v15 §5.7 canonical path rule + §5.3 5-forms convention; settings v6→v7 adds 3 `./ay_platform_core/scripts/X` safety-net entries. Prior v18: env files discipline §4.6. Prior v17: Ollama default embedder, C5 import R-300-080, ay_platform_ui/ scaffold, traceability back-fill; 739 tests, coverage 90.75%, 125 distinct entity refs in src/.)
 
 ---
 
@@ -40,7 +40,7 @@ Autonomous write policy: per CLAUDE.md v13 §9.1, Claude MAY write this
 - **Deployable stack**: shared Dockerfile (`infra/docker/Dockerfile.python-service`) + compose (`ay_platform_core/tests/docker-compose.yml`, 12 services including n8n/C12) + mock LLM (`_mock_llm`) + seeder (`ay_platform_core/scripts/seed_e2e.py`) + `tests/system/` tier + helper (`ay_platform_core/scripts/e2e_stack.sh`).
 - C12 Workflow Engine: **DEPLOYED** — n8n 1.74 in compose, routed via Traefik `/uploads/*`, webhook endpoint prefix set to `uploads`. Workflow seeding is manual (user imports via `docker compose exec c12 n8n import:workflow`).
 
-**Governance**: `CLAUDE.md` v13 (behaviour, conventions, permissions, spec-driven gen, session tracking, test debugging §10, matcher-friendly shell §5.7, `infra/` top-level §4.5, coverage discipline §11, `sed -i` ban §5.2, e2e test category §8.2, wrapper-script pattern §5.3). `.claude/settings.json` v5 (`sed -i`/`--in-place` denied, `sed -n` allowed, `docker compose` denied; `e2e_stack.sh` wrapper allowed). `ay_platform_core/pyproject.toml` v6.
+**Governance**: `CLAUDE.md` v15 (behaviour, conventions, permissions, spec-driven gen, session tracking, test debugging §10, matcher-friendly shell §5.7 + **canonical wrapper path forms**, `infra/` top-level §4.5, env files discipline §4.6, coverage discipline §11, `sed -i` ban §5.2, e2e test category §8.2, wrapper-script pattern §5.3 (**5-forms convention**)). `.claude/settings.json` v7 (`.env.*` deny refined; `export` allowed; 3 `./ay_platform_core/scripts/X` safety-net entries for wrappers; `sed -i` denied, `sed -n` allowed, `docker compose` denied). `ay_platform_core/pyproject.toml` v6.
 
 ---
 
@@ -62,16 +62,18 @@ Autonomous write policy: per CLAUDE.md v13 §9.1, Claude MAY write this
 
 ## 3. Active decisions (beyond specs)
 
-- **Monorepo layout** — `requirements/` + `ay_platform_core/` + `infra/` + future `ay_platform_ui/` at root. `infra/` top-level per `CLAUDE.md` v13 §4.5.
+- **Monorepo layout** — `requirements/` + `ay_platform_core/` + `infra/` + future `ay_platform_ui/` at root. `infra/` top-level per `CLAUDE.md` v14 §4.5.
 - **Python 3.13**, src layout (`ay_platform_core/src/ay_platform_core/`).
 - **C1 = Traefik** (Option A) — not Python. K8s manifests: raw YAML, not Helm. `/auth/*`→C2, `/api/v1/conversations/*`→C3, `/api/v1/orchestrator/*`→C4, `/api/v1/requirements/*`→C5, `/uploads/*`→C12.
 - **C8 architectural policy** — LiteLLM is C8; internal components SHALL NOT import `litellm` as a library (R-800-011). Access via HTTP client only, with mandatory headers `X-Agent-Name`/`X-Session-Id`.
 - **Coherence testing**: spec↔code (`@relation` markers) + code↔code (5 AST scripts in `scripts/checks/`).
 - **Test debugging discipline** — `CLAUDE.md` §10 (A/B/C/D + 9 anti-patterns). **Coverage** — `CLAUDE.md` §11 (80% line blocking). **Matcher-friendly shell** — §5.7.
 - **python-arango thread-safety** — the sync driver is NOT thread-safe across concurrent `asyncio.to_thread` calls. The C5 repository serialises all db access via `asyncio.Lock`; `insert(overwrite=True)` is used for upsert to avoid HTTP 412 `_rev` conflicts. Same pattern applicable to C4/C7 repositories.
-- **End-to-end tests** — `CLAUDE.md` v13 §8.2 formalises `tests/e2e/`: golden-path cross-component workflows via FastAPI TestClient + testcontainers (one shared ArangoDB + one shared MinIO, mock C8 via ASGI). NOT gate-blocking. Real Traefik and K8s deployments are reserved for a future `tests/system/` tier. C4 introduces the first e2e suite (C1→C2→C3→C4→C5→C8).
-- **`sed -i` banned for code edits** — `CLAUDE.md` v13 §5.2 + `.claude/settings.json` v5: `sed -i` and `sed --in-place` are denied. Any code modification SHALL go through Claude Code's native Edit / `str_replace` tool so diffs are visible in VS Code before acceptance. `sed -n` (read-only pattern extraction) remains available for diagnosis.
-- **Wrapper-script pattern for destructive tooling** — `CLAUDE.md` v13 §5.3. Destructive tools (`docker compose`, `kubectl apply`, etc.) stay denied; intents that need them are encapsulated in purpose-specific shell wrappers under `ay_platform_core/scripts/` (`run_tests.sh`, `run_coherence_checks.sh`, `e2e_stack.sh`). The wrapper is the allowlisted entry point; the inner destructive call is a sub-process not matched by Claude Code. New wrappers SHALL be added to `settings.json` allow-list via the standard 4 forms (`./scripts/X`, `ay_platform_core/scripts/X`, `bash scripts/X`, `bash ay_platform_core/scripts/X`).
+- **End-to-end tests** — `CLAUDE.md` v14 §8.2 formalises `tests/e2e/`: golden-path cross-component workflows via FastAPI TestClient + testcontainers (one shared ArangoDB + one shared MinIO, mock C8 via ASGI). NOT gate-blocking. Real Traefik and K8s deployments are reserved for a future `tests/system/` tier. C4 introduces the first e2e suite (C1→C2→C3→C4→C5→C8).
+- **`sed -i` banned for code edits** — `CLAUDE.md` v14 §5.2 + `.claude/settings.json` v6: `sed -i` and `sed --in-place` are denied. Any code modification SHALL go through Claude Code's native Edit / `str_replace` tool so diffs are visible in VS Code before acceptance. `sed -n` (read-only pattern extraction) remains available for diagnosis.
+- **Wrapper-script pattern for destructive tooling** — `CLAUDE.md` v14 §5.3. Destructive tools (`docker compose`, `kubectl apply`, etc.) stay denied; intents that need them are encapsulated in purpose-specific shell wrappers under `ay_platform_core/scripts/` (`run_tests.sh`, `run_coherence_checks.sh`, `e2e_stack.sh`). The wrapper is the allowlisted entry point; the inner destructive call is a sub-process not matched by Claude Code. New wrappers SHALL be added to `settings.json` allow-list via the standard 4 forms (`./scripts/X`, `ay_platform_core/scripts/X`, `bash scripts/X`, `bash ay_platform_core/scripts/X`).
+- **Canonical path forms for wrappers** — `CLAUDE.md` v15 §5.7 + `settings.json` v7. The VS Code matcher does not normalise leading `./`; the hybrid form `./ay_platform_core/scripts/X` fails to match the `ay_platform_core/scripts/X` pattern. Two canonical forms only: `./scripts/X` (cwd = `ay_platform_core/`) or `ay_platform_core/scripts/X` (cwd = monorepo root). Safety-net entries for the hybrid `./ay_platform_core/scripts/X` are allowlisted but Claude SHALL prefer the canonical forms. v7 updates the wrapper-pattern convention from 4 to 5 forms.
+- **Environment files discipline** — `CLAUDE.md` v14 §4.6 + `.claude/settings.json` v6. Two tiers: (1) versioned non-secret (`.env.test`, `.env.dev`, `.env.development`, `.env.example`, `.env.template`) — Claude MAY read/edit via Edit tool; (2) sensitive (`.env`, `.env.local`, `.env.prod`, `.env.production`, `.env.secret`) — denied. Shell in-place writes (sed, heredoc, echo >>) remain banned per §5.2 — edits go through Edit with visible diff. **Semantic changes to Tier 1 files** (adapter switches, model IDs, feature toggles) are architectural decisions, not config tweaks; they require §3 tracing and possibly §8.1 (spec gap) — NOT silent edits.
 
 ---
 
@@ -98,6 +100,8 @@ Autonomous write policy: per CLAUDE.md v13 §9.1, Claude MAY write this
 ## 6. Sessions archive
 
 Latest entries (most recent first):
+- `.claude/sessions/2026-04-24-script-path-forms.md` — `CLAUDE.md` v15 §5.7 canonical wrapper path forms + §5.3 5-forms convention; `settings.json` v7 adds 3 `./ay_platform_core/scripts/X` safety-net entries.
+- `.claude/sessions/2026-04-24-env-files-discipline.md` — `CLAUDE.md` v14 §4.6 (env files tiers & semantic-change gate) + `settings.json` v6 (`.env.*` deny affined, `export` allowed).
 - `.claude/sessions/2026-04-23-e2e-stack-wrapper.md` — `CLAUDE.md` v13 §5.3 wrapper-script pattern + `settings.json` v5 allowlisting `e2e_stack.sh`.
 - `.claude/sessions/2026-04-24-c12-v15-c9-realflow.md` — C12 n8n deployed, C6 #7/#9 stubs closed (real impls of version-drift + cross-layer-coherence), C9 contract + system tool-flow tests added. 620 tests, coverage 88.85%.
 - `.claude/sessions/2026-04-24-e2e-stack-infra.md` — deployable docker-compose stack + app factories + mock LLM + seeder + `tests/system/` tier + helper script. All system traffic routes exclusively through Traefik (port 80).
@@ -122,4 +126,4 @@ Latest entries (most recent first):
 
 - This file SHALL remain ≤ 150 lines.
 - Claude SHALL propose an update at end of any session introducing a decision, completing a stage, or changing §5.
-- User validates before each write (no silent edits) except for trivial deltas allowed by `CLAUDE.md` v13 §9.1.
+- User validates before each write (no silent edits) except for trivial deltas allowed by `CLAUDE.md` v15 §9.1.
