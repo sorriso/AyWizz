@@ -1,6 +1,6 @@
 ---
 document: 100-SPEC-ARCHITECTURE
-version: 3
+version: 9
 path: requirements/100-SPEC-ARCHITECTURE.md
 language: en
 status: draft
@@ -11,7 +11,19 @@ derives-from: [D-002, D-003, D-007, D-008, D-010, D-011, D-012, D-013]
 
 > **Purpose of this document.** Define the macro-level component decomposition of the platform, where each type of requirement lives, the contracts between components, the scaling model, and the deployment targets. This spec defines the **what** and the **why** of each component — concrete technology choices and implementation details belong to component-specific engineering work.
 
-> **Version 3 changes.** New §10 *Configuration & Deployment* codifying the configuration architecture that emerged during the v1 implementation of C1–C9: a single `.env`-style file as source of truth for every runtime-overridable parameter, per-component `env_prefix` convention, a platform-wide `PLATFORM_ENVIRONMENT` variable, a completeness coherence test pinning the env-file shape to the Pydantic Settings fields, and the deployable local-stack topology (shared `Dockerfile.python-service`, compose with `env_file:`, Traefik as the ONLY public port, mock LLM for CI). Adds `R-100-110..R-100-116`. No existing requirement is modified.
+> **Version 9 changes.** Phase-3 workflow envelope synthesiser shipped (Q-100-014 resolved). New module `ay_platform_core/_observability/synthesis.py` — pure functions `parse_span_summary`, `group_by_trace`, `synthesise_workflow`, `list_recent_traces`. New `GET /workflows/<trace_id>` and `GET /workflows?recent=N` endpoints on `_observability` (test-tier). Synthesis is **storage-agnostic**: local stack reads the in-memory ring buffer; K8s production will read from Loki / ES via the same algorithm (Q-100-015 tracks the adapter). Q-100-016 added for trace propagation into Kubernetes Jobs (C15 sub-agent runtime).
+
+> **Version 8 changes.** Structured logging + W3C trace propagation implemented. **R-100-104** bumped to v2 (mandatory JSON schema fields formalised: timestamp, component, severity, trace_id, span_id, parent_span_id, tenant_id, message; `event=span_summary` records added by the trace middleware as the foundation for workflow synthesis). **R-100-105** bumped to v2 (every component runs the shared `TraceContextMiddleware`; outbound httpx calls use `make_traced_client` to inject the current `traceparent`; sampling and propagation rules made testable). New shared `LoggingSettings` declares `LOG_LEVEL`, `LOG_FORMAT`, `TRACE_SAMPLE_RATE` as platform-wide knobs (validation_alias, no per-component prefix).
+
+> **Version 7 changes.** Test-tier observability collector formalised: new **R-100-120** (test-tier log aggregator: ring-buffered live Docker log streams, simple HTTP API for the test harness, lives in `ay_platform_core/_observability/`) and **R-100-121** (test-tier components SHALL NOT be deployed in production, no exceptions).
+
+> **Version 6 changes.** Resource limits hardening: **R-100-106** bumped to v2 with both an internal-tier cap (4 vCPU / 8 GB) and a platform-wide cap (8 vCPU / 16 GB). New **R-100-119** mandates explicit limits + reservations on every long-running container, with a baseline budget table per service tier. **R-100-118** bumped to v2 to formalise the **three credential classes** that the single env file must carry: backend bootstrap admin (`*_ROOT_*`), app runtime, and application admin (`C2_LOCAL_ADMIN_*` for AUTH_MODE=local). The coherence test now whitelists infra-bootstrap variables that are consumed only by Docker images / init containers.
+
+> **Version 5 changes.** Env-var single-source refactor + credential hardening. **R-100-110** bumped to v2: a single env file per environment, with each variable appearing exactly once — shared infrastructure facts (Arango URL/DB/credentials, MinIO endpoint/credentials, Ollama URL, `PLATFORM_ENVIRONMENT`) are read **without prefix** by every component via `validation_alias`; the `C{N}_` prefix is reserved for fields that legitimately differ between components. **R-100-111** bumped to v2 to formalise the prefix-vs-alias rule. **R-100-012** bumped to v3: the platform components share a single ArangoDB database (`platform`) and a single MinIO root namespace; isolation is enforced at the **collection / bucket / prefix** level (not at the database level). New **R-100-118** mandates dedicated runtime users for every backing store (no root credentials at runtime) and codifies the bootstrap responsibility of the init containers.
+
+> **Version 4 changes.** §10.3 reworked to reflect the actual application architecture: the Python tier is **one** package (`ay_platform_core`) hosting all in-process FastAPI components (C2–C9, mock LLM). The shared image is renamed from `Dockerfile.python-service` to `Dockerfile.api`, the component to start is selected by a **runtime** environment variable (`COMPONENT_MODULE`) — not a build-arg — and live-reload is no longer baked into the image. New `R-100-117` formalises the tier-Dockerfile layout (`infra/docker/Dockerfile.api`, future `Dockerfile.ui`) as a complement to the per-component `infra/<component>/docker/` pattern. R-100-114 bumped to v2.
+
+> **Version 3 changes.** New §10 *Configuration & Deployment* codifying the configuration architecture that emerged during the v1 implementation of C1–C9: a single `.env`-style file as source of truth for every runtime-overridable parameter, per-component `env_prefix` convention, a platform-wide `PLATFORM_ENVIRONMENT` variable, a completeness coherence test pinning the env-file shape to the Pydantic Settings fields, and the deployable local-stack topology (shared API Dockerfile, compose with `env_file:`, Traefik as the ONLY public port, mock LLM for CI). Adds `R-100-110..R-100-116`. No existing requirement is modified.
 
 > **Version 2 changes.** Alignment with `D-012` (production domain extensibility) and `D-013` (external source ingestion). Component C6 is renamed from "Analysis Engine" to "Validation Pipeline Registry" to reflect its domain-pluggable nature. Hard gates referenced here (via derives-from D-007) are now formulated in domain-agnostic terms. New requirements R-100-080 to R-100-088 cover the external source ingestion capability through C12 + C7 collaboration. Existing auth, scaling, deployment, and failure-domain requirements are unchanged.
 
@@ -228,14 +240,21 @@ No component SHALL call an LLM provider directly. All LLM calls SHALL route thro
 
 ```yaml
 id: R-100-012
-version: 2
+version: 3
 status: draft
 category: architecture
 ```
 
-No component SHALL access ArangoDB (C11) directly for operations that fall within another component's responsibility. Specifically: Requirements Service (C5) owns the requirements collections; Memory Service (C7) owns the embeddings, graph traversal logic, and external source indexing collections; Auth Service (C2) owns the identity and RBAC collections.
+The platform's components SHALL share a single ArangoDB **database** (named `platform` by convention) and a single MinIO root namespace. Isolation between component-owned data SHALL be enforced at the **collection level** (ArangoDB) and at the **bucket / object-prefix level** (MinIO), not at the database level. Specifically:
 
-**Rationale.** Shared database access across multiple owners creates implicit coupling and schema drift. This rule enforces component ownership of data.
+- **Requirements Service (C5)** owns the requirements collections and the `requirements` bucket.
+- **Memory Service (C7)** owns the embeddings, graph traversal logic, the external source indexing collections, and the `memory` bucket.
+- **Auth Service (C2)** owns the identity and RBAC collections.
+- **Conversation Service (C3)**, **Orchestrator (C4)**, and **Validation (C6)** own their own collections (and respective buckets where they have one).
+
+No component SHALL access another component's collections or buckets. Cross-component reads go through the owning component's API.
+
+**Rationale.** A single shared database matches the deployment footprint (one ArangoDB cluster) and matches the way the per-component env vars resolve (one shared `ARANGO_DB`, one shared credentials pair via R-100-118). Per-component databases were tried and immediately created drift between `.env.test` and `.env.example`. Collection-level isolation, enforced by the dedicated runtime user (R-100-118) and by code review of the access patterns, gives the same boundary protection without the operational overhead of N databases.
 
 #### R-100-013
 
@@ -955,40 +974,84 @@ The platform SHALL expose Prometheus-compatible metrics endpoints on every inter
 
 ```yaml
 id: R-100-104
-version: 1
-status: draft
+version: 2
+status: approved
 category: nfr
 ```
 
-The platform SHALL emit structured logs (JSON) including at minimum: timestamp, component, severity, trace_id, span_id, tenant_id (when applicable), message. Free-form string logs SHALL NOT be emitted in production.
+Every component SHALL emit logs as **JSON lines** (one record per line), produced by the shared `JSONFormatter` from `ay_platform_core.observability.formatter`. Each line SHALL carry the following fields:
 
-**Rationale.** Structured logs are a prerequisite for effective log aggregation and incident response.
+| Field | Type | Source |
+|---|---|---|
+| `timestamp` | RFC 3339, UTC | record creation time |
+| `component` | string | passed to `configure_logging(component=…)` (the `COMPONENT_MODULE` value) |
+| `severity` | enum: DEBUG / INFO / WARNING / ERROR / CRITICAL | LogRecord level |
+| `trace_id` | hex(32) or "" | ContextVar (set by middleware) |
+| `span_id` | hex(16) or "" | ContextVar |
+| `tenant_id` | string or "" | ContextVar (set from JWT, see R-100-118) |
+| `message` | string | log call's message (`record.getMessage()`) |
+| `logger` | string | logger name (e.g. `uvicorn.access`) |
+
+Free-form `extra={…}` payloads SHALL be merged into the JSON object verbatim (after JSON-safe coercion). When an exception is logged, the formatted traceback SHALL be exposed under `exc_info`.
+
+In `LOG_FORMAT=text` (dev only), the text formatter mirrors the same field set in a single human-readable line.
+
+**Special record: `event=span_summary`.** The shared `TraceContextMiddleware` SHALL emit one such record at the end of every HTTP request, with extra fields `event=span_summary`, `method`, `path`, `status_code`, `duration_ms`, `parent_span_id`, `sampled`. These records are the input to phase-3 workflow synthesis (see Q-100-014): grouping by `trace_id` + reconstructing parent/child via `parent_span_id` yields the full cross-component workflow envelope.
+
+**Rationale.** v1 left "structured" undefined; v2 fixes the schema in code (`JSONFormatter`) so log aggregators can parse without per-component handling. The `span_summary` record turns every request into a discrete, structured fact — pre-computed material for any future synthesiser, no schema migration needed.
 
 ### R-100-105
 
 ```yaml
 id: R-100-105
-version: 1
-status: draft
+version: 2
+status: approved
 category: nfr
 ```
 
-The platform SHALL implement distributed tracing with W3C Trace Context propagation across all inter-component calls. Traces SHALL be sampled at a configurable rate (default 10% in production, 100% in local).
+The platform SHALL propagate W3C Trace Context (`traceparent` header) across all HTTP inter-component calls. Implementation:
 
-**Rationale.** Multi-component workflows (conversation → orchestrator → multiple sub-agents → validation → LLM) are impossible to debug without distributed tracing.
+- Every component SHALL register the shared `TraceContextMiddleware` from `ay_platform_core.observability` on its FastAPI app. The middleware:
+  - parses an inbound `traceparent`;
+  - if valid, generates a fresh span_id (kept within the inherited trace) and stores the inbound span_id as the request's `parent_span_id`;
+  - if absent or malformed, generates a fresh trace, applying `TRACE_SAMPLE_RATE` for the sampled flag;
+  - emits a `traceparent` response header carrying the request's own (trace_id, span_id, sampled);
+  - sets the `(trace_id, span_id, parent_span_id)` triple on ContextVars for the request's lifetime.
+- Every outbound HTTP call from a component SHALL go through `make_traced_client(...)` (a `httpx.AsyncClient` factory). The factory installs an event hook that injects the current `traceparent` on the outgoing request. Direct `httpx.AsyncClient(...)` instantiation is forbidden in component code (replaced by `make_traced_client` in c8_llm/client.py, c7_memory/embedding/ollama.py, c9_mcp/main.py, …).
+- Sampling: `TRACE_SAMPLE_RATE` (env-var, default 1.0 local) controls fresh trace sampling. Inbound traces with `sampled=true` SHALL be honoured regardless of the local rate (defer to upstream's decision).
+- Tenant id: components MAY call `set_tenant_id(...)` from the middleware that processes the JWT, so subsequent log lines carry the tenant attribution mandated by R-100-104 / R-100-107.
+
+**Rationale.** Multi-component workflows (conversation → orchestrator → sub-agents → validation → LLM) are impossible to debug without a unified trace. v2 makes the implementation contract explicit — middleware + httpx factory — so a new component cannot accidentally break the chain by instantiating a raw httpx client. Combined with R-100-104 v2 `span_summary` records, the workflow envelope (Q-100-014) becomes derivable without further code changes.
 
 ### R-100-106
 
 ```yaml
 id: R-100-106
-version: 1
+version: 2
 status: draft
 category: nfr
 ```
 
-The resource footprint of the platform at minimum deployment (all components at `minReplicas=1`, no active user load) SHALL not exceed 4 vCPU and 8 GB RAM across all internal components (C1–C9), excluding dependency stores (C10–C12).
+The resource footprint of the platform at minimum deployment (all components at `minReplicas=1`, no active user load) SHALL not exceed:
 
-**Rationale.** Small-start principle. Aggregate resource consumption at idle sets the lower bound of the feasible deployment envelope.
+- **4 vCPU** and **8 GB RAM** across all internal components C1–C9
+  (the "internal tier") — excluding dependency stores (C10–C12) and
+  embedding/inference servers (Ollama, mock LLM).
+- **8 vCPU** and **16 GB RAM** across the entire platform (internal
+  tier + dependencies + inference) — typical Docker Desktop / dev
+  workstation envelope.
+
+These caps SHALL be enforced declaratively via `deploy.resources.limits`
+on every long-running compose service, and via `resources.limits` on
+every K8s `Deployment` / `StatefulSet` (R-100-119). One-shot init
+containers (`arangodb_init`, `minio_init`, `ollama_model_seed`,
+`c12_workflow_seed`) are exempt — their memory peak is ephemeral.
+
+**Rationale.** Small-start principle. Aggregate resource consumption
+at idle sets the lower bound of the feasible deployment envelope. v2
+adds the platform-wide cap because the v1 wording covered only the
+internal tier; on a laptop, the dependencies (Arango, MinIO, Ollama)
+together can dwarf the internal tier — they need their own ceiling.
 
 ### R-100-107
 
@@ -1207,6 +1270,9 @@ Arrows indicate synchronous calls. Dotted lines indicate event-driven or infrequ
 | Q-100-011 | Ingestion parsing library alignment with simplechat/AyExtractor (docling candidate vs actual prior choice). | D-013 | v1 (pending upload of simplechat/AyExtractor specs) |
 | Q-100-012 | Ingestion chunking strategy (fixed size, structure-aware, semantic): align with prior work. | D-013 | v1 (pending upload) |
 | Q-100-013 | Storage quota per project default (1 GB baseline in R-100-088) and tenant-level override mechanism. | D-013 | v1 (detailed in `400` and `500`) |
+| Q-100-014 | Workflow envelope synthesiser — implemented in `_observability/synthesis.py` (pure functions: `parse_span_summary`, `group_by_trace`, `synthesise_workflow`, `list_recent_traces`) + endpoints `GET /workflows/<trace_id>` and `GET /workflows?recent=N` exposed by the test-tier collector. **Resolved.** Production K8s equivalent uses the same algorithm against an external log store (Loki / ES) — see Q-100-015. | R-100-104, R-100-105 | resolved 2026-04-25 |
+| Q-100-015 | K8s production: workflow synthesis on horizontally-scaled deployments. The synthesis algorithm is portable (storage-agnostic). The local stack reads from the in-memory ring buffer of `_observability`; the K8s stack will read from a centralised log pipeline (Loki + Promtail baseline). Open: which adapter to ship in `infra/observability/k8s/`, sampling rate retention policy, dashboard layer (Grafana?). Test-tier `_observability` SHALL NOT run in K8s (R-100-121). | R-100-104, R-100-105, R-100-120, R-100-121 | when K8s manifests start |
+| Q-100-016 | Trace context propagation into Kubernetes Jobs (C15 sub-agent runtime). When C4 dispatches a sub-agent as a Job, the current `traceparent` MUST flow into the Job's PodSpec (e.g., as `env: TRACEPARENT=...` injected from the dispatcher's ContextVar). Without this, every sub-agent starts a fresh trace and the workflow envelope loses the entire generation phase. C15 is not implemented yet, but the dispatch contract MUST include trace propagation when it lands. | R-100-105, D-007 | when C15 starts |
 
 ---
 
@@ -1276,7 +1342,7 @@ components inherit the same contract.
 
 ```yaml
 id: R-100-110
-version: 1
+version: 2
 status: approved
 category: architecture
 ```
@@ -1288,31 +1354,58 @@ through a **single env-style file** (key=value, one entry per line,
 A canonical file `.env.example` at the monorepo root SHALL carry the
 code-side defaults and document every variable for operators.
 
-**Rationale.** Centralising config in one file eliminates drift
-between the compose file, the deployment manifests, and the code
-defaults; it also enforces a single surface for audits of
-"what can this deployment be tuned to do?".
+**Each variable SHALL appear exactly once in a given env file.** Facts
+that are platform-wide identical across components (e.g. the
+ArangoDB URL, the MinIO endpoint, shared application credentials)
+SHALL be declared with **no per-component prefix** and read by every
+component's Settings class via `validation_alias` (per R-100-111
+v2). It is **forbidden** to declare the same fact under multiple
+prefixed names (e.g. `C2_ARANGO_URL=…` AND `C3_ARANGO_URL=…` for the
+same value): this is the failure mode v1 inherited and the source of
+the per-component vs. shared drift that R-100-110 v2 closes.
+
+**Rationale.** Centralising config in one file with no internal
+duplication eliminates drift between the compose file, the
+deployment manifests, and the code defaults; it also enforces a
+single surface for audits of "what can this deployment be tuned to
+do?". The "no duplication" rule is what makes credential rotation
+realistic — one line changes, the whole platform follows.
 
 #### R-100-111
 
 ```yaml
 id: R-100-111
-version: 1
+version: 2
 status: approved
 category: architecture
 ```
 
 Each component's `BaseSettings` class SHALL declare
-`env_prefix="c<n>_"` (lower-case component id + underscore). Env
-variables on disk appear as `C<N>_<FIELD>` (upper-cased; pydantic-
-settings is case-insensitive). The only exception is the platform-
-wide variable below (R-100-112).
+`env_prefix="c<n>_"`. The prefix SHALL apply ONLY to fields that
+legitimately differ between components — e.g. each component's own
+caps, timeouts, MinIO bucket name, server identity, etc. Fields that
+hold a fact shared by every component (Arango connection URL, Arango
+DB name, Arango credentials, MinIO endpoint, MinIO credentials,
+Ollama URL, log level, `PLATFORM_ENVIRONMENT`) SHALL be declared
+with an explicit `validation_alias=<UNPREFIXED_NAME>` so they are
+read from the SAME env-file line by every component.
 
-**Rationale.** Namespacing per component prevents collision between
-variables that have identical names but different semantics across
-components (`ARANGO_DB`, `MINIO_BUCKET`, etc.). Operators can scope
-a config change to a single component without risk of leaking into
-neighbours.
+The coherence test (R-100-113) maps each Settings field to its env
+variable: `validation_alias` wins (used verbatim, uppercase);
+otherwise the prefix is concatenated with the upper-cased field
+name. Multiple Settings classes mapping to the same alias is a
+**legitimate** sharing pattern (the test recognises it). Two
+Settings classes mapping to the same prefixed name (which would
+imply the same `env_prefix` shared across two classes) is a bug and
+fails the test loudly.
+
+**Rationale.** v1's "every Settings field gets the prefix" rule had
+the side effect that operators wrote `C2_ARANGO_URL=…` and
+`C3_ARANGO_URL=…` and `…` × 6 for the SAME ArangoDB URL. The values
+inevitably drifted. v2 resolves this by drawing a clear boundary:
+prefix only when the fact differs across components; otherwise read
+the same shared variable. The result is an env file in which every
+operationally meaningful change is a one-line edit.
 
 #### R-100-112
 
@@ -1371,24 +1464,48 @@ catches regressions where a field is renamed but its alias isn't.
 
 ```yaml
 id: R-100-114
-version: 1
+version: 2
 status: approved
 category: tooling
 ```
 
-Every Python component SHALL be buildable as a container image from
-a single shared Dockerfile
-(`infra/docker/Dockerfile.python-service`) parameterised by a
-build-arg `COMPONENT_MODULE`. The Dockerfile SHALL install all runtime
-dependencies from `ay_platform_core/pyproject.toml` — no
-hard-coded `pip install` calls of individual libraries. The `src/`
-tree SHALL be mountable as a bind volume so developers can iterate
-live without rebuilding the image.
+The Python tier of the platform SHALL be packaged as **one** shared
+container image, built from `infra/docker/Dockerfile.api`. All in-
+process FastAPI components (C2 Auth, C3 Conversation, C4 Orchestrator,
+C5 Requirements, C6 Validation, C7 Memory, C9 MCP, plus the mock LLM
+used in tests) SHALL be served from this image; the component to
+start SHALL be selected at **runtime** via the environment variable
+`COMPONENT_MODULE` (lowercase Python module name under
+`ay_platform_core`, e.g. `c2_auth`, `c4_orchestrator`, `_mock_llm`).
 
-**Rationale.** A single Dockerfile guarantees all Python components
-share the exact same runtime stack; pyproject-driven installs keep
-`pyproject.toml` the single source of truth for dependencies; the
-bind-mount closes the edit-rebuild-test loop for day-to-day work.
+The Dockerfile SHALL:
+
+- install all runtime dependencies from
+  `ay_platform_core/pyproject.toml` — no hard-coded `pip install`
+  calls of individual libraries;
+- bake a self-contained source tree into the image (so the image is
+  runnable without any host bind-mount, as required for K8s);
+- declare a production-ready `CMD` invoking
+  `uvicorn ay_platform_core.${COMPONENT_MODULE}.main:app` **without**
+  `--reload`;
+- NOT define `ARG COMPONENT_MODULE` or `ENV COMPONENT_MODULE` in the
+  runtime stage; the variable is supplied per container by the
+  orchestrator (compose / K8s).
+
+The `src/` tree SHALL remain mountable as a bind volume so developers
+can iterate live without rebuilding the image. Live-reload behaviour
+(`--reload --reload-dir`) SHALL be enabled by overriding `command:`
+in the dev compose file, NOT by baking it into the image.
+
+**Rationale.** Renaming to `Dockerfile.api` aligns with the tier-
+oriented infra layout (R-100-117): one Dockerfile per logical tier
+(`api`, future `ui`), not one per backbone component. Moving
+`COMPONENT_MODULE` from build-arg to runtime-env collapses N tagged
+images into a single image consumed by N containers — eliminates
+build duplication, makes K8s manifests trivial (one image reference,
+N Deployments differing only by env). Removing `--reload` from `CMD`
+makes the same image production-grade by default; dev-only behaviour
+is opt-in at the orchestration layer.
 
 #### R-100-115
 
@@ -1436,6 +1553,332 @@ in CI, and lets deterministic assertions ("the pipeline took
 exactly N LLM calls") replace soft ones ("the LLM probably
 answered").
 
+#### R-100-117
+
+```yaml
+id: R-100-117
+version: 1
+status: approved
+category: tooling
+```
+
+Shared Dockerfiles SHALL be organised by **logical tier** under
+`infra/docker/`, one Dockerfile per tier:
+
+- `infra/docker/Dockerfile.api` — Python FastAPI tier, shared by
+  every in-process component of `ay_platform_core` (per R-100-114);
+- `infra/docker/Dockerfile.ui` — JavaScript/TypeScript UI tier
+  (Next.js), reserved for `ay_platform_ui/` (added when the UI
+  scaffold lands; absent in v1).
+
+The tier-Dockerfile pattern is **complementary** to the per-component
+pattern declared in `CLAUDE.md` §4.5 (`infra/<component-id>/docker/`).
+Tier-Dockerfiles apply when **multiple components share a runtime
+stack and a single codebase** (current case: the Python tier is one
+package with several FastAPI sub-modules). Per-component Dockerfiles
+apply when a component's image is independently sourced or has
+diverging build dependencies (e.g. a future Rust-rewritten C7 would
+get its own `infra/c7_memory/docker/Dockerfile`).
+
+Off-the-shelf images consumed without modification (Traefik for C1,
+ArangoDB for C11, MinIO for C10, n8n for C12) SHALL NOT have a
+maintained Dockerfile under `infra/`; their version is pinned in
+the compose / K8s manifests.
+
+**Rationale.** Locking the layout prevents two failure modes
+observed in v1: (a) silently drifting per-component Dockerfiles
+when the codebase is in fact shared (creates ghost image variants),
+and (b) ambiguity over where the UI Dockerfile will live once the
+frontend scaffold starts. The "logical tier" framing maps 1:1 to
+the platform's deployment topology: ingress (C1) → tier-API
+(Python) ‖ tier-UI (Next.js) → backend services (C10, C11, C12).
+
 ---
 
-**End of 100-SPEC-ARCHITECTURE.md v3.**
+### 10.4 Topology — local stack vs. production K8s
+
+The same components SHALL deploy onto two topologies that share the
+same logical graph but differ in physical layout:
+
+**Local stack (docker-compose, `ay_platform_core/tests/docker-compose.yml`)**
+
+- Flat service list — every container is a peer on a single
+  `platform` Docker network.
+- Exactly one host port published: `80` on the C1 Traefik service
+  (per R-100-115). Test-only ports (e.g. mock-LLM admin on `8001`)
+  remain explicitly marked.
+- All Python services share the unique image built from
+  `Dockerfile.api`; differentiation is via `environment:
+  COMPONENT_MODULE: cN_xxx` and the per-component `.env.test` keys.
+- Backend dependencies (ArangoDB, MinIO, Ollama, n8n) are off-the-
+  shelf images, peers on the same network.
+
+**Production (Kubernetes, AKS / Docker Desktop K8s)**
+
+- Layered topology mirroring the logical graph:
+  - **Ingress tier** — Traefik (or AKS Ingress) holds the public
+    surface; TLS terminates here.
+  - **Application tier** — two parallel sub-tiers:
+    - *API sub-tier* — N Deployments, all referencing the same
+      `Dockerfile.api` image, differing only by their
+      `COMPONENT_MODULE` env var and per-component
+      ConfigMap/Secret bindings.
+    - *UI sub-tier* — one Deployment from `Dockerfile.ui` (added
+      with the `ay_platform_ui/` scaffold).
+  - **Backend tier** — StatefulSets / managed services for
+    ArangoDB (C11), MinIO (C10), n8n (C12), Ollama, observability.
+- NetworkPolicies SHALL forbid direct ingress-to-backend traffic;
+  every external request transits the API sub-tier.
+
+**Rationale.** Aligning the compose layout with the K8s topology
+upfront keeps the local-vs-prod parity goal (R-100-060) honest. The
+flat compose is a *physical* simplification; the logical graph is
+preserved (one ingress, app-tier behind it, backend-tier behind the
+app-tier).
+
+---
+
+### 10.5 Credential hardening
+
+#### R-100-118
+
+```yaml
+id: R-100-118
+version: 2
+status: approved
+category: security
+derives-from: [R-100-012, R-100-110, R-100-111]
+```
+
+No platform component SHALL run with the **administrative / root
+credentials** of any backing store at runtime. The single env file
+(R-100-110 v2) SHALL declare **three credential classes** explicitly,
+all in the same physical file (no scattered secrets):
+
+**Class (a) — Backend bootstrap admin** (used ONLY by the init
+containers and by the backend image's first-boot init):
+
+- `ARANGO_ROOT_USERNAME` / `ARANGO_ROOT_PASSWORD` — consumed by:
+  - the `arangodb` Docker image at first boot (sets the root
+    password);
+  - the `arangodb_init` one-shot, which connects as root to create
+    the `platform` database and the runtime app user.
+- `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` — consumed by:
+  - the `minio` Docker image at first boot (defines the root
+    credentials);
+  - the `minio_init` one-shot, which connects as root to create the
+    runtime app user and attach the `ay-app-readwrite` policy.
+
+These variables SHALL NOT be read by any Python component at runtime.
+The coherence test (R-100-113) whitelists them explicitly so they are
+allowed in the env file without a corresponding Pydantic Settings
+field.
+
+**Class (b) — App runtime credentials** (used by every Python
+component at runtime):
+
+- `ARANGO_USERNAME` (default `ay_app`) / `ARANGO_PASSWORD` —
+  dedicated app user with `rw` permissions on the shared `platform`
+  database (R-100-012 v3) and on every collection. NEVER root.
+- `MINIO_ACCESS_KEY` (default `ay_app`) / `MINIO_SECRET_KEY` —
+  dedicated app user attached to a policy granting `s3:*` only on
+  the platform's buckets (`orchestrator`, `requirements`,
+  `validation`, `memory`). NEVER `minioadmin`.
+
+These variables SHALL be declared without prefix and read by every
+Settings class via `validation_alias` (R-100-111 v2).
+
+**Class (c) — Application admin** (used by C2 in `local` auth mode):
+
+- `C2_LOCAL_ADMIN_USERNAME` (default `admin`) /
+  `C2_LOCAL_ADMIN_PASSWORD` — pre-existing admin user the C2
+  lifespan SHALL bootstrap into the `c2_users` collection if absent,
+  granted the global `admin` role. Ignored when
+  `C2_AUTH_MODE != "local"` (in which case the variables are still
+  declared in the env file for exhaustiveness, per R-100-110 v2).
+
+Bootstrap responsibilities:
+
+- The `arangodb_init` one-shot SHALL connect as `ARANGO_ROOT_USERNAME`
+  / `ARANGO_ROOT_PASSWORD`, ensure the `ARANGO_DB` database exists,
+  create the `ARANGO_USERNAME` user with `ARANGO_PASSWORD`, and
+  grant `rw` on the database and on all of its collections.
+  Idempotent on re-runs (re-grant is a no-op).
+- The `minio_init` one-shot SHALL connect as `MINIO_ROOT_USER` /
+  `MINIO_ROOT_PASSWORD`, create the platform's buckets, declare the
+  `ay-app-readwrite` policy, create the `MINIO_ACCESS_KEY` user with
+  `MINIO_SECRET_KEY`, and attach the policy. Idempotent on re-runs.
+- C2's lifespan SHALL invoke an `ensure_local_admin()` function that
+  creates the C2 admin user (with `argon2id`-hashed password) only
+  when `auth_mode == "local"` AND the user is absent. Idempotent.
+
+**n8n (C12)**: the n8n service itself is gated by Traefik forward-
+auth (C2). Internal n8n credentials are NOT used by any other
+platform component; the only inter-component traffic to n8n goes
+through the public ingress (`/uploads/*`). No additional credential
+class is needed for v1.
+
+**Production hardening**:
+
+- Class (a), class (b), and class (c) credentials SHALL come from a
+  Kubernetes Secret, not from a `.env*` file, in `staging` and
+  `production` (`PLATFORM_ENVIRONMENT` per R-100-112). The init
+  containers and the application pods consume the secret values via
+  env var injection identical to the local stack.
+- The class (a) Secret (root credentials) SHALL be **separate** from
+  the class (b) Secret (app credentials) and SHALL have stricter
+  RBAC: only the init Jobs consume it, the application pods do not
+  mount it.
+- Class (c) (`C2_LOCAL_ADMIN_*`) SHALL be empty in `production` if
+  `auth_mode == "sso"`; SHALL be a one-shot bootstrap value in
+  `local` mode and rotated immediately after first deployment.
+
+**Rationale.** Running app traffic with `root`/`minioadmin` violates
+the principle of least privilege and amplifies the impact of any
+component vulnerability. Pinning the runtime to a dedicated app
+user with documented permissions narrows the blast radius and makes
+the bootstrap step auditable as a distinct, time-bounded operation.
+Declaring all three credential classes in the same single env file
+gives operators ONE place to rotate any secret without hunting
+across files; the test enforces that nothing slips outside that
+file. Class (c) closes the chicken-and-egg loop of `local` auth mode
+(R-100-035 needs an admin to perform user-management operations;
+that admin must come from somewhere — it comes from the env file at
+first boot, then the platform owns its lifecycle).
+
+#### R-100-119
+
+```yaml
+id: R-100-119
+version: 1
+status: approved
+category: nfr
+derives-from: [R-100-106]
+```
+
+Every long-running container in the deployable stack SHALL declare
+**both** an explicit CPU+memory **limit** and an explicit
+**reservation**. Reservations document the floor each container is
+guaranteed; limits document the ceiling above which the container is
+throttled (CPU) or OOM-killed (memory). One-shot init containers are
+exempt.
+
+The baseline budget for the local stack (R-100-106 v2 envelope) is:
+
+| Service tier | CPU limit | Memory limit | CPU reservation | Memory reservation |
+|---|---|---|---|---|
+| Internal tier — Python services (c2..c9 + mock LLM, ×8) | 0.4 each | 512 MB each | 0.1 | 128 MB |
+| Internal tier — C1 Traefik | 0.3 | 256 MB | 0.05 | 64 MB |
+| Backend tier — ArangoDB | 1.5 | 1.5 GB | 0.5 | 512 MB |
+| Backend tier — MinIO | 0.5 | 512 MB | 0.1 | 128 MB |
+| Backend tier — Ollama | 2.0 | 2 GB | 0.5 | 1 GB |
+| Backend tier — n8n (C12) | 0.5 | 1 GB | 0.1 | 256 MB |
+
+Aggregate ≈ 7 vCPU / 9 GB peak (under R-100-106 v2's 8 vCPU /
+16 GB platform-wide cap). Internal tier alone ≈ 3.5 vCPU / 4.3 GB
+(under the 4 vCPU / 8 GB internal cap).
+
+In K8s, the same values translate 1:1 into `resources.requests`
+(reservations) and `resources.limits` on the `Deployment` /
+`StatefulSet`. Production deployments SHALL revisit the figures
+based on observed steady-state usage — these are baselines, not
+final allocations.
+
+**Rationale.** Without limits, a single misbehaving component
+(infinite loop, runaway memory leak) starves every neighbour on a
+shared docker-compose host or eats a whole K8s node. Without
+reservations, the scheduler cannot guarantee co-location capacity
+and pods are evicted under pressure. Having both, declared
+declaratively in the manifests, is the standard 12-factor /
+Kubernetes hygiene baseline.
+
+### 10.6 Test-tier observability
+
+#### R-100-120
+
+```yaml
+id: R-100-120
+version: 1
+status: approved
+category: tooling
+```
+
+The local test stack SHALL ship a **log-aggregation helper** —
+internal name `_observability` — that subscribes to live Docker log
+streams from every `ay-*` container and exposes a small HTTP surface
+for the test harness to consume. Scope is intentionally minimal:
+
+- **Storage**: per-service ring buffer in memory (default 5000
+  lines per service, configurable via `OBS_BUFFER_SIZE_PER_SERVICE`).
+  No persistence beyond container lifetime; the buffer is wiped on
+  restart.
+- **Source**: Docker daemon UNIX socket, mounted **read-only** into
+  the container at `OBS_DOCKER_SOCKET_PATH`. The collector calls
+  exclusively `containers.list()` and `container.logs(stream=True)`
+  — no `exec`, no `kill`, no write side effects on any container.
+- **API surface**:
+  - `GET /health` — liveness.
+  - `GET /logs?service=&since=&min_severity=&limit=` — filtered tail
+    across all services (or a single one).
+  - `GET /errors?since=&limit=` — `min_severity=ERROR` shorthand.
+  - `GET /digest` — per-service / per-severity counts.
+  - `GET /services` — list of services seen since startup.
+  - `POST /clear` — drop the entire buffer (used between tests to
+    isolate per-test failures).
+- **Severity parsing**: best-effort. Recognises JSON `level` /
+  `severity` / `log_level` keys, `level=…` / `severity=…` tokens,
+  prefix forms (`ERROR …`), and Python tracebacks. Unknown lines
+  default to `INFO`.
+- **Module location**:
+  `ay_platform_core/src/ay_platform_core/_observability/`. Underscore
+  prefix marks it as test-only (same convention as `_mock_llm`).
+- **Image**: rides on the shared `ay-api:local` image
+  (R-100-114 v2); selected at runtime via
+  `COMPONENT_MODULE=_observability`.
+- **Exposure**: NOT routed via Traefik. Published to host port
+  `8002` (next to `_mock_llm` on `8001`) for the test harness to
+  query directly. The compose file documents this as test
+  infrastructure.
+
+**Rationale.** A B1 architecture (R-100-114 v2) ships N independent
+processes; without a unified log surface, debugging a cross-component
+failure means juggling N `docker logs` tails. A tiny in-stack
+aggregator removes that friction without adding the operational
+weight of an ELK / Loki / Grafana stack. The constraints (read-only
+socket, in-memory buffer, no persistence) keep the blast radius
+trivial in case of a bug.
+
+#### R-100-121
+
+```yaml
+id: R-100-121
+version: 1
+status: approved
+category: security
+derives-from: [R-100-120]
+```
+
+Components whose internal name starts with an underscore (`_mock_llm`,
+`_observability`, and any future test/dev helper) SHALL NOT be
+deployed to `staging` or `production` (`PLATFORM_ENVIRONMENT` per
+R-100-112). Specifically:
+
+- The `staging` and `production` Helm values / K8s manifests SHALL
+  NOT instantiate any Deployment whose `COMPONENT_MODULE` starts
+  with `_`.
+- A pre-deploy CI check SHALL refuse manifests that violate this
+  rule.
+- A startup guard SHALL refuse to start an underscore-prefixed
+  component when `PLATFORM_ENVIRONMENT in {"staging", "production"}`
+  (mirror of R-100-032 for `auth_mode=none`).
+
+**Rationale.** Test-only components routinely lower their security
+posture for ergonomic reasons (Docker socket access for
+`_observability`, scriptable response queue for `_mock_llm`). They
+are deliberately unsuitable for shared / production environments.
+Codifying the guard at three levels (manifests, CI, runtime) makes
+"oh I forgot to disable that" impossible to ship silently.
+
+---
+
+**End of 100-SPEC-ARCHITECTURE.md v9.**

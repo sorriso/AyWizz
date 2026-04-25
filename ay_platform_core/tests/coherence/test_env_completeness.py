@@ -1,6 +1,6 @@
 # =============================================================================
 # File: test_env_completeness.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/tests/coherence/test_env_completeness.py
 # Description: Coherence checks that tie the application's Pydantic-settings
 #              classes to the canonical env files (`.env.example` at the
@@ -13,9 +13,12 @@
 #                   override a platform knob via env.
 #
 #                2. NO ORPHANS — every variable declared in an env file
-#                   corresponds to a live Settings field. Orphan lines
-#                   signal stale config: a variable was removed from the
-#                   code but the env file kept lying about it.
+#                   either (a) corresponds to a live Settings field or
+#                   (b) belongs to the `_INFRA_BOOTSTRAP_VARS` whitelist
+#                   (variables consumed by Docker images / init
+#                   containers, not by Python code — e.g. ArangoDB and
+#                   MinIO root credentials per R-100-118 v2). Orphan
+#                   lines outside both categories signal stale config.
 #
 #              The env-var name for a given field is derived as follows:
 #                - If the field has a `validation_alias` (string), that is
@@ -26,6 +29,13 @@
 #              and `main.py` — these are the canonical homes of Settings
 #              subclasses in the repo (§4.1). Extending to other module
 #              paths is a follow-up if a new convention emerges.
+#
+#              v2: added the infra-bootstrap whitelist for variables that
+#              live in the env file by design (R-100-110 v2 — single
+#              source of truth) but are NOT mapped to Pydantic Settings
+#              because they are consumed only by Docker images / init
+#              containers (e.g. `ARANGO_ROOT_PASSWORD`, `MINIO_ROOT_USER`).
+#              See R-100-118 v2.
 # =============================================================================
 
 from __future__ import annotations
@@ -61,6 +71,27 @@ _TESTS_DIR = _MONOREPO_ROOT / "ay_platform_core" / "tests"
 # repo keeps every Settings class in `config.py` or `main.py` — extend
 # this list if that convention shifts.
 _SETTINGS_CARRIER_NAMES = ("config", "main")
+
+
+# Variables that legitimately appear in every env file but are NOT mapped
+# to a Pydantic Settings field — they are consumed by Docker images and
+# init containers, not by Python code. Adding a name here is a deliberate
+# act: it widens the surface of "values that can sit in the env file with
+# no code-side reader". Keep this list short and document each entry
+# (R-100-118 v2).
+_INFRA_BOOTSTRAP_VARS: frozenset[str] = frozenset(
+    {
+        # Backend bootstrap admin credentials — used by:
+        #   - the `arangodb` and `minio` Docker services (init password)
+        #   - the `arangodb_init` and `minio_init` one-shot containers
+        #     when they create the runtime app users (R-100-118 v2).
+        # Never read by any Python component at runtime.
+        "ARANGO_ROOT_PASSWORD",
+        "ARANGO_ROOT_USERNAME",
+        "MINIO_ROOT_PASSWORD",
+        "MINIO_ROOT_USER",
+    }
+)
 
 
 def _discover_settings_classes() -> list[type[BaseSettings]]:
@@ -242,10 +273,14 @@ class TestEnvFileCompleteness:
     ) -> None:
         expected = _expected_env_vars()
         parsed = _parse_env_file(env_path)
-        orphans = sorted(set(parsed.keys()) - set(expected.keys()))
+        # Allowed = Settings-field names ∪ infra-bootstrap whitelist.
+        allowed = set(expected.keys()) | _INFRA_BOOTSTRAP_VARS
+        orphans = sorted(set(parsed.keys()) - allowed)
         assert not orphans, (
             f"{env_path.name} carries {len(orphans)} orphan var(s): {orphans}. "
-            f"Either restore the matching Settings field, or drop the line."
+            f"Either restore the matching Settings field, drop the line, or "
+            f"add the variable to _INFRA_BOOTSTRAP_VARS if it is consumed "
+            f"only by Docker images / init containers (R-100-118 v2)."
         )
 
 

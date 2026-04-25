@@ -26,13 +26,20 @@ from ay_platform_core.c4_orchestrator.router import router
 from ay_platform_core.c4_orchestrator.service import OrchestratorService
 from ay_platform_core.c8_llm.client import LLMGatewayClient
 from ay_platform_core.c8_llm.config import ClientSettings
+from ay_platform_core.observability import (
+    TraceContextMiddleware,
+    configure_logging,
+)
+from ay_platform_core.observability.config import LoggingSettings
 
 
 def create_app(config: OrchestratorConfig | None = None) -> FastAPI:
     cfg = config or OrchestratorConfig()
-    arango_client = ArangoClient(hosts=f"http://{cfg.arango_host}:{cfg.arango_port}")
+    log_cfg = LoggingSettings()
+    configure_logging(component="c4_orchestrator", settings=log_cfg)
+    arango_client = ArangoClient(hosts=cfg.arango_url)
     db = arango_client.db(
-        cfg.arango_db, username=cfg.arango_user, password=cfg.arango_password
+        cfg.arango_db, username=cfg.arango_username, password=cfg.arango_password
     )
     repo = OrchestratorRepository(db)
 
@@ -54,6 +61,7 @@ def create_app(config: OrchestratorConfig | None = None) -> FastAPI:
         await llm_client.aclose()
 
     app = FastAPI(title="C4 Orchestrator", lifespan=lifespan)
+    app.add_middleware(TraceContextMiddleware, sample_rate=log_cfg.trace_sample_rate)
     app.include_router(router)
     app.state.orchestrator_service = service
 

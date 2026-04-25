@@ -26,6 +26,8 @@ from typing import Any
 
 import httpx
 
+from ay_platform_core.observability import make_traced_client
+
 
 class OllamaEmbedder:
     """Embedding adapter that calls Ollama's /api/embeddings endpoint.
@@ -52,7 +54,7 @@ class OllamaEmbedder:
         self.dimension: int = -1
         self._base_url = base_url.rstrip("/")
         self._owns_client = client is None
-        self._client = client or httpx.AsyncClient(
+        self._client = client or make_traced_client(
             base_url=self._base_url, timeout=request_timeout_s
         )
         self._probe_lock = asyncio.Lock()

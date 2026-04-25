@@ -1,17 +1,22 @@
 # =============================================================================
 # File: config.py
-# Version: 2
+# Version: 3
 # Path: ay_platform_core/src/ay_platform_core/c2_auth/config.py
-# Description: Configuration for C2 Auth Service. All values read from
-#              environment variables; defaults target local development.
-#              v2: harmonised env-var naming — every field is now read via
-#              the `C2_` prefix (was `AUTH_*` / `ARANGO_*` in v1). The
-#              only exception is `PLATFORM_ENVIRONMENT`, which is
-#              cross-cutting platform-wide and declared via
-#              `validation_alias` so all components share one variable.
+# Description: Configuration for C2 Auth Service.
+#
+#              v3: env-var single-source refactor (R-100-110 v2, R-100-111 v2).
+#              Facts that are platform-wide identical (Arango URL, DB name,
+#              shared application credentials, OS-level switches) are now
+#              read from UNPREFIXED env vars via `validation_alias`. Only
+#              fields that legitimately differ between components keep the
+#              `C2_` prefix (auth mode, JWT keys, token TTL).
+#
+#              v2: harmonised env-var naming under the C2_ prefix.
+#              v1: initial.
 #
 # @relation implements:R-100-111
 # @relation implements:R-100-112
+# @relation implements:R-100-110
 # =============================================================================
 
 from __future__ import annotations
@@ -26,22 +31,39 @@ class AuthConfig(BaseSettings):
     """Settings for C2 Auth Service, loaded from environment.
 
     Priority: init kwargs > env vars > defaults.
-    Env-var names are ``C2_<FIELD>`` (case-insensitive, upper-cased on disk).
+    Per-component fields use the ``C2_`` prefix; shared fields use
+    ``validation_alias`` to read unprefixed names.
     """
 
-    # populate_by_name=True so `AuthConfig.model_validate({"platform_environment": ...})`
-    # continues to work alongside the PLATFORM_ENVIRONMENT validation_alias.
+    # populate_by_name=True so model_validate(...) accepts field names
+    # alongside the validation_alias for shared knobs.
     model_config = SettingsConfigDict(
         env_prefix="c2_", extra="ignore", populate_by_name=True
     )
 
-    # ---- Auth mode ----------------------------------------------------------
+    # ---- Platform-wide (read without prefix via validation_alias) -----------
+    platform_environment: Literal["development", "testing", "staging", "production"] = (
+        Field(default="development", validation_alias="PLATFORM_ENVIRONMENT")
+    )
+
+    # Shared ArangoDB connection — every component talks to the same cluster
+    # and the same logical database; ownership boundaries are enforced at the
+    # collection level (R-100-012 v3) and via the dedicated app user.
+    arango_url: str = Field(
+        default="http://arangodb:8529", validation_alias="ARANGO_URL"
+    )
+    arango_db: str = Field(default="platform", validation_alias="ARANGO_DB")
+    arango_username: str = Field(default="ay_app", validation_alias="ARANGO_USERNAME")
+    arango_password: str = Field(
+        default="changeme", validation_alias="ARANGO_PASSWORD"
+    )
+
+    # ---- C2-specific (C2_ prefix) ------------------------------------------
     auth_mode: Literal["none", "local", "sso"] = Field(
         default="none",
         description="Pluggable auth mode. R-100-030.",
     )
 
-    # ---- JWT signing --------------------------------------------------------
     jwt_algorithm: Literal["HS256", "RS256", "EdDSA"] = Field(
         default="HS256",
         description="Signing algorithm. HS256 for dev, RS256/EdDSA for prod. R-100-038.",
@@ -63,18 +85,15 @@ class AuthConfig(BaseSettings):
         description="Token lifetime in seconds. Default 1h per E-100-001.",
     )
 
-    # ---- Platform-wide guard ------------------------------------------------
-    # Read from `PLATFORM_ENVIRONMENT` (no prefix) so every component shares
-    # a single variable in the env file. `validation_alias` overrides the
-    # env_prefix rule for this specific field.
-    platform_environment: Literal["development", "testing", "staging", "production"] = Field(
-        default="development",
-        validation_alias="PLATFORM_ENVIRONMENT",
-        description="Deployment environment. 'none' mode forbidden in prod/staging. R-100-032.",
+    # Pre-existing admin user bootstrapped by the C2 lifespan when
+    # `auth_mode == "local"`. Ignored in `none` / `sso` modes — but the
+    # values are still declared here so the env file stays exhaustive
+    # (R-100-110 v2). R-100-118 v2.
+    local_admin_username: str = Field(
+        default="admin",
+        description="Username of the bootstrap admin (auth_mode=local).",
     )
-
-    # ---- ArangoDB (local mode) ----------------------------------------------
-    arango_url: str = Field(default="http://localhost:8529")
-    arango_db_name: str = Field(default="platform")
-    arango_username: str = Field(default="root")
-    arango_password: str = Field(default="")
+    local_admin_password: str = Field(
+        default="changeme",
+        description="Password of the bootstrap admin (auth_mode=local).",
+    )

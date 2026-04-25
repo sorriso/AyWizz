@@ -25,6 +25,11 @@ from ay_platform_core.c7_memory.embedding.deterministic import DeterministicHash
 from ay_platform_core.c7_memory.embedding.ollama import OllamaEmbedder
 from ay_platform_core.c7_memory.router import router
 from ay_platform_core.c7_memory.service import MemoryService
+from ay_platform_core.observability import (
+    TraceContextMiddleware,
+    configure_logging,
+)
+from ay_platform_core.observability.config import LoggingSettings
 
 
 def _build_embedder(cfg: MemoryConfig) -> EmbeddingProvider:
@@ -41,7 +46,7 @@ def _build_embedder(cfg: MemoryConfig) -> EmbeddingProvider:
         )
     if name == "ollama":
         return OllamaEmbedder(
-            base_url=cfg.embedding_ollama_url,
+            base_url=cfg.ollama_url,
             model_id=cfg.embedding_model_id,
             request_timeout_s=cfg.embedding_ollama_timeout_s,
         )
@@ -53,9 +58,11 @@ def _build_embedder(cfg: MemoryConfig) -> EmbeddingProvider:
 
 def create_app(config: MemoryConfig | None = None) -> FastAPI:
     cfg = config or MemoryConfig()
-    arango_client = ArangoClient(hosts=f"http://{cfg.arango_host}:{cfg.arango_port}")
+    log_cfg = LoggingSettings()
+    configure_logging(component="c7_memory", settings=log_cfg)
+    arango_client = ArangoClient(hosts=cfg.arango_url)
     db = arango_client.db(
-        cfg.arango_db, username=cfg.arango_user, password=cfg.arango_password
+        cfg.arango_db, username=cfg.arango_username, password=cfg.arango_password
     )
     repo = MemoryRepository(db)
     embedder = _build_embedder(cfg)
@@ -72,6 +79,7 @@ def create_app(config: MemoryConfig | None = None) -> FastAPI:
             await aclose()
 
     app = FastAPI(title="C7 Memory Service", lifespan=lifespan)
+    app.add_middleware(TraceContextMiddleware, sample_rate=log_cfg.trace_sample_rate)
     app.include_router(router)
     app.state.memory_service = service
 

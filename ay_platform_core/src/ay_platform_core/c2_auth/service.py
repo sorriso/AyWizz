@@ -279,7 +279,7 @@ def _build_cached_service() -> AuthService:
     if config.auth_mode != "none":
         repo = AuthRepository.from_config(
             config.arango_url,
-            config.arango_db_name,
+            config.arango_db,
             config.arango_username,
             config.arango_password,
         )

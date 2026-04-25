@@ -22,13 +22,20 @@ from ay_platform_core.c5_requirements.events.null_publisher import NullPublisher
 from ay_platform_core.c5_requirements.router import router
 from ay_platform_core.c5_requirements.service import RequirementsService
 from ay_platform_core.c5_requirements.storage.minio_storage import RequirementsStorage
+from ay_platform_core.observability import (
+    TraceContextMiddleware,
+    configure_logging,
+)
+from ay_platform_core.observability.config import LoggingSettings
 
 
 def create_app(config: RequirementsConfig | None = None) -> FastAPI:
     cfg = config or RequirementsConfig()
-    arango_client = ArangoClient(hosts=f"http://{cfg.arango_host}:{cfg.arango_port}")
+    log_cfg = LoggingSettings()
+    configure_logging(component="c5_requirements", settings=log_cfg)
+    arango_client = ArangoClient(hosts=cfg.arango_url)
     db = arango_client.db(
-        cfg.arango_db, username=cfg.arango_user, password=cfg.arango_password
+        cfg.arango_db, username=cfg.arango_username, password=cfg.arango_password
     )
     repo = RequirementsRepository(db)
 
@@ -48,6 +55,7 @@ def create_app(config: RequirementsConfig | None = None) -> FastAPI:
         yield
 
     app = FastAPI(title="C5 Requirements Service", lifespan=lifespan)
+    app.add_middleware(TraceContextMiddleware, sample_rate=log_cfg.trace_sample_rate)
     app.include_router(router)
     app.state.requirements_service = service
 

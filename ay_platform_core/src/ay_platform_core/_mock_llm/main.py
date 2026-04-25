@@ -25,6 +25,12 @@ from typing import Any
 from fastapi import FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel
 
+from ay_platform_core.observability import (
+    TraceContextMiddleware,
+    configure_logging,
+)
+from ay_platform_core.observability.config import LoggingSettings
+
 
 class EnqueueRequest(BaseModel):
     """Admin endpoint payload.
@@ -37,7 +43,10 @@ class EnqueueRequest(BaseModel):
 
 
 def create_app() -> FastAPI:
+    log_cfg = LoggingSettings()
+    configure_logging(component="_mock_llm", settings=log_cfg)
     app = FastAPI(title="Mock LLM (C8 stand-in)")
+    app.add_middleware(TraceContextMiddleware, sample_rate=log_cfg.trace_sample_rate)
 
     responses: list[dict[str, Any]] = []
     calls_seen: list[dict[str, Any]] = []

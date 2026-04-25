@@ -106,7 +106,11 @@ def _override_for(field: FieldInfo) -> tuple[str, Any]:
             f"({field!r})"
         )
 
-    if annotation is bool or default in (True, False):
+    # Annotation is authoritative. NB: `1.0 in (True, False)` evaluates True
+    # in Python (booleans are ints), so we MUST NOT use a `default in (...)`
+    # short-circuit — that catches float fields whose default happens to
+    # be 1.0 / 0.0 and routes them through the bool branch.
+    if annotation is bool:
         new_value = not bool(default)
         return ("true" if new_value else "false", new_value)
 
@@ -124,6 +128,18 @@ def _override_for(field: FieldInfo) -> tuple[str, Any]:
 
     if annotation is float:
         new_float = float(default) + 1.0 if isinstance(default, (int, float)) else 1.25
+        # Respect numeric constraints declared via Field(ge=..., le=...).
+        for meta in field.metadata:
+            ge = getattr(meta, "ge", None)
+            le = getattr(meta, "le", None)
+            if ge is not None and new_float < ge:
+                new_float = float(ge) + 0.1
+            if le is not None and new_float > le:
+                # Pick a value inside [ge, le] that is not the default.
+                lower = float(ge) if ge is not None else 0.0
+                new_float = (lower + float(le)) / 2.0
+                if new_float == default:
+                    new_float = lower
         return str(new_float), new_float
 
     if annotation is str:

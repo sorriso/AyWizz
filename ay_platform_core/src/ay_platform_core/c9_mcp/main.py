@@ -28,6 +28,12 @@ from ay_platform_core.c9_mcp.remote import (
 from ay_platform_core.c9_mcp.router import router
 from ay_platform_core.c9_mcp.server import MCPServer
 from ay_platform_core.c9_mcp.tools.base import build_default_toolset
+from ay_platform_core.observability import (
+    TraceContextMiddleware,
+    configure_logging,
+    make_traced_client,
+)
+from ay_platform_core.observability.config import LoggingSettings
 
 
 class MCPRemoteSettings(BaseSettings):
@@ -46,12 +52,14 @@ def create_app(
 ) -> FastAPI:
     cfg = config or MCPConfig()
     rcfg = remote or MCPRemoteSettings()
+    log_cfg = LoggingSettings()
+    configure_logging(component="c9_mcp", settings=log_cfg)
 
-    c5_client = httpx.AsyncClient(
+    c5_client = make_traced_client(
         base_url=rcfg.c5_base_url,
         timeout=rcfg.http_timeout_seconds,
     )
-    c6_client = httpx.AsyncClient(
+    c6_client = make_traced_client(
         base_url=rcfg.c6_base_url,
         timeout=rcfg.http_timeout_seconds,
     )
@@ -69,6 +77,7 @@ def create_app(
         await c6_client.aclose()
 
     app = FastAPI(title="C9 MCP Server", lifespan=lifespan)
+    app.add_middleware(TraceContextMiddleware, sample_rate=log_cfg.trace_sample_rate)
     app.include_router(router)
     app.state.mcp_server = server
 

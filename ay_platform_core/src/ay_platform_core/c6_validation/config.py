@@ -1,13 +1,22 @@
 # =============================================================================
 # File: config.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/src/ay_platform_core/c6_validation/config.py
-# Description: Runtime settings for C6. Env prefix `C6_`.
+# Description: Runtime settings for C6 Validation Pipeline Registry.
+#
+#              v2: env-var single-source refactor (R-100-110 v2, R-100-111
+#              v2). Shared infra params read via validation_alias. Per-
+#              component fields keep the `C6_` prefix.
 #
 # @relation implements:R-700-050
+# @relation implements:R-100-110
+# @relation implements:R-100-111
+# @relation implements:R-100-112
 # =============================================================================
 
 from __future__ import annotations
+
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -16,20 +25,34 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class ValidationConfig(BaseSettings):
     """C6 runtime configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="c6_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="c6_", extra="ignore", populate_by_name=True
+    )
 
-    # ArangoDB (c6_runs, c6_findings)
-    arango_host: str = "arangodb"
-    arango_port: int = 8529
-    arango_db: str = "platform"
-    arango_user: str = "root"
-    arango_password: str = "password"
+    # ---- Platform-wide (read without prefix via validation_alias) -----------
+    platform_environment: Literal["development", "testing", "staging", "production"] = (
+        Field(default="development", validation_alias="PLATFORM_ENVIRONMENT")
+    )
 
-    # MinIO (validation-reports/<project>/<run>.json)
-    minio_endpoint: str = "minio:9000"
-    minio_access_key: str = "minioadmin"
-    minio_secret_key: str = "minioadmin"
-    minio_secure: bool = False
+    # Shared ArangoDB
+    arango_url: str = Field(
+        default="http://arangodb:8529", validation_alias="ARANGO_URL"
+    )
+    arango_db: str = Field(default="platform", validation_alias="ARANGO_DB")
+    arango_username: str = Field(default="ay_app", validation_alias="ARANGO_USERNAME")
+    arango_password: str = Field(
+        default="changeme", validation_alias="ARANGO_PASSWORD"
+    )
+
+    # Shared MinIO
+    minio_endpoint: str = Field(default="minio:9000", validation_alias="MINIO_ENDPOINT")
+    minio_access_key: str = Field(default="ay_app", validation_alias="MINIO_ACCESS_KEY")
+    minio_secret_key: str = Field(
+        default="changeme", validation_alias="MINIO_SECRET_KEY"
+    )
+    minio_secure: bool = Field(default=False, validation_alias="MINIO_SECURE")
+
+    # ---- C6-specific (C6_ prefix) ------------------------------------------
     minio_bucket: str = "validation"
 
     # Per-check disable flags. Consumed by the service before dispatching a
@@ -42,7 +65,5 @@ class ValidationConfig(BaseSettings):
     default_check_enabled: bool = Field(default=True)
 
     # Cap on the number of findings written per run. Protects the DB when a
-    # pathological run emits thousands of findings. Additional findings are
-    # truncated with a single `severity=info` finding of
-    # `check_id="<plugin>:truncated"`.
+    # pathological run emits thousands of findings.
     max_findings_per_run: int = Field(default=5_000, ge=10)

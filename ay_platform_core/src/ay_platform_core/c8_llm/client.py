@@ -25,6 +25,7 @@ from typing import Any
 import httpx
 
 from ay_platform_core.c8_llm.config import ClientSettings
+from ay_platform_core.observability import make_traced_client
 from ay_platform_core.c8_llm.models import (
     BudgetStatus,
     ChatCompletionRequest,
@@ -65,7 +66,7 @@ class LLMGatewayClient:
         # connection pooling is shared. Otherwise spawn a dedicated client
         # and close it via `aclose()`.
         self._owned_client = http_client is None
-        self._client = http_client or httpx.AsyncClient(
+        self._client = http_client or make_traced_client(
             base_url=settings.gateway_url,
             timeout=httpx.Timeout(
                 settings.request_timeout_seconds,

@@ -94,6 +94,7 @@ Specs live in `requirements/` at the monorepo root. Do **not** reload all of the
 
 | File | Scope |
 |---|---|
+| `requirements/050-ARCHITECTURE-OVERVIEW.md` | **Read first.** One-page snapshot of today's topology, conventions, credential classes, and an "implemented vs. specified" map. Authoritative on shape, defers to numbered specs for detail. |
 | `requirements/999-SYNTHESIS.md` | Cross-cutting decisions (D-001 ... D-013), roadmap, open questions. Entry point for architectural context. |
 | `requirements/100-SPEC-ARCHITECTURE.md` | Component decomposition (C1-C15), contracts, scaling, failure domains, deployment targets. |
 | `requirements/meta/100-SPEC-METHODOLOGY.md` | Authoring conventions: ID scheme, frontmatter, versioning, `@relation` markers, git workflow. |
@@ -153,13 +154,43 @@ component directory, follow this convention:
   Service, ConfigMap, Secret stubs, Ingress, NetworkPolicy). Raw
   YAML unless explicitly specified otherwise; **no Helm** (per
   active decision D-C1 in `SESSION-STATE.md` §3).
-- `infra/<component>/docker/` - `Dockerfile` and any build-time
-  assets for the production image. One Dockerfile per component;
-  multi-stage builds preferred.
+- `infra/<component>/docker/` - per-component `Dockerfile` and any
+  build-time assets when the component owns its image (independent
+  build deps, distinct codebase). Multi-stage builds preferred.
+  When **multiple components share the same runtime stack and
+  codebase**, the per-component pattern is replaced by a **tier
+  Dockerfile** under `infra/docker/` (see "Tier Dockerfiles" below).
 - `infra/<component>/scripts/` - deployment and operational scripts
   (bash, idempotent when possible, shebang-first-line). Scripts that
   are shared across components live in `infra/scripts/` (no
   component prefix).
+
+**Tier Dockerfiles** (`infra/docker/Dockerfile.<tier>`).
+
+The platform has two logical tiers behind C1:
+
+- **api** — Python FastAPI tier. All in-process backbone components
+  (C2 Auth, C3 Conversation, C4 Orchestrator, C5 Requirements,
+  C6 Validation, C7 Memory, C9 MCP, plus the `_mock_llm` test
+  helper) live in the **single** Python package
+  `ay_platform_core` and share `pyproject.toml`. They SHALL be
+  packaged from one shared `infra/docker/Dockerfile.api` image,
+  differentiated at runtime by the env variable `COMPONENT_MODULE`
+  (per `R-100-114` v2). One image, N containers.
+- **ui** — Next.js / TypeScript tier (`ay_platform_ui/`, scaffold
+  not yet present). Will be packaged from
+  `infra/docker/Dockerfile.ui` when the UI scaffold lands.
+
+Tier Dockerfiles SHALL NOT bake `--reload`, hot-reload watchers, or
+any other dev-only behaviour into their `CMD`. Live-reload is opted
+in by overriding `command:` in the dev compose file. This keeps the
+same image production-grade by default and dev-friendly only when
+the dev orchestration explicitly asks for it.
+
+Off-the-shelf images consumed without modification (Traefik for C1,
+ArangoDB for C11, MinIO for C10, n8n for C12, Ollama) SHALL NOT have
+any `Dockerfile` under `infra/`; they are pinned by tag in the
+compose / K8s manifests.
 
 **Contracts with `ay_platform_core/`**:
 
@@ -620,8 +651,12 @@ reading order is:
 
 1. `CLAUDE.md` (this file) - behaviour, project context, conventions.
 2. `.claude/SESSION-STATE.md` - current state, open questions, next step.
-3. Specs under `requirements/` on demand (per §3 navigation map).
-4. `.claude/sessions/*.md` only if the user references a past session
+3. `requirements/050-ARCHITECTURE-OVERVIEW.md` - one-page snapshot of
+   today's topology, credentials, conventions; "implemented vs.
+   specified" map. Authoritative on shape; defers to numbered specs
+   for detail.
+4. Other specs under `requirements/` on demand (per §3 navigation map).
+5. `.claude/sessions/*.md` only if the user references a past session
    or if historical rationale is required for a decision.
 
 ### 9.4 Session close (wrapping up)
@@ -856,4 +891,4 @@ a spec gap (C: stop, clarify), or an intentional non-behaviour
 
 ---
 
-*End of `CLAUDE.md` v15.*
+*End of `CLAUDE.md` v17.*

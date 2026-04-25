@@ -1,0 +1,95 @@
+# =============================================================================
+# File: Dockerfile.api
+# Version: 1
+# Path: infra/docker/Dockerfile.api
+# Description: Shared image for the platform's Python API tier.
+#
+#   The Python tier is a SINGLE package — `ay_platform_core` — that bundles
+#   every in-process FastAPI component (C2 Auth, C3 Conversation,
+#   C4 Orchestrator, C5 Requirements, C6 Validation, C7 Memory, C9 MCP,
+#   plus the test-only `_mock_llm`). One image, N containers.
+#
+#   The component to start is selected at RUNTIME via the env variable
+#   `COMPONENT_MODULE` (lowercase Python module name under
+#   `ay_platform_core`, e.g. `c2_auth`, `c4_orchestrator`, `_mock_llm`).
+#   It is NEVER a build-arg — that lets the same image power any number
+#   of containers in compose / Deployments in K8s, differing only by env.
+#
+#   The CMD is production-grade: no `--reload`, no `--reload-dir`. Dev
+#   workflows enable live reload by overriding `command:` in the compose
+#   file (per R-100-114 v2 + CLAUDE.md §4.5 "Tier Dockerfiles").
+#
+#   Build context is the monorepo ROOT (declared in compose via
+#   `context: ../..`), so the COPY paths reference `ay_platform_core/`
+#   directly without a relative-path dance.
+#
+#   Replaces `Dockerfile.python-service` (v2). Functional changes:
+#     - Renamed (per R-100-117): `python-service` → `api`.
+#     - Removed `ARG COMPONENT_MODULE` and `ENV COMPONENT_MODULE` from
+#       the runtime stage; the variable is supplied per container at
+#       runtime.
+#     - Removed `--reload --reload-dir` from CMD; dev compose now
+#       overrides `command:` to opt in.
+#     - HEALTHCHECK directive removed; healthchecks live at the
+#       orchestrator layer (compose / K8s probes) where they can be
+#       tuned per environment without rebuilding the image.
+# =============================================================================
+
+ARG PYTHON_VERSION=3.13-slim
+
+
+# ----------------------------------------------------------------------------
+# Builder stage: install build deps, create venv, install ay_platform_core
+# in editable mode from pyproject.toml. The editable install registers a
+# `.pth` entry pointing at /app/ay_platform_core/src; that path is also the
+# bind-mount target in dev compose, so source edits on the host are picked
+# up live without a rebuild (with `--reload` opt-in via compose `command:`).
+# ----------------------------------------------------------------------------
+FROM python:${PYTHON_VERSION} AS builder
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential \
+      libffi-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY ay_platform_core/pyproject.toml /app/ay_platform_core/pyproject.toml
+COPY ay_platform_core/src /app/ay_platform_core/src
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+RUN pip install --upgrade pip setuptools wheel
+RUN pip install -e /app/ay_platform_core
+
+
+# ----------------------------------------------------------------------------
+# Runtime stage: minimal Python image with the prepared venv + source tree.
+# No build deps, no dev tooling. Self-contained: runnable with no host
+# bind-mount (required for K8s where there is no host filesystem to bind).
+# ----------------------------------------------------------------------------
+FROM python:${PYTHON_VERSION} AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:${PATH}"
+
+COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /app /app
+
+RUN groupadd --system app && useradd --system --gid app --no-create-home app \
+    && chown -R app:app /app
+
+USER app
+WORKDIR /app
+
+EXPOSE 8000
+
+# Production-grade CMD. `${COMPONENT_MODULE}` is read from the runtime
+# environment supplied by compose / K8s. No `--reload`: dev compose
+# overrides `command:` to enable it on top of this image.
+CMD exec uvicorn "ay_platform_core.${COMPONENT_MODULE}.main:app" \
+      --host 0.0.0.0 --port 8000

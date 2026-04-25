@@ -27,13 +27,20 @@ from ay_platform_core.c6_validation.service import ValidationService
 from ay_platform_core.c6_validation.storage.minio_storage import (
     ValidationSnapshotStorage,
 )
+from ay_platform_core.observability import (
+    TraceContextMiddleware,
+    configure_logging,
+)
+from ay_platform_core.observability.config import LoggingSettings
 
 
 def create_app(config: ValidationConfig | None = None) -> FastAPI:
     cfg = config or ValidationConfig()
-    arango_client = ArangoClient(hosts=f"http://{cfg.arango_host}:{cfg.arango_port}")
+    log_cfg = LoggingSettings()
+    configure_logging(component="c6_validation", settings=log_cfg)
+    arango_client = ArangoClient(hosts=cfg.arango_url)
     db = arango_client.db(
-        cfg.arango_db, username=cfg.arango_user, password=cfg.arango_password
+        cfg.arango_db, username=cfg.arango_username, password=cfg.arango_password
     )
     repo = ValidationRepository(db)
 
@@ -59,6 +66,7 @@ def create_app(config: ValidationConfig | None = None) -> FastAPI:
         yield
 
     app = FastAPI(title="C6 Validation Pipeline Registry", lifespan=lifespan)
+    app.add_middleware(TraceContextMiddleware, sample_rate=log_cfg.trace_sample_rate)
     app.include_router(router)
     app.state.validation_service = service
 

@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # =============================================================================
 # File: e2e_stack.sh
-# Version: 2
+# Version: 3
 # Path: ay_platform_core/scripts/e2e_stack.sh
 # Description: One-stop helper for the system-test stack.
 #              Wraps `docker compose` + seed + `pytest tests/system/`.
 #
+#              v3: pass `--env-file <ENV_FILE>` to every `docker compose`
+#              invocation so Compose's ${VAR} substitution reads from
+#              the test env file (R-100-118 v2). Without this, the root
+#              credentials referenced by the `arangodb` and `minio`
+#              services would not resolve.
 #              v2: moved from /workspace/scripts/ to
 #              ay_platform_core/scripts/. Compose file lives alongside the
 #              tests at ay_platform_core/tests/docker-compose.yml.
@@ -28,6 +33,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AY_CORE="$(cd "$SCRIPT_DIR/.." && pwd)"                   # .../ay_platform_core
 MONOREPO_ROOT="$(cd "$AY_CORE/.." && pwd)"                # .../<monorepo>
 COMPOSE_FILE="$AY_CORE/tests/docker-compose.yml"
+ENV_FILE="$AY_CORE/tests/.env.test"
 
 STACK_BASE_URL="${STACK_BASE_URL:-http://localhost}"
 
@@ -43,7 +49,7 @@ cmd_up() {
   echo "==> Building images + starting stack"
   echo "    compose file: $COMPOSE_FILE"
   echo "    build ctx:    $MONOREPO_ROOT"
-  docker compose -f "$COMPOSE_FILE" up -d --build
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --build
   echo "==> Stack is starting; services will report healthy shortly"
   echo "    Traefik dashboard: http://localhost:8080"
   echo "    Public API:        $STACK_BASE_URL"
@@ -52,12 +58,12 @@ cmd_up() {
 cmd_down() {
   _require_docker
   echo "==> Tearing down stack + volumes"
-  docker compose -f "$COMPOSE_FILE" down -v --remove-orphans
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" down -v --remove-orphans
 }
 
 cmd_status() {
   _require_docker
-  docker compose -f "$COMPOSE_FILE" ps
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps
 }
 
 cmd_logs() {
@@ -67,7 +73,7 @@ cmd_logs() {
     echo "usage: $0 logs <service-name>" >&2
     exit 2
   fi
-  docker compose -f "$COMPOSE_FILE" logs -f "$service"
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" logs -f "$service"
 }
 
 cmd_seed() {
