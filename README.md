@@ -10,7 +10,7 @@ Path: README.md
 
 ![tests](https://github.com/Sorriso/AyWizz/actions/workflows/ci-tests.yml/badge.svg?branch=main)
 ![build](https://github.com/Sorriso/AyWizz/actions/workflows/ci-build-images.yml/badge.svg?branch=main)
-![coverage](https://img.shields.io/endpoint?url=https://gist.github.com/sorriso/69f0ecb4365b782a836a18852d8189ed/raw/124aba2aa6b560a8cdf9f3167bc74a8345cf663f/aywizz-coverage.json)
+![coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/Sorriso/69f0ecb4365b782a836a18852d8189ed/raw/aywizz-coverage.json)
 
 ---
 
