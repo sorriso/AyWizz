@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
+from typing import Any
 
 import pytest
 
@@ -24,8 +26,11 @@ pytestmark = pytest.mark.unit
 def _make_record(
     msg: str = "hello",
     level: int = logging.INFO,
-    extra: dict | None = None,
-    exc_info: tuple | None = None,
+    extra: dict[str, Any] | None = None,
+    # exc_info matches what `sys.exc_info()` returns: a 3-tuple of
+    # (type, value, tb) or all-None. Typed `Any` to dodge the noisy
+    # union; the formatter accepts whatever logging.LogRecord accepts.
+    exc_info: Any = None,
 ) -> logging.LogRecord:
     record = logging.LogRecord(
         name="ay.test",
@@ -111,8 +116,6 @@ class TestJSONFormatter:
         try:
             raise RuntimeError("boom")
         except RuntimeError:
-            import sys
-
             exc_info = sys.exc_info()
         out = json.loads(formatter.format(_make_record(exc_info=exc_info)))
         assert "exc_info" in out

@@ -25,13 +25,13 @@ from typing import Any
 import httpx
 
 from ay_platform_core.c8_llm.config import ClientSettings
-from ay_platform_core.observability import make_traced_client
 from ay_platform_core.c8_llm.models import (
     BudgetStatus,
     ChatCompletionRequest,
     ChatCompletionResponse,
     CostSummary,
 )
+from ay_platform_core.observability import make_traced_client
 
 
 class LLMGatewayError(RuntimeError):

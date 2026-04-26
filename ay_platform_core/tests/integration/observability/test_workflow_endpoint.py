@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -81,7 +82,7 @@ def _summary_entry(
 
 
 @pytest.fixture(scope="function")
-def seeded_app() -> tuple[TestClient, str]:
+def seeded_app() -> Iterator[tuple[TestClient, str]]:
     """Build the app, pre-seed two traces, return a TestClient + the
     trace_id of the multi-span trace (so tests can target it)."""
     app = create_app(ObservabilityConfig())

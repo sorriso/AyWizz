@@ -22,11 +22,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-from fastapi import HTTPException
 
 from ay_platform_core._observability.buffer import LogEntry, LogRingBuffer
 from ay_platform_core._observability.collector import LogCollector

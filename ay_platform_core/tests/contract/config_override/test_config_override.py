@@ -73,7 +73,7 @@ def _env_var_for_field(cls: type[BaseSettings], field_name: str, field: FieldInf
 # ---------------------------------------------------------------------------
 
 
-def _override_for(field: FieldInfo) -> tuple[str, Any]:
+def _override_for(field: FieldInfo) -> tuple[str, Any]:  # noqa: PLR0912 — type-dispatch + Field constraints (ge/le) require this branching
     """Return (env_string_value, expected_runtime_value) for a field.
 
     The env value is the string that would appear in a .env file; the

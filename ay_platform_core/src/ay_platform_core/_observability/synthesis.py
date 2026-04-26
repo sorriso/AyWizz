@@ -23,9 +23,10 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from collections.abc import Iterable
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
-from typing import Any, Iterable
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -158,10 +159,7 @@ def synthesise_workflow(spans: list[Span]) -> dict[str, Any]:
     # parentless spans exist (rare — usually a multi-trace bug), pick
     # the chronological earliest so the envelope still makes sense.
     parentless = [s for s in sorted_spans if not s.parent_span_id]
-    if parentless:
-        root_span_id = parentless[0].span_id
-    else:
-        root_span_id = sorted_spans[0].span_id
+    root_span_id = parentless[0].span_id if parentless else sorted_spans[0].span_id
 
     return {
         "trace_id": trace_id,

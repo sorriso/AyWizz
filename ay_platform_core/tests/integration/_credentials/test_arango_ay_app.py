@@ -19,12 +19,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from collections.abc import Iterator
+from typing import Any, cast
 
 import pytest
 from arango import ArangoClient  # type: ignore[attr-defined]
+from arango.collection import StandardCollection
 from arango.exceptions import ArangoServerError
+
 from tests.fixtures.containers import ArangoEndpoint, cleanup_arango_database
 
 pytestmark = pytest.mark.integration
@@ -68,10 +72,8 @@ def app_db(arango_container: ArangoEndpoint) -> Iterator[tuple[str, str]]:
     try:
         yield (db_name, user_name)
     finally:
-        try:
+        with contextlib.suppress(ArangoServerError):
             sys_db.delete_user(user_name, ignore_missing=True)
-        except ArangoServerError:
-            pass
         cleanup_arango_database(arango_container, db_name)
 
 
@@ -90,12 +92,18 @@ class TestArangoAyAppUsability:
         db = client.db(db_name, username=user_name, password=_AY_APP_PASSWORD)
 
         coll_name = f"items_{uuid.uuid4().hex[:6]}"
-        coll = db.create_collection(coll_name)
+        # `db.create_collection` is typed as a Union including async/batch
+        # job variants; in this synchronous test it is always a
+        # `StandardCollection`. Cast once so the rest of the test reads
+        # cleanly without per-call ignores.
+        coll = cast(StandardCollection, db.create_collection(coll_name))
         try:
-            doc_meta = coll.insert({"_key": "k1", "value": 42})
+            doc_meta = cast(
+                dict[str, Any], coll.insert({"_key": "k1", "value": 42})
+            )
             assert doc_meta["_key"] == "k1"
 
-            fetched = coll.get("k1")
+            fetched = cast(dict[str, Any] | None, coll.get("k1"))
             assert fetched is not None
             assert fetched["value"] == 42
 
@@ -114,14 +122,17 @@ class TestArangoAyAppUsability:
         db = client.db(db_name, username=user_name, password=_AY_APP_PASSWORD)
 
         coll_name = f"aql_{uuid.uuid4().hex[:6]}"
-        coll = db.create_collection(coll_name)
+        coll = cast(StandardCollection, db.create_collection(coll_name))
         try:
             coll.insert({"_key": "a", "n": 1})
             coll.insert({"_key": "b", "n": 2})
+            # `bind_vars` accepts mixed scalars; mypy infers a too-narrow
+            # union from the literal dict, so we annotate the variable.
+            bind_vars: dict[str, Any] = {"@col": coll_name, "threshold": 2}
             cursor = db.aql.execute(
                 "FOR d IN @@col FILTER d.n >= @threshold "
                 "SORT d._key RETURN d._key",
-                bind_vars={"@col": coll_name, "threshold": 2},
+                bind_vars=bind_vars,
             )
             assert list(cursor) == ["b"]  # type: ignore[arg-type]
         finally:

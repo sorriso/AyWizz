@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import threading
 from collections import defaultdict, deque
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable
 
 from ay_platform_core._observability.parser import SEVERITY_RANK, is_at_least
 

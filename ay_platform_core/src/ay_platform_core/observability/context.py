@@ -80,7 +80,7 @@ def new_trace_context(*, sampled: bool = True) -> TraceContext:
     )
 
 
-def parse_traceparent(value: str | None) -> TraceContext | None:
+def parse_traceparent(value: str | None) -> TraceContext | None:  # noqa: PLR0911 — lenient parser: each malformed-input shape returns None separately for clarity
     """Parse a W3C `traceparent` header value.
 
     Returns ``None`` for any malformed input (the caller SHOULD then

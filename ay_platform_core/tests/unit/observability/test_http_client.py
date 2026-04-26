@@ -8,6 +8,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
+
 import httpx
 import pytest
 
@@ -65,11 +68,6 @@ async def test_no_active_context_no_header_injected() -> None:
         captured.append(request.headers.get("traceparent"))
         return httpx.Response(200, json={"ok": True})
 
-    # Reset ContextVars by setting a no-op
-    import contextvars
-
-    ctx = contextvars.copy_context()
-
     async def _under_clean_context() -> None:
         transport = httpx.MockTransport(_handler)
         async with make_traced_client(
@@ -78,10 +76,10 @@ async def test_no_active_context_no_header_injected() -> None:
             await client.get("/x")
 
     # Run in a fresh context where the trace ContextVars are unset.
-    import asyncio
-
     new_ctx = contextvars.Context()
-    fut = asyncio.get_event_loop().create_task(_under_clean_context(), context=new_ctx)
+    fut = asyncio.get_event_loop().create_task(
+        _under_clean_context(), context=new_ctx
+    )
     await fut
 
     assert len(captured) == 1

@@ -155,7 +155,7 @@ def _find_header(scope: Scope, name: bytes) -> str | None:
     for key, value in scope.get("headers", []):
         if key.lower() == name_lower:
             try:
-                return value.decode("ascii")
+                return str(value.decode("ascii"))
             except UnicodeDecodeError:
                 return None
     return None

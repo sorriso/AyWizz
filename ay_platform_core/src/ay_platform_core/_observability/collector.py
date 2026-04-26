@@ -56,7 +56,12 @@ class LogCollector:
         self._buffer = buffer
         self._prefix = service_filter_prefix
         self._docker_socket_path = docker_socket_path
-        self._client: object | None = None  # lazily initialised in start()
+        # `Any` because the docker SDK is intentionally not imported at
+        # construction (R-100-120 — module SHALL be import-side-effect-
+        # free). `Any` lets the typed methods (`containers.list()`,
+        # `events()`, `containers.get()`, `close()`) typecheck without
+        # importing docker at the module level.
+        self._client: Any = None  # lazily initialised in start()
         self._stop_event = threading.Event()
         self._threads: list[threading.Thread] = []
         # Container IDs for which a stream is already running. Guards
@@ -70,14 +75,17 @@ class LogCollector:
     def start(self) -> None:
         """Connect to the Docker daemon, attach to every running `ay-*`
         container, and spawn the events watcher for late-arrivals."""
-        import docker  # local import: keeps module import side-effect free
+        # Local import is intentional: keeps the module side-effect-free
+        # at import time. `docker.DockerClient(...)` connects to the
+        # daemon — that MUST not happen during pytest collection / lint.
+        import docker  # noqa: PLC0415
 
         self._client = docker.DockerClient(
             base_url=f"unix://{self._docker_socket_path}"
         )
 
         # Initial scan: anything already up.
-        for c in self._client.containers.list():  # type: ignore[attr-defined]
+        for c in self._client.containers.list():
             if c.name.startswith(self._prefix):
                 self._attach_to(c)
 
@@ -99,14 +107,14 @@ class LogCollector:
         self._stop_event.set()
         if self._client is not None:
             try:
-                self._client.close()  # type: ignore[attr-defined]
+                self._client.close()
             except Exception as exc:  # pragma: no cover — best-effort cleanup
                 _log.warning("docker client close failed: %s", exc)
             self._client = None
 
     # ---- internals ---------------------------------------------------------
 
-    def _attach_to(self, container: "DockerContainer") -> bool:
+    def _attach_to(self, container: DockerContainer) -> bool:
         """Spawn a stream thread for `container` if not already monitored.
 
         Returns ``True`` when a new thread was spawned, ``False`` when
@@ -142,7 +150,7 @@ class LogCollector:
         if self._client is None:  # pragma: no cover — defensive
             return
         try:
-            event_stream = self._client.events(  # type: ignore[attr-defined]
+            event_stream = self._client.events(
                 decode=True,
                 filters={"type": "container", "event": "start"},
             )
@@ -173,13 +181,13 @@ class LogCollector:
         if self._client is None:  # pragma: no cover — race with stop()
             return
         try:
-            container = self._client.containers.get(cid)  # type: ignore[attr-defined]
+            container = self._client.containers.get(cid)
         except Exception as exc:
             _log.warning("could not fetch container %s after start event: %s", cid[:12], exc)
             return
         self._attach_to(container)
 
-    def _stream_one(self, container: "DockerContainer") -> None:
+    def _stream_one(self, container: DockerContainer) -> None:
         """Read every line of a container's log stream, parse, push to buffer."""
         service = container.name.removeprefix(self._prefix) or container.name
         try:

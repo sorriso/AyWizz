@@ -283,7 +283,7 @@ class TestEnvFileCompleteness:
     ) -> None:
         expected = _expected_env_vars()
         parsed = _parse_env_file(env_path)
-        # Allowed = Settings-field names ∪ infra-bootstrap whitelist.
+        # Allowed = Settings-field names UNION infra-bootstrap whitelist.
         allowed = set(expected.keys()) | _INFRA_BOOTSTRAP_VARS
         orphans = sorted(set(parsed.keys()) - allowed)
         assert not orphans, (

@@ -18,16 +18,19 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
+import tempfile
 import uuid
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from minio import Minio
+from minio.credentials.providers import StaticProvider
 from minio.error import S3Error
 from minio.minioadmin import MinioAdmin
-from minio.credentials.providers import StaticProvider
 
 from tests.fixtures.containers import MinioEndpoint, cleanup_minio_bucket
 
@@ -102,33 +105,34 @@ def app_user(
         yield (bucket_names, user_name)
     finally:
         # Detach + remove user, drop policy, drop buckets.
-        try:
+        with contextlib.suppress(Exception):
             admin.user_remove(user_name)
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             admin.policy_remove(policy_name)
-        except Exception:
-            pass
         for b in bucket_names:
             cleanup_minio_bucket(minio_container, b)
 
 
-def _write_temp_json(doc: dict) -> str:
+def _write_temp_json(doc: dict[str, Any]) -> str:
     """Persist a policy doc to a temp file and return its path.
 
     `minio.MinioAdmin.policy_add` accepts a path on disk, not a Python
-    object, so we materialise it. Files in `/tmp` are picked up by the
-    test container's process; cleanup is handled by the OS.
+    object, so we materialise it. The OS reclaims `/tmp` files on
+    container teardown; explicit cleanup is not required for a test
+    fixture.
     """
-    import tempfile
-
-    handle = tempfile.NamedTemporaryFile(
+    # `delete=False` is required: `policy_add` reads the file by path
+    # AFTER we've returned, so we must NOT auto-delete on context exit.
+    # SIM115 is silenced because the close-then-read-by-path pattern is
+    # the documented contract of `MinioAdmin.policy_add`.
+    handle = tempfile.NamedTemporaryFile(  # noqa: SIM115
         mode="w", suffix=".json", delete=False, encoding="utf-8"
     )
-    json.dump(doc, handle)
-    handle.flush()
-    handle.close()
+    try:
+        json.dump(doc, handle)
+        handle.flush()
+    finally:
+        handle.close()
     return handle.name
 
 

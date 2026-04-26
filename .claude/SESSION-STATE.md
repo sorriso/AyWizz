@@ -18,7 +18,7 @@ Autonomous write policy: per CLAUDE.md v15 §9.1, Claude MAY write this
 
 # Project State — ay_monorepo
 
-**Last updated:** 2026-04-26 (audit spec ↔ implém auto-généré — `requirements/060-IMPLEMENTATION-STATUS.md` v1 + script `ay_platform_core/scripts/checks/audit_implementation_status.py`. 258 R-* indexés depuis 100/200/300/400/700/800-SPEC. Scan multi-target : `src/` (Python), `infra/` + `tests/docker-compose.yml` + `.github/workflows/` (YAML/Dockerfile/shell). Multi-id markers supportés (`@relation implements:R-A R-B R-C`). Bilan : **0 divergent** (tout R-* approved a au moins un marker), 124 implemented/tested, 124 not-yet (status=draft, attendu pour v2), 10 test-only à investiguer. 5 markers ajoutés pour combler les divergents (test_env_completeness, _mock_llm, docker-compose, ci-tests). CLAUDE.md v17→v18 (§3 navigation map). 050-OVERVIEW v4→v5. 672 verts. Hier: AUTH_MODE=local + auth context propagation + 39/40 system tests verts.
+**Last updated:** 2026-04-26 (CI lint/typecheck cleanup — 26 ruff + 39 mypy → **0/0**. Cause : `pytest` direct n'invoque pas `run_tests.sh` qui orchestre ruff+mypy+pytest. `run_tests.sh ci` confirmé vert localement. Fixes : auto `--fix --unsafe-fixes` (UP035, UP037, I001, etc.) + manuels (PLC0415 `import docker` lazy avec `noqa` + raison, type-args `dict[str,Any]`/`list[X]`/`tuple[X,Y]`, `_client: object|None` → `Any`, casts `StandardCollection` pour python-arango, `Iterator[X]` pour pytest yield fixtures). Plus tôt aujourd'hui: audit spec ↔ implém auto-généré (`060-IMPLEMENTATION-STATUS.md` v1 + script). Hier: AUTH_MODE=local + auth context propagation + 39/40 system tests verts.
 
 ---
 
@@ -112,6 +112,7 @@ Autonomous write policy: per CLAUDE.md v15 §9.1, Claude MAY write this
 ## 6. Sessions archive
 
 Latest entries (most recent first):
+- `.claude/sessions/2026-04-26-ci-lint-typecheck-cleanup.md` — 26 ruff + 39 mypy errors → 0/0. Causes localisées au code récent (observability/, _observability/, tests integration creds + obs). Erreurs non-hidden mais non-vérifiées (`pytest` direct ne lance pas ruff/mypy ; `run_tests.sh ci` les orchestre). Pipeline complet vert localement post-fix.
 - `.claude/sessions/2026-04-26-implementation-status-audit.md` — Script `audit_implementation_status.py` + doc `060-IMPLEMENTATION-STATUS.md` (258 R-* indexés). Multi-id markers + scan infra/CI YAML. **0 divergent** après ajout de 5 markers manquants. CLAUDE.md v17→v18 (§3 navigation), 050-OVERVIEW v4→v5.
 - `.claude/sessions/2026-04-25-test-debt-resolution.md` — Système de tests E2E débloqué. `.env.test` AUTH_MODE=none→local + alice/seed-password bootstrap. Auth context propagation (X-User-Id/X-User-Roles/X-Tenant-Id via ContextVars + httpx hook). C2 `/auth/verify` ajoute X-Tenant-Id, Traefik authResponseHeaders étendu, HEAD support sur `/auth/config`. `admin_token` fixture session-scoped (rate-limit 429). Wrapper `e2e_stack.sh seed` corrigé. **907 tests verts** (672+196+39 +1 xfail n8n webhook hot-reload).
 - `.claude/sessions/2026-04-25-ci-cd-github-actions.md` — CI/CD initial via GitHub Actions + GHCR. `.github/workflows/ci-tests.yml` (push main → run_tests.sh ci + run_coherence_checks.sh, parallèle) + `ci-build-images.yml` (workflow_run gated → push ghcr.io/<owner>/aywizz-api). 999-SYNTHESIS v4→v5 (D-014), 100-SPEC v10→v11 (R-100-123).

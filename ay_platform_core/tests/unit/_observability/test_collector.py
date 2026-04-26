@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -35,7 +36,9 @@ class _FakeContainer:
 
 
 @pytest.fixture
-def collector_with_recorder(monkeypatch: pytest.MonkeyPatch) -> tuple[LogCollector, list[str]]:
+def collector_with_recorder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[tuple[LogCollector, list[str]]]:
     """Stub `_stream_one` so `_attach_to` does not actually start a stream;
     instead it records each container it would have attached to."""
     buffer = LogRingBuffer(max_per_service=10)
@@ -52,7 +55,7 @@ def collector_with_recorder(monkeypatch: pytest.MonkeyPatch) -> tuple[LogCollect
     real_thread = threading.Thread
 
     class _SyncThread:
-        def __init__(self, target: Any, args: tuple, **_: Any) -> None:
+        def __init__(self, target: Any, args: tuple[Any, ...], **_: Any) -> None:
             self._target = target
             self._args = args
 
@@ -125,8 +128,9 @@ class TestEventDispatch:
         class _FakeClient:
             containers = _FakeContainersAPI()
 
-        # Bypass typing — _client is intentionally Any in production code.
-        collector._client = _FakeClient()  # type: ignore[assignment]
+        # Inject the fake client directly. `_client` is `Any` in production
+        # so this assignment is type-clean.
+        collector._client = _FakeClient()
 
     def test_start_event_with_matching_prefix_attaches(
         self,

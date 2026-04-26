@@ -61,7 +61,7 @@ def make_traced_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
     already declared `event_hooks`, the context hook is appended to its
     `request` list (no override).
     """
-    event_hooks: dict[str, list] = kwargs.pop("event_hooks", {}) or {}
+    event_hooks: dict[str, list[Any]] = kwargs.pop("event_hooks", {}) or {}
     request_hooks = list(event_hooks.get("request", []))
     request_hooks.append(_inject_request_context)
     event_hooks = {**event_hooks, "request": request_hooks}

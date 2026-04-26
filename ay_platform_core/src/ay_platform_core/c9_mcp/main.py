@@ -16,7 +16,6 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-import httpx
 from fastapi import FastAPI
 from pydantic_settings import BaseSettings, SettingsConfigDict
 

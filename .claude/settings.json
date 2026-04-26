@@ -1,5 +1,7 @@
 {
-  "_comment_header": "File: .claude/settings.json | Version: 7 | Path: .claude/settings.json | Claude Code permissions for the ay_monorepo. Evaluation order: deny > ask > allow. v7 adds 3 belt-and-braces entries for the `./ay_platform_core/scripts/X` path form (hybrid form observed in Claude Code VS Code runs when the 'Always allow' option is unavailable). The canonical forms remain per CLAUDE.md v15 §5.7; these extra entries are a safety net, not the primary path Claude should use.",
+  "_comment_header": "File: .claude/settings.json | Version: 8 | Path: .claude/settings.json | Claude Code permissions for the ay_monorepo. Evaluation order: deny > ask > allow. v8 adds the `model` field at root level: alias `opus` (resolves to Opus 4.7 on Anthropic API per code.claude.com/docs/en/model-config). Effort defaults to xhigh on Opus 4.7 (no explicit setting needed). Note: macOS users may observe Issue #13242 where this field is occasionally ignored on startup; in that case, run /model opus inside the session or `export ANTHROPIC_MODEL=opus` before launching.",
+
+  "model": "opus",
 
   "permissions": {
     "allow": [

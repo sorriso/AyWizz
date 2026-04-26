@@ -34,7 +34,7 @@ from ay_platform_core.observability import (
 pytestmark = pytest.mark.integration
 
 
-def _build_back_app(captured: list[dict]) -> FastAPI:
+def _build_back_app(captured: list[dict[str, str]]) -> FastAPI:
     """Downstream service. Captures its own trace context on hit."""
     app = FastAPI()
     app.add_middleware(TraceContextMiddleware)
@@ -53,7 +53,7 @@ def _build_back_app(captured: list[dict]) -> FastAPI:
     return app
 
 
-def _build_front_app(back_app: FastAPI) -> tuple[FastAPI, list]:
+def _build_front_app(back_app: FastAPI) -> tuple[FastAPI, list[dict[str, str]]]:
     """Upstream service. Calls the back via make_traced_client so the
     current trace propagates as a `traceparent` outgoing header."""
     front = FastAPI()
@@ -63,7 +63,7 @@ def _build_front_app(back_app: FastAPI) -> tuple[FastAPI, list]:
     front.state.back_client = make_traced_client(
         transport=transport, base_url="http://back.local"
     )
-    front_captured: list[dict] = []
+    front_captured: list[dict[str, str]] = []
 
     @front.get("/outer")
     async def outer(request: Request) -> dict[str, str]:
@@ -83,7 +83,7 @@ def _build_front_app(back_app: FastAPI) -> tuple[FastAPI, list]:
 
 @pytest.mark.asyncio
 async def test_trace_id_propagates_front_to_back() -> None:
-    back_captured: list[dict] = []
+    back_captured: list[dict[str, str]] = []
     back = _build_back_app(back_captured)
     front, front_captured = _build_front_app(back)
 
@@ -121,7 +121,7 @@ async def test_trace_id_propagates_front_to_back() -> None:
 
 @pytest.mark.asyncio
 async def test_trace_id_starts_fresh_when_no_inbound() -> None:
-    back_captured: list[dict] = []
+    back_captured: list[dict[str, str]] = []
     back = _build_back_app(back_captured)
     front, front_captured = _build_front_app(back)
 
@@ -147,7 +147,7 @@ async def test_span_summaries_share_trace_id(
     """Phase-2 workflow synthesis foundation: every component emits a
     `span_summary` log line with the SAME trace_id, so a downstream
     aggregator can group by trace_id and reconstruct the workflow."""
-    back_captured: list[dict] = []
+    back_captured: list[dict[str, str]] = []
     back = _build_back_app(back_captured)
     front, _ = _build_front_app(back)
 

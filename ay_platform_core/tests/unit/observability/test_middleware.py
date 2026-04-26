@@ -29,7 +29,7 @@ from ay_platform_core.observability.middleware import TraceContextMiddleware
 pytestmark = pytest.mark.unit
 
 
-def _build_app(*, captured_ctx: dict, sample_rate: float = 1.0) -> FastAPI:
+def _build_app(*, captured_ctx: dict[str, str], sample_rate: float = 1.0) -> FastAPI:
     app = FastAPI()
     app.add_middleware(TraceContextMiddleware, sample_rate=sample_rate)
 
