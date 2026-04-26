@@ -7,6 +7,8 @@
 #
 # Coverage gate (--cov-fail-under=80) is enforced by ay_platform_core's
 # pyproject.toml; this workflow does NOT re-encode the threshold.
+#
+# @relation implements:R-100-123
 
 name: ci-tests
 

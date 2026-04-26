@@ -18,7 +18,7 @@ Autonomous write policy: per CLAUDE.md v15 §9.1, Claude MAY write this
 
 # Project State — ay_monorepo
 
-**Last updated:** 2026-04-25 (système de tests E2E débloqué — **907 tests verts** vs 693 hier soir. Switch `.env.test` AUTH_MODE=none→local + bootstrap admin alice/seed-password (`_ensure_local_admin`). Auth context propagation : ContextVars `current_user_id`/`current_user_roles`, middleware capture inbound X-User-*, `make_traced_client` injecte sur outbound — débloque MCP tool flows C9→C5/C6. C2 `/auth/verify` ajoute `X-Tenant-Id` ; Traefik authResponseHeaders étendu. `/auth/config` supporte HEAD. `admin_token` fixture session-scoped (résout 429 R-100-039). Wrapper `e2e_stack.sh seed` corrigé. Bilan : 672 unit/contract/coherence + 196 integration + 39 system + 1 xfail (n8n webhook hot-reload). Plus tôt aujourd'hui: CI/CD GitHub Actions + GHCR (D-014, R-100-123) ; R-100-122 port scheme ; `_observability` v2 ; workflow envelope synthesis (Q-100-014).
+**Last updated:** 2026-04-26 (audit spec ↔ implém auto-généré — `requirements/060-IMPLEMENTATION-STATUS.md` v1 + script `ay_platform_core/scripts/checks/audit_implementation_status.py`. 258 R-* indexés depuis 100/200/300/400/700/800-SPEC. Scan multi-target : `src/` (Python), `infra/` + `tests/docker-compose.yml` + `.github/workflows/` (YAML/Dockerfile/shell). Multi-id markers supportés (`@relation implements:R-A R-B R-C`). Bilan : **0 divergent** (tout R-* approved a au moins un marker), 124 implemented/tested, 124 not-yet (status=draft, attendu pour v2), 10 test-only à investiguer. 5 markers ajoutés pour combler les divergents (test_env_completeness, _mock_llm, docker-compose, ci-tests). CLAUDE.md v17→v18 (§3 navigation map). 050-OVERVIEW v4→v5. 672 verts. Hier: AUTH_MODE=local + auth context propagation + 39/40 system tests verts.
 
 ---
 
@@ -112,6 +112,7 @@ Autonomous write policy: per CLAUDE.md v15 §9.1, Claude MAY write this
 ## 6. Sessions archive
 
 Latest entries (most recent first):
+- `.claude/sessions/2026-04-26-implementation-status-audit.md` — Script `audit_implementation_status.py` + doc `060-IMPLEMENTATION-STATUS.md` (258 R-* indexés). Multi-id markers + scan infra/CI YAML. **0 divergent** après ajout de 5 markers manquants. CLAUDE.md v17→v18 (§3 navigation), 050-OVERVIEW v4→v5.
 - `.claude/sessions/2026-04-25-test-debt-resolution.md` — Système de tests E2E débloqué. `.env.test` AUTH_MODE=none→local + alice/seed-password bootstrap. Auth context propagation (X-User-Id/X-User-Roles/X-Tenant-Id via ContextVars + httpx hook). C2 `/auth/verify` ajoute X-Tenant-Id, Traefik authResponseHeaders étendu, HEAD support sur `/auth/config`. `admin_token` fixture session-scoped (rate-limit 429). Wrapper `e2e_stack.sh seed` corrigé. **907 tests verts** (672+196+39 +1 xfail n8n webhook hot-reload).
 - `.claude/sessions/2026-04-25-ci-cd-github-actions.md` — CI/CD initial via GitHub Actions + GHCR. `.github/workflows/ci-tests.yml` (push main → run_tests.sh ci + run_coherence_checks.sh, parallèle) + `ci-build-images.yml` (workflow_run gated → push ghcr.io/<owner>/aywizz-api). 999-SYNTHESIS v4→v5 (D-014), 100-SPEC v10→v11 (R-100-123).
 - `.claude/sessions/2026-04-25-port-scheme.md` — R-100-122 host-port scheme. `PORT_BASE=56000` paramétrable. Public 80→56000, dashboard 8080→56080, mock_llm 8001→59800, _obs 8002→59900. Slots déterministes Cn → BASE+n*100, test sidecars BASE+9000+. Spec 100-SPEC v9→v10. 693 verts.
@@ -135,11 +136,7 @@ Latest entries (most recent first):
 - `.claude/sessions/2026-04-23-coverage-discipline.md` — `CLAUDE.md` v11 §11 + `pyproject.toml` v4 coverage gate.
 - `.claude/sessions/2026-04-23-document-infra-top-level.md` — `CLAUDE.md` v10 documenting `infra/` top-level and its per-component structure.
 - `.claude/sessions/2026-04-22-c3-conversation-service.md` — C3 full implementation, C4 stub, expert-mode stub.
-- `.claude/sessions/2026-04-22-c1-gateway-traefik.md` — C1 Traefik v3 config, infra/c1_gateway/.
-- `.claude/sessions/2026-04-22-c2-auth-service.md` — C2 full implementation.
-- `.claude/sessions/2026-04-22-matcher-friendly-shell-discipline.md` — `CLAUDE.md` v8 §5.7.
-- `.claude/sessions/2026-04-22-test-debugging-discipline.md` — `CLAUDE.md` v7 §10.
-- `.claude/sessions/2026-04-22-setup-devcontainer-and-test-infra.md` — initial setup.
+- _Earlier 2026-04-22 entries_ : C1 gateway Traefik config, C2 auth full impl, matcher-friendly shell discipline (CLAUDE v8 §5.7), test debugging discipline (CLAUDE v7 §10), initial devcontainer + test infra setup. See `sessions/2026-04-22-*.md`.
 
 ---
 

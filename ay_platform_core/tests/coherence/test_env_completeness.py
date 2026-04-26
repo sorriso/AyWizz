@@ -36,6 +36,8 @@
 #              because they are consumed only by Docker images / init
 #              containers (e.g. `ARANGO_ROOT_PASSWORD`, `MINIO_ROOT_USER`).
 #              See R-100-118 v2.
+#
+# @relation implements:R-100-113
 # =============================================================================
 
 from __future__ import annotations

@@ -95,6 +95,7 @@ Specs live in `requirements/` at the monorepo root. Do **not** reload all of the
 | File | Scope |
 |---|---|
 | `requirements/050-ARCHITECTURE-OVERVIEW.md` | **Read first.** One-page snapshot of today's topology, conventions, credential classes, and an "implemented vs. specified" map. Authoritative on shape, defers to numbered specs for detail. |
+| `requirements/060-IMPLEMENTATION-STATUS.md` | Auto-generated cross-reference of every `R-NNN-XXX` spec entity vs. its `@relation implements:` markers in code/infra/CI and `@relation validates:` markers in tests. Re-generate via `python ay_platform_core/scripts/checks/audit_implementation_status.py --write requirements/060-IMPLEMENTATION-STATUS.md`. Status legend: `tested`, `implemented`, `test-only`, `divergent`, `not-yet`. |
 | `requirements/999-SYNTHESIS.md` | Cross-cutting decisions (D-001 ... D-013), roadmap, open questions. Entry point for architectural context. |
 | `requirements/100-SPEC-ARCHITECTURE.md` | Component decomposition (C1-C15), contracts, scaling, failure domains, deployment targets. |
 | `requirements/meta/100-SPEC-METHODOLOGY.md` | Authoring conventions: ID scheme, frontmatter, versioning, `@relation` markers, git workflow. |
@@ -891,4 +892,4 @@ a spec gap (C: stop, clarify), or an intentional non-behaviour
 
 ---
 
-*End of `CLAUDE.md` v17.*
+*End of `CLAUDE.md` v18.*

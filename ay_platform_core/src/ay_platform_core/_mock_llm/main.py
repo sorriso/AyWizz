@@ -15,6 +15,8 @@
 #              NOT a platform component; it exists purely to drive C4 / C9
 #              through realistic flows during system tests without a real
 #              LLM provider or cost.
+#
+# @relation implements:R-100-116
 # =============================================================================
 
 from __future__ import annotations

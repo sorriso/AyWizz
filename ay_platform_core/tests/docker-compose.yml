@@ -82,7 +82,7 @@
 #       Python service is one merge-key + one runtime env var.
 #   v2: added n8n (C12), ollama embeddings, real-llm profile.
 #
-# @relation implements:R-100-039 R-100-100 R-100-015 R-100-114 R-100-115 R-100-117
+# @relation implements:R-100-039 R-100-100 R-100-015 R-100-114 R-100-115 R-100-117 R-100-118 R-100-119 R-100-120 R-100-121 R-100-122
 # =============================================================================
 
 name: ay-platform

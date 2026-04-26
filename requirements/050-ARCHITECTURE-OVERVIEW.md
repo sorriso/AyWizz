@@ -1,6 +1,6 @@
 ---
 document: 050-ARCHITECTURE-OVERVIEW
-version: 4
+version: 5
 path: requirements/050-ARCHITECTURE-OVERVIEW.md
 language: en
 status: draft
@@ -276,6 +276,7 @@ spec only requires the SCHEME to be respected, not the absolute base.
 
 | Need to know about… | Read |
 |---|---|
+| Per-requirement implementation status (which `R-*` is implemented / tested / not-yet) | [060-IMPLEMENTATION-STATUS.md](060-IMPLEMENTATION-STATUS.md) (auto-generated) |
 | Component decomposition + scaling + auth + topology | [100-SPEC-ARCHITECTURE.md](100-SPEC-ARCHITECTURE.md) |
 | Pipeline & sub-agent orchestration | [200-SPEC-PIPELINE-AGENT.md](200-SPEC-PIPELINE-AGENT.md) |
 | Requirements service (C5) data model + APIs | [300-SPEC-REQUIREMENTS-MGMT.md](300-SPEC-REQUIREMENTS-MGMT.md) |
