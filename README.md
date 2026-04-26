@@ -1,6 +1,6 @@
 <!--
 File: README.md
-Version: 2
+Version: 3
 Path: README.md
 -->
 
@@ -10,7 +10,7 @@ Path: README.md
 
 ![tests](https://github.com/Sorriso/AyWizz/actions/workflows/ci-tests.yml/badge.svg?branch=main)
 ![build](https://github.com/Sorriso/AyWizz/actions/workflows/ci-build-images.yml/badge.svg?branch=main)
-![coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/<TON_USER>/<GIST_ID>/raw/aywizz-coverage.json)
+![coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/Sorriso/69f0ecb4365b782a836a18852d8189ed/raw/aywizz-coverage.json)
 
 ---
 
