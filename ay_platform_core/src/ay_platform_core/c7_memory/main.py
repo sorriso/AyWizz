@@ -1,11 +1,11 @@
 # =============================================================================
 # File: main.py
-# Version: 2
+# Version: 3
 # Path: ay_platform_core/src/ay_platform_core/c7_memory/main.py
-# Description: FastAPI app factory for C7 Memory Service. v2 adds adapter
-#              selection based on C7_EMBEDDING_ADAPTER
-#              ("deterministic-hash" default; "ollama" for real embeddings
-#              against an Ollama-compatible server).
+# Description: FastAPI app factory for C7 Memory Service. v3 wires
+#              `MemorySourceStorage` (MinIO blob storage for uploaded
+#              source files) — required by the multipart upload
+#              endpoint added in Phase B of the v1 functional plan.
 #
 # @relation implements:R-100-114
 # =============================================================================
@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 
 from arango import ArangoClient  # type: ignore[attr-defined]
 from fastapi import FastAPI
+from minio import Minio
 
 from ay_platform_core.c7_memory.config import MemoryConfig
 from ay_platform_core.c7_memory.db.repository import MemoryRepository
@@ -25,6 +26,7 @@ from ay_platform_core.c7_memory.embedding.deterministic import DeterministicHash
 from ay_platform_core.c7_memory.embedding.ollama import OllamaEmbedder
 from ay_platform_core.c7_memory.router import router
 from ay_platform_core.c7_memory.service import MemoryService
+from ay_platform_core.c7_memory.storage.minio_storage import MemorySourceStorage
 from ay_platform_core.observability import (
     TraceContextMiddleware,
     configure_logging,
@@ -66,11 +68,21 @@ def create_app(config: MemoryConfig | None = None) -> FastAPI:
     )
     repo = MemoryRepository(db)
     embedder = _build_embedder(cfg)
-    service = MemoryService(config=cfg, repo=repo, embedder=embedder)
+    minio_client = Minio(
+        cfg.minio_endpoint,
+        access_key=cfg.minio_access_key,
+        secret_key=cfg.minio_secret_key,
+        secure=cfg.minio_secure,
+    )
+    storage = MemorySourceStorage(minio_client, cfg.minio_bucket)
+    service = MemoryService(
+        config=cfg, repo=repo, embedder=embedder, storage=storage,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         repo._ensure_collections_sync()
+        await storage.ensure_bucket()
         yield
         # The Ollama adapter owns its httpx client; close it cleanly on
         # shutdown. Other adapters are no-op.

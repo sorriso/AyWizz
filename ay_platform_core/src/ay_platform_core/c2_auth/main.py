@@ -1,6 +1,6 @@
 # =============================================================================
 # File: main.py
-# Version: 2
+# Version: 3
 # Path: ay_platform_core/src/ay_platform_core/c2_auth/main.py
 # Description: FastAPI app factory for C2 Auth Service. Used by the
 #              production container (uvicorn ay_platform_core.c2_auth.main:app)
@@ -9,6 +9,10 @@
 #              are bootstrapped during the lifespan; in `local` auth mode an
 #              admin user is also bootstrapped from C2_LOCAL_ADMIN_*
 #              (R-100-118 v2).
+#
+#              v3: mounts admin_router at `/admin` (tenant lifecycle,
+#              tenant_manager only) and projects_router at
+#              `/api/v1/projects` (project lifecycle, admin / project_owner).
 #
 # @relation implements:R-100-030
 # @relation implements:R-100-118
@@ -23,10 +27,12 @@ from datetime import UTC, datetime
 
 from fastapi import FastAPI
 
+from ay_platform_core.c2_auth.admin_router import router as admin_router
 from ay_platform_core.c2_auth.config import AuthConfig
 from ay_platform_core.c2_auth.db.repository import AuthRepository
 from ay_platform_core.c2_auth.models import RBACGlobalRole, UserInternal, UserStatus
 from ay_platform_core.c2_auth.modes.local_mode import LocalMode
+from ay_platform_core.c2_auth.projects_router import router as projects_router
 from ay_platform_core.c2_auth.router import router
 from ay_platform_core.c2_auth.service import AuthService
 from ay_platform_core.c2_auth.service import get_service as c2_get_service
@@ -84,6 +90,8 @@ def create_app(config: AuthConfig | None = None) -> FastAPI:
     app = FastAPI(title="C2 Auth Service", lifespan=lifespan)
     app.add_middleware(TraceContextMiddleware, sample_rate=log_cfg.trace_sample_rate)
     app.include_router(router, prefix="/auth")
+    app.include_router(admin_router, prefix="/admin")
+    app.include_router(projects_router, prefix="/api/v1/projects")
     service = AuthService(cfg, repo)
     app.dependency_overrides[c2_get_service] = lambda: service
 

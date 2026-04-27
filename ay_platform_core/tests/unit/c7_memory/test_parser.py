@@ -11,6 +11,7 @@ import pytest
 
 from ay_platform_core.c7_memory.ingestion import parser as _parser_module
 from ay_platform_core.c7_memory.ingestion.parser import (
+    ParseFailureError,
     UnsupportedMimeError,
     parse,
     register_parser,
@@ -38,12 +39,17 @@ class TestParser:
         with pytest.raises(UnsupportedMimeError):
             parse("application/x-custom", b"anything")
 
-    def test_pdf_raises_not_implemented_by_default(self) -> None:
-        with pytest.raises(NotImplementedError, match="memory-pdf"):
-            parse("application/pdf", b"%PDF-1.4")
+    def test_pdf_corrupt_bytes_raise_parse_failure(self) -> None:
+        """Phase B activated the PDF parser. Garbage bytes labelled as
+        PDF SHALL raise ParseFailureError (not silently produce empty
+        text)."""
+        with pytest.raises(ParseFailureError, match="invalid PDF"):
+            parse("application/pdf", b"%PDF-1.4 not really a PDF")
 
-    def test_image_raises_not_implemented_by_default(self) -> None:
-        with pytest.raises(NotImplementedError, match="memory-ocr"):
+    def test_image_mime_no_longer_registered(self) -> None:
+        """v1 (Phase B) drops image/png and image/jpeg from the parser
+        registry. OCR is reserved for v1.5."""
+        with pytest.raises(UnsupportedMimeError):
             parse("image/png", b"\x89PNG")
 
     def test_register_parser_enables_new_mime(self) -> None:

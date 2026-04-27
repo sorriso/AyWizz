@@ -1,5 +1,5 @@
 {
-  "_comment": "Version: 1 | Path: infra/c12_workflow/workflows/ingest_text_source.json | Description: Minimal n8n workflow that wires the public POST /uploads/ingest-text endpoint to C7's memory-source ingestion API. Demonstrates the C12 -> C7 contract per R-100-081. Import via `docker compose exec c12 n8n import:workflow --input=/workflows/ingest_text_source.json` after bringing the stack up.",
+  "_comment": "Version: 1 | Path: infra/c12_workflow/workflows/ingest_text_source.json | Description: Minimal n8n workflow that wires the public POST /uploads/ingest-text endpoint to C7's memory-source ingestion API. Demonstrates the C12 -> C7 contract per R-100-081. Import via `docker compose exec c12 n8n import:workflow --input=/workflows/ingest_text_source.json` after bringing the stack up. @relation implements:R-100-080 R-100-081",
   "name": "Ingest text source (C12 -> C7)",
   "nodes": [
     {

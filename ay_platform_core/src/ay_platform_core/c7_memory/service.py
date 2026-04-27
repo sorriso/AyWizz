@@ -29,7 +29,11 @@ from ay_platform_core.c7_memory.config import MemoryConfig
 from ay_platform_core.c7_memory.db.repository import MemoryRepository
 from ay_platform_core.c7_memory.embedding.base import EmbeddingProvider
 from ay_platform_core.c7_memory.ingestion.chunker import chunk_text
-from ay_platform_core.c7_memory.ingestion.parser import UnsupportedMimeError, parse
+from ay_platform_core.c7_memory.ingestion.parser import (
+    ParseFailureError,
+    UnsupportedMimeError,
+    parse,
+)
 from ay_platform_core.c7_memory.models import (
     ChunkPublic,
     ChunkStatus,
@@ -45,6 +49,7 @@ from ay_platform_core.c7_memory.models import (
     SourcePublic,
 )
 from ay_platform_core.c7_memory.retrieval.similarity import cosine, snippet
+from ay_platform_core.c7_memory.storage.minio_storage import MemorySourceStorage
 
 
 class MemoryService:
@@ -55,10 +60,15 @@ class MemoryService:
         config: MemoryConfig,
         repo: MemoryRepository,
         embedder: EmbeddingProvider,
+        storage: MemorySourceStorage | None = None,
     ) -> None:
         self._config = config
         self._repo = repo
         self._embedder = embedder
+        # `storage` is optional: tests that don't exercise the upload
+        # endpoint can pass None. The /sources/upload route requires
+        # storage to be present and 503's otherwise.
+        self._storage = storage
 
     # ------------------------------------------------------------------
     # Ingestion (admin/test direct path — C12 upload still goes via NATS
@@ -69,6 +79,13 @@ class MemoryService:
     async def ingest_source(
         self, payload: SourceIngestRequest, *, tenant_id: str
     ) -> SourcePublic:
+        """Ingest a source whose CONTENT is already a UTF-8 string.
+
+        Used by C12 webhooks and tests. The string is round-tripped
+        through the parser registry to apply MIME-specific text shaping
+        (e.g. markdown frontmatter strip). For binary uploads (PDF /
+        DOCX) use `ingest_uploaded_source` instead.
+        """
         await self._enforce_quota(tenant_id, payload.project_id, payload.size_bytes)
 
         try:
@@ -77,22 +94,122 @@ class MemoryService:
             raise HTTPException(
                 status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc)
             ) from exc
-        except NotImplementedError as exc:
-            # PDF/image parsers not wired — return 501 with a clear message.
+        except ParseFailureError as exc:
             raise HTTPException(
-                status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(exc)
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
             ) from exc
 
+        return await self._index_parsed_source(
+            tenant_id=tenant_id,
+            project_id=payload.project_id,
+            source_id=payload.source_id,
+            mime_type=payload.mime_type,
+            uploaded_by=payload.uploaded_by,
+            size_bytes=payload.size_bytes,
+            parsed_text=text,
+        )
+
+    async def ingest_uploaded_source(
+        self,
+        *,
+        tenant_id: str,
+        project_id: str,
+        source_id: str,
+        mime_type: str,
+        uploaded_by: str,
+        content_bytes: bytes,
+    ) -> SourcePublic:
+        """Phase B of v1 plan — multipart-uploaded source.
+
+        Persists the raw bytes in MinIO (audit + re-parse), then runs
+        the same parse → chunk → embed → index pipeline as
+        `ingest_source`. Requires `storage` to be wired (otherwise
+        503).
+        """
+        if self._storage is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "blob storage not configured — POST /sources/upload "
+                    "requires MinIO to be available"
+                ),
+            )
+        size_bytes = len(content_bytes)
+        if size_bytes > self._config.max_upload_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=(
+                    f"upload exceeds max_upload_bytes "
+                    f"({self._config.max_upload_bytes} bytes)"
+                ),
+            )
+        await self._enforce_quota(tenant_id, project_id, size_bytes)
+
+        try:
+            text = parse(mime_type, content_bytes)
+        except UnsupportedMimeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc)
+            ) from exc
+        except ParseFailureError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+            ) from exc
+
+        # Persist the raw blob BEFORE indexing so a downstream failure
+        # leaves the operator with the original file to retry from.
+        await self._storage.put_source_blob(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            source_id=source_id,
+            data=content_bytes,
+            mime_type=mime_type,
+        )
+
+        return await self._index_parsed_source(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            source_id=source_id,
+            mime_type=mime_type,
+            uploaded_by=uploaded_by,
+            size_bytes=size_bytes,
+            parsed_text=text,
+        )
+
+    async def _index_parsed_source(
+        self,
+        *,
+        tenant_id: str,
+        project_id: str,
+        source_id: str,
+        mime_type: str,
+        uploaded_by: str,
+        size_bytes: int,
+        parsed_text: str,
+    ) -> SourcePublic:
+        """Shared post-parse pipeline used by both `ingest_source`
+        (string-based) and `ingest_uploaded_source` (bytes-based).
+        Chunks the text, embeds the chunks, and persists rows."""
+        # Synthesise a SourceIngestRequest-like payload for the helper
+        # builders below. We use the typed model where it'd compose
+        # cleanly; otherwise inline.
+        synth_payload = SourceIngestRequest(
+            source_id=source_id,
+            project_id=project_id,
+            mime_type=mime_type,  # type: ignore[arg-type]
+            content="placeholder-not-stored",
+            size_bytes=size_bytes,
+            uploaded_by=uploaded_by,
+        )
+
         chunks = chunk_text(
-            text,
+            parsed_text,
             token_size=self._config.chunk_token_size,
             overlap=self._config.chunk_overlap,
         )
         if not chunks:
-            # Empty source is a legitimate but boring case — record it so
-            # the operator sees why retrieval returns nothing.
             source_row = _source_row(
-                payload=payload,
+                payload=synth_payload,
                 tenant_id=tenant_id,
                 model_id=self._embedder.model_id,
                 chunk_count=0,
@@ -119,15 +236,17 @@ class MemoryService:
         now = datetime.now(UTC).isoformat()
         chunk_rows: list[dict[str, Any]] = []
         for chunk, vector in zip(chunks, vectors, strict=True):
-            content_hash = "sha256:" + hashlib.sha256(chunk.text.encode("utf-8")).hexdigest()
-            chunk_id = f"{payload.source_id}:{chunk.index}"
+            content_hash = (
+                "sha256:" + hashlib.sha256(chunk.text.encode("utf-8")).hexdigest()
+            )
+            chunk_id = f"{source_id}:{chunk.index}"
             chunk_rows.append({
-                "_key": f"{tenant_id}:{payload.project_id}:{chunk_id}",
+                "_key": f"{tenant_id}:{project_id}:{chunk_id}",
                 "chunk_id": chunk_id,
                 "tenant_id": tenant_id,
-                "project_id": payload.project_id,
+                "project_id": project_id,
                 "index": IndexKind.EXTERNAL_SOURCES.value,
-                "source_id": payload.source_id,
+                "source_id": source_id,
                 "entity_id": None,
                 "entity_version": None,
                 "chunk_index": chunk.index,
@@ -138,11 +257,11 @@ class MemoryService:
                 "model_dim": self._embedder.dimension,
                 "created_at": now,
                 "status": ChunkStatus.ACTIVE.value,
-                "metadata": {"mime_type": payload.mime_type},
+                "metadata": {"mime_type": mime_type},
             })
         await self._repo.upsert_chunks(chunk_rows)
         source_row = _source_row(
-            payload=payload,
+            payload=synth_payload,
             tenant_id=tenant_id,
             model_id=self._embedder.model_id,
             chunk_count=len(chunks),

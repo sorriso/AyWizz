@@ -84,3 +84,9 @@ class MemoryConfig(BaseSettings):
     # Retrieval scan cap (R-400-011). Queries that would scan more than
     # this many rows SHALL be filtered down first.
     retrieval_scan_cap: int = Field(default=50_000, ge=100)
+
+    # Upload limits (Phase B of v1 plan). 50 MiB cap — large enough for
+    # most PDFs / DOCX, small enough to keep request budgets bounded.
+    # Operators can raise this via env if production needs bigger sources;
+    # the chunker still bounds memory at the chunking stage.
+    max_upload_bytes: int = Field(default=50 * 1024 * 1024, ge=1024)

@@ -892,4 +892,160 @@ a spec gap (C: stop, clarify), or an intentional non-behaviour
 
 ---
 
-*End of `CLAUDE.md` v18.*
+## 12. Pre-commit / pre-claim Verification Discipline
+
+This section formalises a recurring observation: **`pytest` alone is not
+the CI pipeline**. The CI workflow (`.github/workflows/ci-tests.yml`)
+runs `ay_platform_core/scripts/run_tests.sh ci`, which orchestrates
+**three stages** in sequence: `ruff check` → `mypy` → `pytest`.
+Skipping any stage locally lets lint or type-check failures slip into
+a push that the CI then rejects.
+
+### 12.1 Authoritative test command
+
+The **only** authoritative way to verify the codebase is healthy is:
+
+```bash
+ay_platform_core/scripts/run_tests.sh ci
+```
+
+It writes its outputs to `ay_platform_core/reports/<timestamp>_ci/`
+(symlinked as `reports/latest`) and exits non-zero on any stage
+failure. The exit codes per stage (`metadata.json`): `1` ruff, `2`
+mypy, `3` pytest, `0` success.
+
+Direct `python -m pytest …` is acceptable for **iterative debugging
+of a specific test** (much faster, avoids the lint/typecheck waiting
+time during fix cycles). It is NOT acceptable as a closing check.
+
+### 12.2 When to run `run_tests.sh ci`
+
+Claude SHALL run `run_tests.sh ci` and verify "All stages OK" before:
+
+- Claiming a session is complete or that "tests pass" / "everything is green".
+- Updating `.claude/SESSION-STATE.md` §1 (Current stage) or §5 (Next planned action).
+- Writing a `.claude/sessions/*.md` journal entry that includes a "tests verts" claim.
+- Producing any commit message intended for the user to commit (the user commits, but the message claims state).
+
+The user does not need to ask for it — it is part of the closing
+discipline of any session that touched code or tests.
+
+### 12.3 When `run_tests.sh ci` fails
+
+Failures fall into the same §10.3 A/B/C/D taxonomy:
+
+- **Ruff failures** are usually **B (test defect)** or **operational
+  detail**: lint rule applies to a real issue (fix it) or to an
+  intentional pattern (`# noqa: <RULE>` with explanatory comment —
+  never naked).
+- **Mypy failures** are usually **A (implementation defect)** when
+  they reveal a missing type annotation, or **B** when an integration
+  test's casts have drifted. `# type: ignore[<code>]` is a last
+  resort with a comment justifying why.
+- **Pytest failures** route through §10 directly.
+
+Suppressing a finding (`# noqa`, `# type: ignore`) without a comment
+explaining WHY is forbidden — the same rationale as §10.2 #4
+(silent `pytest.skip`).
+
+### 12.4 Coupling with §10 / §11
+
+§10 is about **test correctness**. §11 is about **coverage
+quality**. §12 is about **the gate that surfaces both before push**.
+A failure surfaced by §12 does not relax the discipline of §10/§11 —
+the underlying issue is fixed at its root, not papered over.
+
+---
+
+## 13. Auth × Role × Scope Test Matrix
+
+Per `E-100-002 v2`, the platform's authorization model SHALL be exercised
+exhaustively along five dimensions for every HTTP endpoint:
+authentication mode, role gate, cross-tenant isolation, cross-project
+isolation, and backend state. The mechanism enforcing this is the
+**catalog-driven test matrix** under
+`ay_platform_core/tests/e2e/auth_matrix/`. This section is the
+governance contract: when, how, and why to extend it.
+
+### 13.1 Single source of truth
+
+`ay_platform_core/tests/e2e/auth_matrix/_catalog.py` lists every HTTP
+route in the platform exactly once, as an `EndpointSpec` describing
+its component, method, path, auth requirement, scope (none / tenant /
+project), accepted roles, excluded roles, success status, and
+backend persistence. All matrix tests, plus the auto-generated
+documentation, derive from this single file.
+
+The role taxonomy used in the catalog is the canonical 5-role
+hierarchy from E-100-002 v2 (`tenant_manager`, `admin` / `tenant_admin`,
+`project_owner`, `project_editor`, `project_viewer`). The `user`
+baseline role (no grants) is used for negative tests.
+
+### 13.2 Maintenance contract
+
+Adding or modifying an HTTP route SHALL include, in the same change:
+
+1. The route declaration in the component's `router.py` with the
+   correct `_require_role(...)` gate (or no gate if the route is
+   open / merely authenticated).
+2. An `EndpointSpec` row in `_catalog.py` describing the route. The
+   `accept_roles` / `accept_global_roles` fields SHALL match the
+   `_require_role` argument exactly. The `excluded_global_roles`
+   field SHALL list `tenant_manager` whenever the endpoint operates
+   on tenant content (per E-100-002 v2 separation of duties).
+3. Regeneration of `requirements/065-TEST-MATRIX.md` via
+   `python ay_platform_core/scripts/checks/generate_test_matrix_doc.py
+   --write requirements/065-TEST-MATRIX.md` so the human-readable
+   matrix tracks the catalog.
+
+A route that exists in code but is missing from `_catalog.py` is a
+**bug** — the coherence test
+`tests/coherence/test_route_catalog.py` fails the build until the
+catalog is updated. Likewise, a stale `EndpointSpec` (route deleted
+from code but still in the catalog) fails the build.
+
+### 13.3 Test files & dimensions
+
+The matrix lives in five test files, each parametrised on the
+catalog (so adding a row covers every dimension automatically):
+
+- `test_anonymous_access.py` — every non-OPEN endpoint, called
+  without identity, MUST NOT return 2xx.
+- `test_role_matrix.py` — for every ROLE_GATED endpoint:
+  insufficient role → 403; accepted role → not 401/403;
+  excluded global role (e.g. `tenant_manager` on content) → 403.
+- `test_isolation.py` — tenant- and project-scoped endpoints MUST
+  return 403/404 when called with the wrong tenant_id / project_id.
+- `test_backend_state.py` — write/delete endpoints SHALL be
+  observable in ArangoDB / MinIO after a successful call. Backend
+  assertions per spec are hand-written (one helper per resource type).
+- `test_auth_modes.py` — C2 boundary tests: `local` / `entraid`
+  (mock JWKS pending real C2 entraid integration) / `none` modes
+  produce equivalent JWT claims; downstream endpoints accept the
+  resulting forward-auth headers identically.
+
+### 13.4 Coupling with §8.4 (contract registry) and §10 (test discipline)
+
+`§8.4` registers PUBLIC INTERFACES (Pydantic schemas, NATS payloads).
+§13 catalogs HTTP routes. They are complementary: a new endpoint
+typically requires both a registry entry AND a catalog entry.
+
+§10's anti-patterns apply directly to matrix tests: do NOT make a
+matrix test pass by lowering the `excluded_global_roles` list to
+accept `tenant_manager` on a content endpoint, or by widening
+`accept_roles` to bypass an unintended 403. Such changes SHALL
+trigger §10.3 case A (implementation defect) — fix the role gate
+in the route, never relax the catalog.
+
+### 13.5 Generated documentation
+
+`requirements/065-TEST-MATRIX.md` is auto-generated from `_catalog.py`
+and is **not** hand-edited. It is committed to the repository so
+PR reviewers see the matrix change diff alongside the code change.
+The generator script (`scripts/checks/generate_test_matrix_doc.py`)
+supports `--write` (regenerate) and `--check` (assert no drift) and
+SHOULD be added to CI when the workflow next gets a refresh.
+
+---
+
+*End of `CLAUDE.md` v20.*

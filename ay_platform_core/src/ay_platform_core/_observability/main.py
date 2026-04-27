@@ -1,6 +1,6 @@
 # =============================================================================
 # File: main.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/src/ay_platform_core/_observability/main.py
 # Description: FastAPI app factory for the test-tier observability collector.
 #              Exposes a small HTTP surface for the test harness to read
@@ -11,8 +11,16 @@
 #              matches `_mock_llm`. Image is the shared `ay-api:local`,
 #              selected at runtime via `COMPONENT_MODULE=_observability`.
 #
+#              v2 (R-100-124): the `/workflows*` endpoints are now
+#              served by the shared `observability.workflow` router
+#              with a `BufferSpanSource`. Production K8s deployments
+#              re-use the same router with `LokiSpanSource` /
+#              `ElasticsearchSpanSource` — one synthesis code path,
+#              three storage backends.
+#
 # @relation implements:R-100-120
 # @relation implements:R-100-121
+# @relation implements:R-100-124
 # =============================================================================
 
 from __future__ import annotations
@@ -22,24 +30,21 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Query
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from ay_platform_core._observability.buffer import LogEntry, LogRingBuffer
 from ay_platform_core._observability.collector import LogCollector
-from ay_platform_core._observability.synthesis import (
-    Span,
-    group_by_trace,
-    list_recent_traces,
-    parse_lines,
-    synthesise_workflow,
-)
 from ay_platform_core.observability import (
     TraceContextMiddleware,
     configure_logging,
 )
 from ay_platform_core.observability.config import LoggingSettings
+from ay_platform_core.observability.workflow import (
+    BufferSpanSource,
+    make_workflow_router,
+)
 
 
 class ObservabilityConfig(BaseSettings):
@@ -139,45 +144,10 @@ def create_app(config: ObservabilityConfig | None = None) -> FastAPI:
         buffer.clear()
         return {"status": "cleared"}
 
-    # ---- Phase-3 workflow synthesis (Q-100-014) ------------------------
-    # Read all buffered log lines, parse `event=span_summary` records,
-    # group by trace_id, and serve the resulting envelope. The synthesis
-    # logic itself is in `_observability/synthesis.py` and is portable
-    # to any other source of span_summary records (Loki, Elasticsearch,
-    # etc.) — same algorithm, different ingestion.
-
-    def _all_spans() -> list[Span]:
-        # Pull every entry; the parser silently drops non-span_summary
-        # lines, so the cost is bounded by the span_summary fraction.
-        entries = buffer.tail(limit=100_000)
-        return parse_lines(entry.line for entry in entries)
-
-    @app.get("/workflows/{trace_id}")
-    async def workflow(trace_id: str) -> dict[str, object]:
-        """Return the synthesised workflow envelope for one trace_id."""
-        if not trace_id or len(trace_id) != 32:
-            raise HTTPException(
-                status_code=400,
-                detail="trace_id must be 32 hex characters",
-            )
-        grouped = group_by_trace(_all_spans())
-        spans = grouped.get(trace_id)
-        if not spans:
-            raise HTTPException(
-                status_code=404,
-                detail=(
-                    f"no span_summary records found for trace_id {trace_id} "
-                    f"in the buffered window"
-                ),
-            )
-        return synthesise_workflow(spans)
-
-    @app.get("/workflows")
-    async def workflows(
-        recent: Annotated[int, Query(ge=1, le=200)] = 10,
-    ) -> list[dict[str, object]]:
-        """List the most recent traces with one-line summaries."""
-        return list_recent_traces(_all_spans(), limit=recent)
+    # Workflow synthesis (Q-100-014 / R-100-124): the test-tier collector
+    # delegates to the shared production router with `BufferSpanSource`.
+    # Production K8s services mount the same router with Loki / ES.
+    app.include_router(make_workflow_router(BufferSpanSource(buffer)))
 
     return app
 

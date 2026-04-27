@@ -1,5 +1,5 @@
 {
-  "_comment_header": "File: .claude/settings.json | Version: 8 | Path: .claude/settings.json | Claude Code permissions for the ay_monorepo. Evaluation order: deny > ask > allow. v8 adds the `model` field at root level: alias `opus` (resolves to Opus 4.7 on Anthropic API per code.claude.com/docs/en/model-config). Effort defaults to xhigh on Opus 4.7 (no explicit setting needed). Note: macOS users may observe Issue #13242 where this field is occasionally ignored on startup; in that case, run /model opus inside the session or `export ANTHROPIC_MODEL=opus` before launching.",
+  "_comment_header": "File: .claude/settings.json | Version: 9 | Path: .claude/settings.json | Claude Code permissions for the ay_monorepo. Evaluation order: deny > ask > allow. v9 allowlists the `docker_test_cleanup.sh` wrapper (5 forms per CLAUDE.md §5.3) — destructive `docker stop` / `docker rm` are denied at top level; the wrapper is the explicit, auditable entry point for cleaning testcontainer-spawned containers after a pytest crash. v8 added the `model` field.",
 
   "model": "opus",
 
@@ -23,6 +23,11 @@
       "Bash(./ay_platform_core/scripts/e2e_stack.sh:*)",
       "Bash(bash scripts/e2e_stack.sh:*)",
       "Bash(bash ay_platform_core/scripts/e2e_stack.sh:*)",
+      "Bash(./scripts/docker_test_cleanup.sh:*)",
+      "Bash(ay_platform_core/scripts/docker_test_cleanup.sh:*)",
+      "Bash(./ay_platform_core/scripts/docker_test_cleanup.sh:*)",
+      "Bash(bash scripts/docker_test_cleanup.sh:*)",
+      "Bash(bash ay_platform_core/scripts/docker_test_cleanup.sh:*)",
 
       "Bash(python -m pytest:*)",
       "Bash(python -m ruff:*)",

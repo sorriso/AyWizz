@@ -25,9 +25,13 @@ from ay_platform_core.c2_auth.models import (
     AuthConfigResponse,
     JWTClaims,
     LoginRequest,
+    ProjectCreate,
+    ProjectPublic,
     RBACProjectRole,
     ResetPasswordRequest,
     SessionInfo,
+    TenantCreate,
+    TenantPublic,
     TokenResponse,
     UserCreateRequest,
     UserInternal,
@@ -264,6 +268,144 @@ class AuthService:
     async def revoke_session(self, session_id: str) -> None:
         repo = self._require_repo()
         await repo.deactivate_session(session_id)
+
+    # ---- Tenant lifecycle (tenant_manager only) -----------------------------
+
+    async def create_tenant(self, payload: TenantCreate) -> TenantPublic:
+        repo = self._require_repo()
+        if await repo.get_tenant(payload.tenant_id) is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"tenant {payload.tenant_id!r} already exists",
+            )
+        now = datetime.now(UTC)
+        await repo.insert_tenant(payload.tenant_id, payload.name, now)
+        return TenantPublic(tenant_id=payload.tenant_id, name=payload.name, created_at=now)
+
+    async def list_tenants(self) -> list[TenantPublic]:
+        repo = self._require_repo()
+        rows = await repo.list_tenants()
+        return [
+            TenantPublic(
+                tenant_id=r["_key"],
+                name=r["name"],
+                created_at=datetime.fromisoformat(r["created_at"]),
+            )
+            for r in rows
+        ]
+
+    async def delete_tenant(self, tenant_id: str) -> None:
+        repo = self._require_repo()
+        if not await repo.delete_tenant(tenant_id):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"tenant {tenant_id!r} not found",
+            )
+
+    # ---- Project lifecycle (admin / tenant_admin) ---------------------------
+
+    async def create_project(
+        self, payload: ProjectCreate, tenant_id: str, actor_id: str
+    ) -> ProjectPublic:
+        repo = self._require_repo()
+        # Ensure tenant exists — projects can't dangle in a deleted tenant.
+        if await repo.get_tenant(tenant_id) is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"tenant {tenant_id!r} not found; create it first",
+            )
+        if await repo.get_project(payload.project_id) is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"project {payload.project_id!r} already exists",
+            )
+        now = datetime.now(UTC)
+        await repo.insert_project(
+            payload.project_id, tenant_id, payload.name, now, actor_id,
+        )
+        return ProjectPublic(
+            project_id=payload.project_id,
+            tenant_id=tenant_id,
+            name=payload.name,
+            created_at=now,
+            created_by=actor_id,
+        )
+
+    async def list_projects(self, tenant_id: str) -> list[ProjectPublic]:
+        repo = self._require_repo()
+        rows = await repo.list_projects(tenant_id)
+        return [
+            ProjectPublic(
+                project_id=r["_key"],
+                tenant_id=r["tenant_id"],
+                name=r["name"],
+                created_at=datetime.fromisoformat(r["created_at"]),
+                created_by=r["created_by"],
+            )
+            for r in rows
+        ]
+
+    async def delete_project(self, project_id: str, tenant_id: str) -> None:
+        repo = self._require_repo()
+        existing = await repo.get_project(project_id)
+        if existing is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"project {project_id!r} not found",
+            )
+        if existing["tenant_id"] != tenant_id:
+            # Treat cross-tenant access as 404 to avoid leaking project
+            # existence to a foreign tenant.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"project {project_id!r} not found",
+            )
+        await repo.delete_project(project_id)
+
+    async def grant_project_member(
+        self,
+        project_id: str,
+        tenant_id: str,
+        user_id: str,
+        role: RBACProjectRole,
+    ) -> None:
+        repo = self._require_repo()
+        project = await repo.get_project(project_id)
+        if project is None or project["tenant_id"] != tenant_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"project {project_id!r} not found",
+            )
+        target_user = await repo.get_user_by_id(user_id)
+        if target_user is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"user {user_id!r} not found",
+            )
+        if target_user.tenant_id != tenant_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="user belongs to a different tenant",
+            )
+        await repo.grant_project_role(user_id, project_id, role.value)
+
+    async def revoke_project_member(
+        self, project_id: str, tenant_id: str, user_id: str
+    ) -> None:
+        repo = self._require_repo()
+        project = await repo.get_project(project_id)
+        if project is None or project["tenant_id"] != tenant_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"project {project_id!r} not found",
+            )
+        if not await repo.revoke_project_role(user_id, project_id):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    f"user {user_id!r} has no role on project {project_id!r}"
+                ),
+            )
 
 
 # ---------------------------------------------------------------------------

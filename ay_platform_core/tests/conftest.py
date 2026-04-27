@@ -1,10 +1,14 @@
 # =============================================================================
 # File: conftest.py
-# Version: 3
+# Version: 4
 # Path: ay_platform_core/tests/conftest.py
 # Description: Root pytest configuration for the ay_platform_core sub-project.
 #              Imports fixture modules so that session-scoped testcontainers
 #              fixtures are discoverable from any test file.
+#
+#              v4 (R-100-124): the workflow adapter integration tests
+#              also need Loki + Elasticsearch fixtures, registered
+#              alongside the existing ArangoDB / MinIO / Ollama set.
 # =============================================================================
 
 from __future__ import annotations
@@ -19,4 +23,5 @@ if os.environ.get("REMOTE_CONTAINERS") == "true":
 
 pytest_plugins = [
     "tests.fixtures.containers",
+    "tests.fixtures.observability_containers",
 ]

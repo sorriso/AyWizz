@@ -20,7 +20,14 @@ generated-by: ay_platform_core/scripts/checks/audit_implementation_status.py
 >   (May still be tested via positional / functional tests — the marker
 >   is a stronger guarantee than coverage of the code path.)
 > - `test-only`: tests reference the requirement but no source file does.
->   Suspicious — typically a contract test waiting on the impl, or a stale marker.
+>   Three legitimate sub-cases (do NOT need fixing):
+>    - **Architectural meta-rules** (e.g. R-100-001 SRP, R-100-002 footprint) —
+>      no single file implements them; the project structure as a whole does.
+>    - **Test-as-implementation** (e.g. R-100-113 env coherence) — the test IS the
+>      mechanism that enforces the requirement; the marker on the test is the implem.
+>    - **WIP stubs** (e.g. R-300-080 import endpoint) — `status: draft` ; the impl is
+>      a 501 stub validated by tests. Will move to `tested` once the v2 work lands.
+>   The fourth case — stale marker after impl deletion — is what an audit catches.
 > - `divergent`: requirement is `status: approved` in the spec, but **no**
 >   marker exists in the codebase. Either the impl forgot the marker or
 >   the requirement is unimplemented despite being approved.
@@ -30,13 +37,13 @@ generated-by: ay_platform_core/scripts/checks/audit_implementation_status.py
 
 | Spec | Total | tested | implemented | test-only | divergent | not-yet |
 |---|---|---|---|---|---|---|
-| [100-SPEC-ARCHITECTURE](./100-SPEC-ARCHITECTURE.md) | 80 | 2 | 28 | 5 | 0 | 45 |
+| [100-SPEC-ARCHITECTURE](./100-SPEC-ARCHITECTURE.md) | 81 | 5 | 28 | 3 | 0 | 45 |
 | [200-SPEC-PIPELINE-AGENT](./200-SPEC-PIPELINE-AGENT.md) | 29 | 0 | 19 | 0 | 0 | 10 |
 | [300-SPEC-REQUIREMENTS-MGMT](./300-SPEC-REQUIREMENTS-MGMT.md) | 52 | 0 | 29 | 5 | 0 | 18 |
 | [400-SPEC-MEMORY-RAG](./400-SPEC-MEMORY-RAG.md) | 30 | 0 | 14 | 0 | 0 | 16 |
 | [700-SPEC-VERTICAL-COHERENCE](./700-SPEC-VERTICAL-COHERENCE.md) | 20 | 0 | 20 | 0 | 0 | 0 |
 | [800-SPEC-LLM-ABSTRACTION](./800-SPEC-LLM-ABSTRACTION.md) | 47 | 0 | 12 | 0 | 0 | 35 |
-| **Total** | **258** | **2** | **122** | **10** | **0** | **124** |
+| **Total** | **259** | **5** | **122** | **8** | **0** | **124** |
 
 ## R-100-* — [100-SPEC-ARCHITECTURE](./100-SPEC-ARCHITECTURE.md)
 
@@ -90,8 +97,8 @@ generated-by: ay_platform_core/scripts/checks/audit_implementation_status.py
 | `R-100-073` | v1 | draft | **implemented** | `ay_platform_core/src/ay_platform_core/c2_auth/service.py` | — |
 | `R-100-074` | v1 | draft | **not-yet** | — | — |
 | `R-100-075` | v2 | draft | **not-yet** | — | — |
-| `R-100-080` | v1 | draft | **test-only** | — | `ay_platform_core/tests/system/test_uploads_to_retrieval.py` |
-| `R-100-081` | v1 | draft | **test-only** | — | `ay_platform_core/tests/system/test_uploads_to_retrieval.py` |
+| `R-100-080` | v1 | draft | **tested** | `ay_platform_core/src/ay_platform_core/c7_memory/router.py`, `infra/c12_workflow/workflows/ingest_text_source.json` | `ay_platform_core/tests/system/test_uploads_to_retrieval.py` |
+| `R-100-081` | v1 | draft | **tested** | `ay_platform_core/src/ay_platform_core/c7_memory/router.py`, `infra/c12_workflow/workflows/ingest_text_source.json` | `ay_platform_core/tests/system/test_uploads_to_retrieval.py` |
 | `R-100-082` | v1 | draft | **not-yet** | — | — |
 | `R-100-083` | v1 | draft | **not-yet** | — | — |
 | `R-100-084` | v1 | draft | **not-yet** | — | — |
@@ -122,6 +129,7 @@ generated-by: ay_platform_core/scripts/checks/audit_implementation_status.py
 | `R-100-121` | v1 | approved | **implemented** | `ay_platform_core/src/ay_platform_core/_observability/main.py`, `ay_platform_core/tests/docker-compose.yml` | — |
 | `R-100-122` | v1 | approved | **implemented** | `ay_platform_core/tests/docker-compose.yml` | — |
 | `R-100-123` | v1 | approved | **implemented** | `.github/workflows/ci-tests.yml` | — |
+| `R-100-124` | v1 | approved | **tested** | `ay_platform_core/src/ay_platform_core/_observability/main.py`, `ay_platform_core/src/ay_platform_core/_observability/synthesis.py`, `ay_platform_core/src/ay_platform_core/observability/workflow/__init__.py` (+3 more) | `ay_platform_core/tests/integration/observability/workflow/test_elasticsearch_integration.py`, `ay_platform_core/tests/integration/observability/workflow/test_loki_integration.py`, `ay_platform_core/tests/unit/observability/workflow/test_router.py` |
 
 ## R-200-* — [200-SPEC-PIPELINE-AGENT](./200-SPEC-PIPELINE-AGENT.md)
 

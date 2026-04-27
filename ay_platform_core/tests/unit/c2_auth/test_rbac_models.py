@@ -20,12 +20,16 @@ from ay_platform_core.c2_auth.models import (
 @pytest.mark.unit
 class TestRBACGlobalRole:
     def test_values_match_spec(self) -> None:
+        # E-100-002 v2: 4 global roles.
+        assert RBACGlobalRole.TENANT_MANAGER.value == "tenant_manager"
         assert RBACGlobalRole.ADMIN.value == "admin"
         assert RBACGlobalRole.TENANT_ADMIN.value == "tenant_admin"
         assert RBACGlobalRole.USER.value == "user"
 
-    def test_all_three_roles_defined(self) -> None:
-        assert {r.value for r in RBACGlobalRole} == {"admin", "tenant_admin", "user"}
+    def test_all_four_roles_defined(self) -> None:
+        assert {r.value for r in RBACGlobalRole} == {
+            "tenant_manager", "admin", "tenant_admin", "user",
+        }
 
 
 @pytest.mark.unit

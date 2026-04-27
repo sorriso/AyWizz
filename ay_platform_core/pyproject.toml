@@ -67,6 +67,15 @@ dependencies = [
     "python-arango>=8.3,<9.0",
     "minio>=7.2,<8.0",
 
+    # C7 source parsers (Phase B of v1 plan): pure-Python where possible.
+    # `pypdf` is pure Python; `python-docx` pulls in lxml as a transitive
+    # native dep (acceptable, install ships wheels for major platforms).
+    # `beautifulsoup4` defaults to stdlib `html.parser` if lxml is absent;
+    # since python-docx already brings lxml, BS4 will use it automatically.
+    "pypdf>=4.0,<6.0",
+    "beautifulsoup4>=4.12,<5.0",
+    "python-docx>=1.1,<2.0",
+
     # Utilities
     "python-dotenv>=1.0,<2.0",
     "pyyaml>=6.0,<7.0",
@@ -212,6 +221,7 @@ ignore = [
 # the mutable-default pitfall B008 targets. Silencing B008 for router modules is
 # the standard FastAPI convention (see ruff FAQ).
 "**/router.py" = ["B008"]
+"**/*_router.py" = ["B008"]
 "**/routers/*.py" = ["B008"]
 
 [tool.ruff.format]

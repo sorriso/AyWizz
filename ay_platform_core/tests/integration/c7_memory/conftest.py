@@ -21,6 +21,7 @@ import pytest
 import pytest_asyncio
 from arango import ArangoClient  # type: ignore[attr-defined]
 from fastapi import FastAPI
+from minio import Minio
 
 from ay_platform_core.c7_memory.config import MemoryConfig
 from ay_platform_core.c7_memory.db.repository import MemoryRepository
@@ -29,10 +30,14 @@ from ay_platform_core.c7_memory.embedding.deterministic import DeterministicHash
 from ay_platform_core.c7_memory.embedding.ollama import OllamaEmbedder
 from ay_platform_core.c7_memory.router import router
 from ay_platform_core.c7_memory.service import MemoryService
+from ay_platform_core.c7_memory.service import get_service as c7_get_service
+from ay_platform_core.c7_memory.storage.minio_storage import MemorySourceStorage
 from tests.fixtures.containers import (
     ArangoEndpoint,
+    MinioEndpoint,
     OllamaEndpoint,
     cleanup_arango_database,
+    cleanup_minio_bucket,
 )
 
 
@@ -110,4 +115,63 @@ def c7_app(c7_service: MemoryService) -> FastAPI:
     app = FastAPI()
     app.include_router(router)
     app.state.memory_service = c7_service
+    return app
+
+
+# ---------------------------------------------------------------------------
+# Phase B fixtures — MinIO blob storage for the upload pipeline.
+# Uses a deterministic embedder for speed; embedder choice is irrelevant
+# to upload-path tests which focus on parser + blob + chunk persistence.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="function")
+def c7_storage(
+    minio_container: MinioEndpoint,
+) -> Iterator[MemorySourceStorage]:
+    bucket = f"c7-upload-test-{uuid.uuid4().hex[:6]}"
+    client = Minio(
+        minio_container.endpoint,
+        access_key=minio_container.access_key,
+        secret_key=minio_container.secret_key,
+        secure=False,
+    )
+    storage = MemorySourceStorage(client, bucket)
+    storage._ensure_bucket_sync()
+    try:
+        yield storage
+    finally:
+        cleanup_minio_bucket(minio_container, bucket)
+
+
+@pytest.fixture(scope="function")
+def c7_upload_service(
+    c7_repo: MemoryRepository,
+    c7_deterministic_embedder: DeterministicHashEmbedder,
+    c7_storage: MemorySourceStorage,
+) -> MemoryService:
+    """Service wired for upload-pipeline tests: real Arango + real MinIO,
+    deterministic embedder for speed."""
+    return MemoryService(
+        config=MemoryConfig(
+            embedding_adapter="deterministic-hash",
+            embedding_model_id="deterministic-hash-v1",
+            embedding_dimension=c7_deterministic_embedder.dimension,
+            chunk_token_size=64,
+            chunk_overlap=8,
+            default_quota_bytes=1024 * 1024 * 1024,
+            retrieval_scan_cap=1000,
+        ),
+        repo=c7_repo,
+        embedder=c7_deterministic_embedder,
+        storage=c7_storage,
+    )
+
+
+@pytest.fixture(scope="function")
+def c7_upload_app(c7_upload_service: MemoryService) -> FastAPI:
+    """FastAPI app with c7 router + upload-ready service."""
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[c7_get_service] = lambda: c7_upload_service
     return app

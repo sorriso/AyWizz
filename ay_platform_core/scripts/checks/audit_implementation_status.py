@@ -40,7 +40,9 @@ GH_WORKFLOWS = ROOT / ".github" / "workflows"
 # extensions appropriate to it.
 _IMPL_SCAN_TARGETS: list[tuple[Path, tuple[str, ...]]] = [
     (SRC, ("*.py",)),
-    (INFRA, ("*.yml", "*.yaml", "*.sh", "Dockerfile*")),
+    # `*.json` covers e.g. n8n workflow definitions that carry their
+    # marker in a `_comment` field.
+    (INFRA, ("*.yml", "*.yaml", "*.sh", "*.json", "Dockerfile*")),
     (GH_WORKFLOWS, ("*.yml", "*.yaml")),
     # The test stack's compose file is infra-of-test ; its markers
     # describe the deployable topology requirements (R-100-115/117/119/122).
@@ -201,7 +203,14 @@ def render_report(requirements: list[Requirement]) -> str:
     lines.append(">   (May still be tested via positional / functional tests — the marker")
     lines.append(">   is a stronger guarantee than coverage of the code path.)")
     lines.append("> - `test-only`: tests reference the requirement but no source file does.")
-    lines.append(">   Suspicious — typically a contract test waiting on the impl, or a stale marker.")
+    lines.append(">   Three legitimate sub-cases (do NOT need fixing):")
+    lines.append(">    - **Architectural meta-rules** (e.g. R-100-001 SRP, R-100-002 footprint) —")
+    lines.append(">      no single file implements them; the project structure as a whole does.")
+    lines.append(">    - **Test-as-implementation** (e.g. R-100-113 env coherence) — the test IS the")
+    lines.append(">      mechanism that enforces the requirement; the marker on the test is the implem.")
+    lines.append(">    - **WIP stubs** (e.g. R-300-080 import endpoint) — `status: draft` ; the impl is")
+    lines.append(">      a 501 stub validated by tests. Will move to `tested` once the v2 work lands.")
+    lines.append(">   The fourth case — stale marker after impl deletion — is what an audit catches.")
     lines.append("> - `divergent`: requirement is `status: approved` in the spec, but **no**")
     lines.append(">   marker exists in the codebase. Either the impl forgot the marker or")
     lines.append(">   the requirement is unimplemented despite being approved.")

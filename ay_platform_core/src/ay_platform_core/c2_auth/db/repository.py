@@ -1,10 +1,13 @@
 # =============================================================================
 # File: repository.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/src/ay_platform_core/c2_auth/db/repository.py
 # Description: ArangoDB access layer for C2-owned collections.
 #              All public methods are async, wrapping python-arango
 #              (synchronous) with asyncio.to_thread(). R-100-012.
+#
+#              v2: Tenant + Project + role-grant CRUD added (Phase A of
+#              the v1 functional plan). New collection `c2_projects`.
 #
 # @relation implements:R-100-012
 # =============================================================================
@@ -23,6 +26,7 @@ from ay_platform_core.c2_auth.models import SessionInfo, UserInternal
 # C2-owned ArangoDB collections (prefixed to avoid cross-component collisions)
 COLL_USERS = "c2_users"
 COLL_TENANTS = "c2_tenants"
+COLL_PROJECTS = "c2_projects"
 COLL_ROLE_ASSIGNMENTS = "c2_role_assignments"
 COLL_SESSIONS = "c2_sessions"
 
@@ -53,7 +57,8 @@ class AuthRepository:
     # ---- Initialisation -----------------------------------------------------
 
     def _ensure_collections_sync(self) -> None:
-        for name in (COLL_USERS, COLL_TENANTS, COLL_ROLE_ASSIGNMENTS, COLL_SESSIONS):
+        for name in (COLL_USERS, COLL_TENANTS, COLL_PROJECTS,
+                     COLL_ROLE_ASSIGNMENTS, COLL_SESSIONS):
             if not self._db.has_collection(name):
                 self._db.create_collection(name)
 
@@ -207,3 +212,148 @@ class AuthRepository:
 
     async def get_project_scopes(self, user_id: str) -> dict[str, list[str]]:
         return await asyncio.to_thread(self._get_project_scopes_sync, user_id)
+
+    def _grant_project_role_sync(
+        self, user_id: str, project_id: str, role: str
+    ) -> None:
+        # `_key` = "{user_id}:{project_id}" so a re-grant overwrites cleanly.
+        key = f"{user_id}:{project_id}"
+        self._db.collection(COLL_ROLE_ASSIGNMENTS).insert(
+            {"_key": key, "user_id": user_id, "project_id": project_id, "role": role},
+            overwrite=True,
+        )
+
+    async def grant_project_role(
+        self, user_id: str, project_id: str, role: str
+    ) -> None:
+        await asyncio.to_thread(
+            self._grant_project_role_sync, user_id, project_id, role
+        )
+
+    def _revoke_project_role_sync(self, user_id: str, project_id: str) -> bool:
+        key = f"{user_id}:{project_id}"
+        coll = self._db.collection(COLL_ROLE_ASSIGNMENTS)
+        if not coll.has(key):
+            return False
+        coll.delete(key)
+        return True
+
+    async def revoke_project_role(
+        self, user_id: str, project_id: str
+    ) -> bool:
+        return await asyncio.to_thread(
+            self._revoke_project_role_sync, user_id, project_id
+        )
+
+    # ---- Tenants ------------------------------------------------------------
+
+    def _insert_tenant_sync(
+        self, tenant_id: str, name: str, created_at: datetime
+    ) -> None:
+        self._db.collection(COLL_TENANTS).insert(
+            {
+                "_key": tenant_id,
+                "name": name,
+                "created_at": created_at.isoformat(),
+            }
+        )
+
+    async def insert_tenant(
+        self, tenant_id: str, name: str, created_at: datetime
+    ) -> None:
+        await asyncio.to_thread(self._insert_tenant_sync, tenant_id, name, created_at)
+
+    def _get_tenant_sync(self, tenant_id: str) -> dict[str, Any] | None:
+        doc: dict[str, Any] | None = self._db.collection(COLL_TENANTS).get(tenant_id)  # type: ignore[assignment]
+        return doc
+
+    async def get_tenant(self, tenant_id: str) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._get_tenant_sync, tenant_id)
+
+    def _list_tenants_sync(self) -> list[dict[str, Any]]:
+        cursor = self._db.aql.execute(
+            "FOR t IN @@col SORT t._key ASC RETURN t",
+            bind_vars={"@col": COLL_TENANTS},
+        )
+        return list(cursor)  # type: ignore[arg-type]
+
+    async def list_tenants(self) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._list_tenants_sync)
+
+    def _delete_tenant_sync(self, tenant_id: str) -> bool:
+        coll = self._db.collection(COLL_TENANTS)
+        if not coll.has(tenant_id):
+            return False
+        coll.delete(tenant_id)
+        return True
+
+    async def delete_tenant(self, tenant_id: str) -> bool:
+        return await asyncio.to_thread(self._delete_tenant_sync, tenant_id)
+
+    # ---- Projects -----------------------------------------------------------
+
+    def _insert_project_sync(
+        self,
+        project_id: str,
+        tenant_id: str,
+        name: str,
+        created_at: datetime,
+        created_by: str,
+    ) -> None:
+        self._db.collection(COLL_PROJECTS).insert(
+            {
+                "_key": project_id,
+                "tenant_id": tenant_id,
+                "name": name,
+                "created_at": created_at.isoformat(),
+                "created_by": created_by,
+            }
+        )
+
+    async def insert_project(
+        self,
+        project_id: str,
+        tenant_id: str,
+        name: str,
+        created_at: datetime,
+        created_by: str,
+    ) -> None:
+        await asyncio.to_thread(
+            self._insert_project_sync,
+            project_id, tenant_id, name, created_at, created_by,
+        )
+
+    def _get_project_sync(self, project_id: str) -> dict[str, Any] | None:
+        doc: dict[str, Any] | None = self._db.collection(COLL_PROJECTS).get(project_id)  # type: ignore[assignment]
+        return doc
+
+    async def get_project(self, project_id: str) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._get_project_sync, project_id)
+
+    def _list_projects_sync(self, tenant_id: str) -> list[dict[str, Any]]:
+        cursor = self._db.aql.execute(
+            "FOR p IN @@col FILTER p.tenant_id == @tid SORT p._key ASC RETURN p",
+            bind_vars={"@col": COLL_PROJECTS, "tid": tenant_id},
+        )
+        return list(cursor)  # type: ignore[arg-type]
+
+    async def list_projects(self, tenant_id: str) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._list_projects_sync, tenant_id)
+
+    def _delete_project_sync(self, project_id: str) -> bool:
+        coll = self._db.collection(COLL_PROJECTS)
+        if not coll.has(project_id):
+            return False
+        coll.delete(project_id)
+        # Cascade: revoke every role assignment for this project so stale
+        # grants don't survive a delete-then-recreate.
+        cursor = self._db.aql.execute(
+            "FOR r IN @@col FILTER r.project_id == @pid RETURN r._key",
+            bind_vars={"@col": COLL_ROLE_ASSIGNMENTS, "pid": project_id},
+        )
+        for key in list(cursor):  # type: ignore[arg-type]
+            self._db.collection(COLL_ROLE_ASSIGNMENTS).delete(key)
+        return True
+
+    async def delete_project(self, project_id: str) -> bool:
+        return await asyncio.to_thread(self._delete_project_sync, project_id)

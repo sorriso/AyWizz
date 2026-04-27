@@ -117,7 +117,13 @@ async def test_ingest_markdown_strips_frontmatter(c7_app: FastAPI) -> None:
 
 
 @pytest.mark.asyncio
-async def test_pdf_ingest_returns_501_without_extra(c7_app: FastAPI) -> None:
+async def test_pdf_ingest_via_json_payload_returns_422_for_corrupt_bytes(
+    c7_app: FastAPI,
+) -> None:
+    """Phase B activated the PDF parser. Sending an obvious non-PDF
+    payload through the JSON ingest path now yields 422 (parse failure)
+    rather than the old 501 (not implemented). The full upload pipeline
+    (multipart) is exercised by `test_upload_pipeline.py`."""
     async with _client(c7_app) as client:
         resp = await client.post(
             "/api/v1/memory/projects/p1/sources",
@@ -125,14 +131,14 @@ async def test_pdf_ingest_returns_501_without_extra(c7_app: FastAPI) -> None:
                 "source_id": "s-pdf",
                 "project_id": "p1",
                 "mime_type": "application/pdf",
-                "content": "%PDF-1.4",
-                "size_bytes": 10,
+                "content": "%PDF-1.4 not really a PDF",
+                "size_bytes": 24,
                 "uploaded_by": "alice",
             },
             headers=_HEADERS,
         )
-    assert resp.status_code == 501
-    assert "memory-pdf" in resp.json()["detail"]
+    assert resp.status_code == 422
+    assert "invalid PDF" in resp.json()["detail"]
 
 
 # ---------------------------------------------------------------------------

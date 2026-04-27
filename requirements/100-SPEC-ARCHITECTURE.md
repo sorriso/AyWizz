@@ -1,6 +1,6 @@
 ---
 document: 100-SPEC-ARCHITECTURE
-version: 11
+version: 13
 path: requirements/100-SPEC-ARCHITECTURE.md
 language: en
 status: draft
@@ -10,6 +10,10 @@ derives-from: [D-002, D-003, D-007, D-008, D-010, D-011, D-012, D-013, D-014]
 # Architecture Specification — Platform Components & Contracts
 
 > **Purpose of this document.** Define the macro-level component decomposition of the platform, where each type of requirement lives, the contracts between components, the scaling model, and the deployment targets. This spec defines the **what** and the **why** of each component — concrete technology choices and implementation details belong to component-specific engineering work.
+
+> **Version 13 changes.** **E-100-002 v1 → v2** : RBAC model formalised as a 5-role hierarchy. New global role **`tenant_manager`** (super-root, content-blind, owns tenant lifecycle) above `admin` (= `tenant_admin`, tenant-scoped). Verification clause added — the auth × role × scope test matrix under `ay_platform_core/tests/e2e/auth_matrix/` SHALL exercise every catalogued endpoint along (anonymous, role gate, cross-tenant isolation, cross-project isolation, backend state) dimensions, with a coherence test pinning the catalog to the live route set.
+
+> **Version 12 changes.** Q-100-015 adapter layer **resolved**. New **R-100-124** formalises the Production Workflow Synthesis Service: a storage-agnostic `SpanSource` Protocol with three concrete adapters (in-process buffer for the test tier, Loki and Elasticsearch for K8s) and a mountable FastAPI router (`GET /workflows/{trace_id}`, `GET /workflows`). Test-tier `_observability` re-uses the same router via `BufferSpanSource` — one synthesis code path, three storage backends. The deferred sub-questions of Q-100-015 (sampling/retention policy, Grafana dashboard layer) are split out as Q-100-017 and Q-100-018 — they are deployment concerns, not adapter-layer concerns.
 
 > **Version 11 changes.** New **R-100-123** §5 (NFR): CI/CD pipeline contract — `push main` triggers `ci-tests.yml` (test wrapper + coherence wrapper, parallel jobs, both blocking, coverage gate enforced by `pyproject.toml`); `ci-build-images.yml` is gated on test success via `workflow_run` and publishes the `ay-api` image to GHCR (`ghcr.io/<owner>/aywizz-api`). Derives from D-014.
 
@@ -549,7 +553,7 @@ status: draft
 category: security
 ```
 
-The v1 authorization model SHALL be role-based (RBAC) with three global roles (`admin`, `tenant_admin`, `user`) and three per-project scoped roles (`project_owner`, `project_editor`, `project_viewer`). The full role-permission matrix SHALL be defined in E-100-002.
+The v1 authorization model SHALL be role-based (RBAC) with **four** global roles (`tenant_manager`, `admin` (= `tenant_admin`), `user`) and three per-project scoped roles (`project_owner`, `project_editor`, `project_viewer`). The full role-permission matrix SHALL be defined in E-100-002 v2.
 
 **Rationale.** RBAC covers the expected v1 use cases. ABAC is a v2 consideration if concrete unmet requirements emerge.
 
@@ -1185,20 +1189,20 @@ The JWT issued by C2 SHALL contain the following claims, in JSON structure. Fiel
 
 ```yaml
 id: E-100-002
-version: 1
-status: draft
+version: 2
+status: approved
 category: security
 ```
 
-The platform's RBAC model comprises:
+The platform's RBAC model comprises a **5-role hierarchy** (top to bottom). Higher roles SHALL NOT subsume lower-role permissions automatically — `tenant_manager` in particular is **content-blind** by design (separation of duties between platform operators and tenant operators).
 
 **Global roles** (stored in JWT `roles` claim):
 
-| Role | Permissions |
-|---|---|
-| `admin` | All actions across all tenants. Reserved for platform operators. |
-| `tenant_admin` | All actions within their `tenant_id`. Can create projects, manage users within tenant. |
-| `user` | Baseline. Can hold project scopes; cannot administer tenant. |
+| Role | Scope | Permissions |
+|---|---|---|
+| `tenant_manager` | platform-wide | Cross-tenant operations: create / list / delete tenants, grant or revoke `admin` on a tenant. **SHALL NOT** read or write tenant content (conversations, projects, requirements, sources, runs). Strictly an operator role for tenant lifecycle. |
+| `admin` (= `tenant_admin`) | tenant-scoped | All actions within their `tenant_id`: create projects, grant `project_owner` on those projects, read/write every project's content in the tenant. **SHALL NOT** cross tenants. `admin` and `tenant_admin` are synonyms in v2 — `admin` is the canonical name; `tenant_admin` is retained for v1 code paths and SHALL be treated as identical. |
+| `user` | baseline | Authenticated user with no global grant. May hold per-project roles via `project_scopes`. |
 
 **Project scoped roles** (stored in JWT `project_scopes` claim, per project):
 
@@ -1208,7 +1212,18 @@ The platform's RBAC model comprises:
 | `project_editor` | Create/edit requirements, run pipeline, upload sources, view reports. Cannot delete project, change ACL, or delete sources uploaded by others. |
 | `project_viewer` | Read-only access to requirements, reports, sources, conversation history. Cannot trigger pipeline or upload sources. |
 
-**Permission resolution.** A user's effective permission on a resource is the union of their global roles and their project-scoped roles for that resource's project. The most permissive applicable rule wins (principle of most-privilege-needed, within what the roles allow).
+**Permission resolution.** A user's effective permission on a resource is the union of their global roles and their project-scoped roles for that resource's project — except for `tenant_manager`, whose grants apply ONLY to tenant-lifecycle endpoints, never to tenant content endpoints. Components SHALL enforce this by listing `tenant_manager` in the role gate of tenant-management endpoints only; content endpoints SHALL NOT include `tenant_manager` in their accept list.
+
+**Verification.** The auth × role × scope test matrix under `ay_platform_core/tests/e2e/auth_matrix/` verifies for every catalogued endpoint that:
+
+1. Anonymous calls → 401.
+2. Authenticated calls without the required role → 403.
+3. Authenticated calls with the required role → success status.
+4. Cross-tenant attempts (correct role, wrong tenant) → 403 / 404 (no leak).
+5. Cross-project attempts (correct role within tenant, wrong project) → 403 / 404.
+6. `tenant_manager`-only endpoints reject `admin` / `project_*` roles, and vice versa.
+
+A coherence test (`tests/coherence/test_route_catalog.py`) SHALL fail when an HTTP route registered in any component's app is missing from the test catalog. See `requirements/065-TEST-MATRIX.md` for the live, auto-generated endpoint × role table.
 
 **Persistence.** The authoritative RBAC data (users, tenants, project memberships, role assignments) lives in dedicated ArangoDB collections owned by C2.
 
@@ -1297,8 +1312,10 @@ Arrows indicate synchronous calls. Dotted lines indicate event-driven or infrequ
 | Q-100-012 | Ingestion chunking strategy (fixed size, structure-aware, semantic): align with prior work. | D-013 | v1 (pending upload) |
 | Q-100-013 | Storage quota per project default (1 GB baseline in R-100-088) and tenant-level override mechanism. | D-013 | v1 (detailed in `400` and `500`) |
 | Q-100-014 | Workflow envelope synthesiser — implemented in `_observability/synthesis.py` (pure functions: `parse_span_summary`, `group_by_trace`, `synthesise_workflow`, `list_recent_traces`) + endpoints `GET /workflows/<trace_id>` and `GET /workflows?recent=N` exposed by the test-tier collector. **Resolved.** Production K8s equivalent uses the same algorithm against an external log store (Loki / ES) — see Q-100-015. | R-100-104, R-100-105 | resolved 2026-04-25 |
-| Q-100-015 | K8s production: workflow synthesis on horizontally-scaled deployments. The synthesis algorithm is portable (storage-agnostic). The local stack reads from the in-memory ring buffer of `_observability`; the K8s stack will read from a centralised log pipeline (Loki + Promtail baseline). Open: which adapter to ship in `infra/observability/k8s/`, sampling rate retention policy, dashboard layer (Grafana?). Test-tier `_observability` SHALL NOT run in K8s (R-100-121). | R-100-104, R-100-105, R-100-120, R-100-121 | when K8s manifests start |
+| Q-100-015 | K8s production workflow synthesis adapter layer — **resolved** by R-100-124. `SpanSource` Protocol with three concrete adapters (`BufferSpanSource`, `LokiSpanSource`, `ElasticsearchSpanSource`); mountable router shared between test-tier `_observability` and the future production-tier K8s service. Backend selected via `OBS_SPAN_SOURCE`. Sub-questions originally bundled here (sampling/retention, dashboard) split out into Q-100-017 / Q-100-018. | R-100-104, R-100-105, R-100-120, R-100-121, R-100-124 | resolved 2026-04-27 |
 | Q-100-016 | Trace context propagation into Kubernetes Jobs (C15 sub-agent runtime). When C4 dispatches a sub-agent as a Job, the current `traceparent` MUST flow into the Job's PodSpec (e.g., as `env: TRACEPARENT=...` injected from the dispatcher's ContextVar). Without this, every sub-agent starts a fresh trace and the workflow envelope loses the entire generation phase. C15 is not implemented yet, but the dispatch contract MUST include trace propagation when it lands. | R-100-105, D-007 | when C15 starts |
+| Q-100-017 | Workflow synthesis sampling and retention policy in production. R-100-124 ships the adapter layer; the deployment-side question of how aggressively to sample new traces (`TRACE_SAMPLE_RATE` per R-100-105 v2), how long to retain spans in Loki / ES, and how to size the index / chunk store remains open. Likely a per-environment policy (dev: 100%, prod: 5–10%) with retention ≥ 30 days for compliance / debugging. | R-100-105, R-100-124 | when K8s manifests start (R-100-060) |
+| Q-100-018 | Dashboard layer for workflow synthesis. The HTTP surface served by R-100-124 is API-only; a human-friendly browser UI (Grafana panels powered by the `/workflows` endpoint, or a small dedicated UI under `ay_platform_ui/observability/`) is deferred. Decide between embedding into Grafana (re-uses the Loki deployment) and shipping a standalone view (works for both Loki and ES tenants). | R-100-124 | when production observability becomes a focus |
 
 ---
 
@@ -1991,4 +2008,84 @@ this table.
 
 ---
 
-**End of 100-SPEC-ARCHITECTURE.md v10.**
+### 10.8 Production workflow synthesis service
+
+#### R-100-124
+
+```yaml
+id: R-100-124
+version: 1
+status: approved
+category: tooling
+derives-from: [R-100-104, R-100-105, R-100-120, R-100-121]
+```
+
+The platform SHALL expose the workflow envelope synthesis (Q-100-014)
+in production through a **storage-agnostic** adapter layer that
+reuses the algorithm shipped in `_observability/synthesis.py`. The
+shape:
+
+1. **`SpanSource` Protocol** — async `fetch_for_trace(trace_id)`,
+   `fetch_recent(since=, limit=)`, `aclose()`. The Protocol lives in
+   `ay_platform_core/src/ay_platform_core/observability/workflow/`
+   (production-tier, no underscore prefix). Implementations are
+   storage-specific; the synthesis algorithm consumes their output
+   identically.
+
+2. **Three concrete adapters** ship in v1:
+   - `BufferSpanSource` — wraps the in-process `LogRingBuffer` of
+     the test-tier `_observability`. Test only.
+   - `LokiSpanSource` — Grafana Loki HTTP API (`/loki/api/v1/query_range`).
+     Uses the `| json | event="span_summary"` LogQL pipeline so the
+     filter is whitespace-tolerant against the platform's JSON log
+     format.
+   - `ElasticsearchSpanSource` — Elasticsearch `<index>/_search`
+     with a `bool/filter` query on `event=span_summary` (+ optional
+     `trace_id.keyword` term). Optional Basic Auth.
+
+3. **Mountable router** — `make_workflow_router(source)` returns a
+   FastAPI `APIRouter` exposing `GET /workflows/{trace_id}` (404 on
+   empty, 400 on malformed trace_id) and `GET /workflows?recent=N`.
+   The router is identical for the test tier and production tier;
+   the choice of adapter is the only difference.
+
+4. **Configuration** — `WorkflowSourceSettings` (Pydantic Settings,
+   `env_prefix="obs_"`) declares `OBS_SPAN_SOURCE` (`buffer` |
+   `loki` | `elasticsearch`), the per-backend URL and credentials,
+   `OBS_QUERY_WINDOW_HOURS`, `OBS_FETCH_LIMIT`,
+   `OBS_REQUEST_TIMEOUT_SECONDS`. Production K8s services SHALL set
+   `OBS_SPAN_SOURCE` explicitly; the `buffer` default is reserved
+   for the test tier where `_observability` owns the buffer.
+
+5. **Test coverage** — adapters SHALL be covered both by unit tests
+   (HTTP surface mocked via `httpx.MockTransport`) and by
+   integration tests against real containers (Grafana Loki and
+   single-node Elasticsearch via testcontainers). The unit tests
+   pin the LogQL / Elasticsearch DSL shape; the integration tests
+   prove end-to-end correctness against actual back-ends.
+
+6. **Test-tier compatibility** — `_observability/main.py` SHALL
+   delegate its `/workflows*` endpoints to `make_workflow_router`
+   with a `BufferSpanSource(buffer)`. The wire shape MUST remain
+   identical to v1 (no client-visible behaviour change vs. the
+   inline implementation).
+
+**Rationale.** Q-100-015 originally asked "which adapter to ship in
+`infra/observability/k8s/`". The answer is "both" — the OSS K8s
+ecosystem is split between the Grafana stack (Loki) and the Elastic
+stack (Elasticsearch / OpenSearch); shipping only one would force
+a re-implementation later. The adapter logic is symmetric (~150
+LoC each), the synthesis algorithm is identical, and operators
+choose at deployment time via a single env var.
+
+**Non-goals.** This requirement does NOT cover the K8s manifests
+(Deployment/Service/Ingress for the production-tier service —
+deferred to R-100-060), the log-collection pipeline (Promtail /
+Filebeat / Logstash — deployment concern), or the Grafana
+dashboard layer (split out as Q-100-018). Sampling and retention
+policies are split out as Q-100-017.
+
+
+---
+
+**End of 100-SPEC-ARCHITECTURE.md v13.**

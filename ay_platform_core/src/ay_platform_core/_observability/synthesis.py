@@ -1,6 +1,6 @@
 # =============================================================================
 # File: synthesis.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/src/ay_platform_core/_observability/synthesis.py
 # Description: Pure functions that build a "workflow envelope" from a list
 #              of `event=span_summary` records — the phase-3 synthesiser
@@ -16,8 +16,14 @@
 #              parent_span_id, derive verdict — is the SAME regardless
 #              of source.
 #
+#              `span_from_dict` is the shared parse path for backends
+#              that already deliver a Python dict (Elasticsearch
+#              `_source`); `parse_span_summary` wraps it for backends
+#              that deliver raw JSON lines (Docker logs, Loki).
+#
 # @relation implements:R-100-104
 # @relation implements:R-100-105
+# @relation implements:R-100-124
 # =============================================================================
 
 from __future__ import annotations
@@ -56,18 +62,14 @@ class Span:
         return self.started_at + timedelta(milliseconds=self.duration_ms)
 
 
-def parse_span_summary(json_line: str) -> Span | None:
-    """Parse a JSON log line; return a Span if it's a span_summary record,
-    else None.
+def span_from_dict(obj: Any) -> Span | None:
+    """Build a Span from an already-parsed dict, or None if invalid.
 
-    Lenient: missing optional fields default to safe values; malformed
-    JSON returns None rather than raising — the caller iterates over
-    raw log streams that may include non-summary lines.
+    Shared parse path: backends that deliver structured documents
+    directly (Elasticsearch `_source`) call this; backends that
+    deliver JSON lines (Docker / Loki) go through `parse_span_summary`
+    which is a thin wrapper.
     """
-    try:
-        obj = json.loads(json_line)
-    except (json.JSONDecodeError, ValueError):
-        return None
     if not isinstance(obj, dict):
         return None
     if obj.get("event") != "span_summary":
@@ -75,11 +77,14 @@ def parse_span_summary(json_line: str) -> Span | None:
 
     timestamp_raw = obj.get("timestamp", "")
     try:
-        ended_at = datetime.fromisoformat(timestamp_raw)
-    except ValueError:
+        ended_at = datetime.fromisoformat(str(timestamp_raw))
+    except (ValueError, TypeError):
         return None
 
-    duration_ms = float(obj.get("duration_ms", 0.0))
+    try:
+        duration_ms = float(obj.get("duration_ms", 0.0))
+    except (TypeError, ValueError):
+        return None
     started_at = ended_at - timedelta(milliseconds=duration_ms)
 
     return Span(
@@ -94,6 +99,21 @@ def parse_span_summary(json_line: str) -> Span | None:
         sampled=bool(obj.get("sampled", False)),
         started_at=started_at,
     )
+
+
+def parse_span_summary(json_line: str) -> Span | None:
+    """Parse a JSON log line; return a Span if it's a span_summary record,
+    else None.
+
+    Lenient: missing optional fields default to safe values; malformed
+    JSON returns None rather than raising — the caller iterates over
+    raw log streams that may include non-summary lines.
+    """
+    try:
+        obj = json.loads(json_line)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return span_from_dict(obj)
 
 
 def parse_lines(lines: Iterable[str]) -> list[Span]:

@@ -154,13 +154,27 @@ class RetrievalResponse(BaseModel):
 
 
 class SourceIngestRequest(BaseModel):
-    """Direct ingestion of an already-parsed source (admin/test surface)."""
+    """Direct ingestion of an already-parsed source (admin/test surface).
+
+    `mime_type` SHALL match one of the parsers registered in
+    `c7_memory/ingestion/parser.py`. v1 (Phase B) supports text/plain,
+    text/markdown, text/html, application/pdf, and the OpenXML DOCX
+    MIME. Image OCR (image/png, image/jpeg) is NOT supported in v1 —
+    those types were declared in v0 but never wired and are removed
+    from the contract surface.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     source_id: str
     project_id: str
-    mime_type: Literal["text/plain", "text/markdown", "application/pdf", "image/png", "image/jpeg"]
+    mime_type: Literal[
+        "text/plain",
+        "text/markdown",
+        "text/html",
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ]
     content: str = Field(min_length=1)
     size_bytes: int = Field(ge=1)
     uploaded_by: str

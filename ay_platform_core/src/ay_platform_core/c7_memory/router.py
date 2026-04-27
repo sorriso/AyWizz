@@ -10,11 +10,22 @@
 # @relation implements:R-400-040
 # @relation implements:R-400-070
 # @relation implements:E-400-005
+# C7 also realises the C7 side of the C12 → C7 ingestion contract:
+# @relation implements:R-100-080 R-100-081
 # =============================================================================
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    UploadFile,
+    status,
+)
 
 from ay_platform_core.c7_memory.models import (
     ChunkPublic,
@@ -109,6 +120,45 @@ async def ingest_source(
             detail="payload.project_id does not match URL project_id",
         )
     return await service.ingest_source(payload, tenant_id=tenant_id)
+
+
+@router.post(
+    "/api/v1/memory/projects/{project_id}/sources/upload",
+    response_model=SourcePublic,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_source(
+    project_id: str,
+    file: UploadFile = File(..., description="Raw file bytes (PDF/MD/HTML/DOCX/TXT)."),
+    source_id: str = Form(..., description="Caller-supplied unique source id."),
+    mime_type: str = Form(..., description="MIME type — must match a registered parser."),
+    actor: str = Depends(_require_actor),
+    tenant_id: str = Depends(_require_tenant),
+    x_user_roles: str | None = Header(default=None),
+    service: MemoryService = Depends(get_service),
+) -> SourcePublic:
+    """Multipart file upload (Phase B of v1 plan).
+
+    - Same role gate as JSON ingest: `project_editor` / `project_owner` /
+      `admin`. `tenant_manager` excluded by E-100-002 v2.
+    - Stores raw bytes in MinIO under
+      `sources/{tenant_id}/{project_id}/{source_id}{.ext}` for audit /
+      re-parse, then runs parse → chunk → embed → index.
+    - Body cap: `c7_max_upload_bytes` (default 50 MiB) — exceeding
+      yields 413.
+    - Unsupported `mime_type` yields 415; corrupt bytes (encrypted
+      PDF, malformed DOCX) yield 422.
+    """
+    _require_role(x_user_roles, required=("project_editor", "project_owner", "admin"))
+    content_bytes = await file.read()
+    return await service.ingest_uploaded_source(
+        tenant_id=tenant_id,
+        project_id=project_id,
+        source_id=source_id,
+        mime_type=mime_type,
+        uploaded_by=actor,
+        content_bytes=content_bytes,
+    )
 
 
 @router.get(
