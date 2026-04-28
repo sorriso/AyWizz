@@ -1,6 +1,6 @@
 # =============================================================================
 # File: Dockerfile.api
-# Version: 1
+# Version: 2
 # Path: infra/docker/Dockerfile.api
 # Description: Shared image for the platform's Python API tier.
 #
@@ -23,16 +23,11 @@
 #   `context: ../..`), so the COPY paths reference `ay_platform_core/`
 #   directly without a relative-path dance.
 #
-#   Replaces `Dockerfile.python-service` (v2). Functional changes:
-#     - Renamed (per R-100-117): `python-service` → `api`.
-#     - Removed `ARG COMPONENT_MODULE` and `ENV COMPONENT_MODULE` from
-#       the runtime stage; the variable is supplied per container at
-#       runtime.
-#     - Removed `--reload --reload-dir` from CMD; dev compose now
-#       overrides `command:` to opt in.
-#     - HEALTHCHECK directive removed; healthchecks live at the
-#       orchestrator layer (compose / K8s probes) where they can be
-#       tuned per environment without rebuilding the image.
+#   v2 (2026-04-28): adds OCI image labels (title, description,
+#   licenses, vendor, source) so the GHCR / Docker Hub package page is
+#   self-describing rather than blank. Dynamic labels (revision,
+#   created, version) are layered on top by `metadata-action@v5` in
+#   `.github/workflows/ci-build-images.yml`.
 # =============================================================================
 
 ARG PYTHON_VERSION=3.13-slim
@@ -46,6 +41,10 @@ ARG PYTHON_VERSION=3.13-slim
 # up live without a rebuild (with `--reload` opt-in via compose `command:`).
 # ----------------------------------------------------------------------------
 FROM python:${PYTHON_VERSION} AS builder
+
+# Builder stage labels (informational — propagate via FROM but Docker only
+# keeps the LAST stage's labels). Repeated below on the runtime stage.
+LABEL stage="builder"
 
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -72,6 +71,19 @@ RUN pip install -e /app/ay_platform_core
 # bind-mount (required for K8s where there is no host filesystem to bind).
 # ----------------------------------------------------------------------------
 FROM python:${PYTHON_VERSION} AS runtime
+
+# Static OCI image labels (org.opencontainers.image.*). These describe the
+# image to registries (GHCR, Docker Hub) — title / description show on the
+# package page, source / documentation deep-link back to the repo. Dynamic
+# labels (revision = git sha, created = build timestamp, version = ref
+# name) are layered by `metadata-action@v5` in `ci-build-images.yml`,
+# overriding any default we set here.
+LABEL org.opencontainers.image.title="AyWizz API" \
+      org.opencontainers.image.description="Shared FastAPI image for the AyWizz platform Python tier. Hosts every backbone component (C2 Auth, C3 Conversation, C4 Orchestrator, C5 Requirements, C6 Validation, C7 Memory, C9 MCP). The active component is selected at runtime via the COMPONENT_MODULE env variable — one image, N containers." \
+      org.opencontainers.image.vendor="AyWizz" \
+      org.opencontainers.image.licenses="Proprietary" \
+      org.opencontainers.image.source="https://github.com/Sorriso/AyWizz" \
+      org.opencontainers.image.documentation="https://github.com/Sorriso/AyWizz/blob/main/requirements/050-ARCHITECTURE-OVERVIEW.md"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

@@ -1,4 +1,4 @@
-# Version: 1
+# Version: 2
 # Path: .github/workflows/ci-build-images.yml
 #
 # CI - build the API tier image (infra/docker/Dockerfile.api per
@@ -7,6 +7,14 @@
 # Triggered ONLY when ci-tests succeeds on main, so we never publish
 # :latest from a broken commit. The UI tier (infra/docker/Dockerfile.ui)
 # is not built here yet — it will be added when that scaffold lands.
+#
+# v2 (2026-04-28): explicitly inject `org.opencontainers.image.title`
+# and `org.opencontainers.image.description` via metadata-action's
+# `labels` input. Without this override, metadata-action infers the
+# description from the GitHub repository's description field — empty
+# in this repo, which is why the GHCR package page was blank. Static
+# fields (vendor, licenses, source, documentation) are also baked
+# into the Dockerfile (v2) so locally-built images carry them too.
 
 name: ci-build-images
 
@@ -64,6 +72,16 @@ jobs:
             type=raw,value=latest
             type=raw,value=main
             type=sha,format=short,prefix=sha-
+          # Explicitly populate the OCI label fields that drive the
+          # GHCR package page. metadata-action would auto-fill them
+          # from the GitHub repo description (empty in this repo) —
+          # we override so the page is informative regardless.
+          labels: |
+            org.opencontainers.image.title=AyWizz API
+            org.opencontainers.image.description=Shared FastAPI image for the AyWizz platform Python tier. Hosts every backbone component (C2 Auth, C3 Conversation, C4 Orchestrator, C5 Requirements, C6 Validation, C7 Memory, C9 MCP). The active component is selected at runtime via the COMPONENT_MODULE env variable — one image, N containers.
+            org.opencontainers.image.vendor=AyWizz
+            org.opencontainers.image.licenses=Proprietary
+            org.opencontainers.image.documentation=https://github.com/${{ github.repository }}/blob/main/requirements/050-ARCHITECTURE-OVERVIEW.md
 
       - name: Build and push api image
         uses: docker/build-push-action@v6

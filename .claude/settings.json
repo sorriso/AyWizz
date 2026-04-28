@@ -1,5 +1,5 @@
 {
-  "_comment_header": "File: .claude/settings.json | Version: 9 | Path: .claude/settings.json | Claude Code permissions for the ay_monorepo. Evaluation order: deny > ask > allow. v9 allowlists the `docker_test_cleanup.sh` wrapper (5 forms per CLAUDE.md §5.3) — destructive `docker stop` / `docker rm` are denied at top level; the wrapper is the explicit, auditable entry point for cleaning testcontainer-spawned containers after a pytest crash. v8 added the `model` field.",
+  "_comment_header": "File: .claude/settings.json | Version: 12 | Path: .claude/settings.json | Claude Code permissions for the ay_monorepo. Evaluation order: deny > ask > allow. v12 allowlists `ay_platform_core/scripts/run_k8s_system_tests.sh` (kind cluster bring-up + apply + pytest -m system_k8s + teardown). v11 allowlists run.sh / stop.sh. v10 allowlists k8s_validate.sh / k8s_kind_smoke.sh. v9 allowlists docker_test_cleanup.sh. v8 added the `model` field.",
 
   "model": "opus",
 
@@ -28,6 +28,23 @@
       "Bash(./ay_platform_core/scripts/docker_test_cleanup.sh:*)",
       "Bash(bash scripts/docker_test_cleanup.sh:*)",
       "Bash(bash ay_platform_core/scripts/docker_test_cleanup.sh:*)",
+      "Bash(./scripts/run_k8s_system_tests.sh:*)",
+      "Bash(ay_platform_core/scripts/run_k8s_system_tests.sh:*)",
+      "Bash(./ay_platform_core/scripts/run_k8s_system_tests.sh:*)",
+      "Bash(bash scripts/run_k8s_system_tests.sh:*)",
+      "Bash(bash ay_platform_core/scripts/run_k8s_system_tests.sh:*)",
+      "Bash(infra/scripts/k8s_validate.sh:*)",
+      "Bash(./infra/scripts/k8s_validate.sh:*)",
+      "Bash(bash infra/scripts/k8s_validate.sh:*)",
+      "Bash(infra/scripts/k8s_kind_smoke.sh:*)",
+      "Bash(./infra/scripts/k8s_kind_smoke.sh:*)",
+      "Bash(bash infra/scripts/k8s_kind_smoke.sh:*)",
+      "Bash(infra/k8s/run.sh:*)",
+      "Bash(./infra/k8s/run.sh:*)",
+      "Bash(bash infra/k8s/run.sh:*)",
+      "Bash(infra/k8s/stop.sh:*)",
+      "Bash(./infra/k8s/stop.sh:*)",
+      "Bash(bash infra/k8s/stop.sh:*)",
 
       "Bash(python -m pytest:*)",
       "Bash(python -m ruff:*)",

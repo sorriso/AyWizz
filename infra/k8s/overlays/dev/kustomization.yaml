@@ -1,0 +1,49 @@
+# =============================================================================
+# File: kustomization.yaml
+# Version: 1
+# Path: infra/k8s/overlays/dev/kustomization.yaml
+# Description: Dev overlay. Wires the base manifests with the dev
+#              ConfigMap (.env) and Secret (.env.secret) sources.
+#              `kustomize build infra/k8s/overlays/dev` produces a
+#              ready-to-apply manifest stream.
+#
+#              configMapGenerator + secretGenerator hash the source
+#              file contents into the ConfigMap / Secret name (e.g.
+#              `aywizz-config-7c4f...`); Deployments are auto-patched
+#              to reference the hashed name, so a change to .env
+#              triggers a fresh rollout. Set `disableNameSuffixHash:
+#              true` if you prefer stable names + manual rollouts.
+# =============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: aywizz
+
+resources:
+  - ../../base
+
+configMapGenerator:
+  - name: aywizz-config
+    behavior: create
+    envs:
+      - .env
+
+secretGenerator:
+  - name: aywizz-secrets
+    behavior: create
+    envs:
+      - .env.secret
+    type: Opaque
+
+# Stable names so the Deployments' `envFrom` references survive across
+# overlay rebuilds. Tradeoff: changes to .env / .env.secret do NOT
+# auto-trigger a rollout — you must `kubectl rollout restart` the
+# affected Deployments. Worth it for dev predictability.
+generatorOptions:
+  disableNameSuffixHash: true
+
+# Pin the platform image to `:latest` for dev; production overlays
+# should pin to a specific sha-* tag for reproducibility.
+images:
+  - name: ghcr.io/sorriso/aywizz-api
+    newTag: latest

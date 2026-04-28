@@ -141,6 +141,7 @@ markers = [
     "integration: integration tests requiring testcontainers",
     "e2e: cross-component end-to-end tests against the shared stack",
     "system: tests against a running docker-compose stack (opt-in)",
+    "system_k8s: tests against a live K8s deployment (opt-in, kind cluster)",
     "coherence: spec<->code and code<->code coherence tests",
     "slow: tests taking more than 1 second",
 ]

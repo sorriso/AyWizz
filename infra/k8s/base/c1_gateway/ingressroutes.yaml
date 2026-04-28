@@ -1,0 +1,130 @@
+# =============================================================================
+# File: ingressroutes.yaml
+# Version: 1
+# Path: infra/k8s/base/c1_gateway/ingressroutes.yaml
+# Description: Traefik IngressRoute CRDs — K8s mirror of
+#              `infra/c1_gateway/dynamic/routers.yml`. Same path
+#              prefixes, same middlewares, same backend services as the
+#              compose dev stack (just resolved through K8s DNS rather
+#              than Docker DNS).
+#
+#              Public routes:
+#                /auth/login (POST)        → c2 [rate-limit-auth]
+#                /auth/token (POST)        → c2 [rate-limit-auth]
+#                /auth/*                   → c2
+#                /api/v1/conversations/*   → c3 [forward-auth-c2, secure-headers]
+#                /api/v1/orchestrator/*    → c4 [forward-auth-c2, secure-headers]
+#                /api/v1/projects/*        → c5 [forward-auth-c2, secure-headers]
+#                /api/v1/validation/*      → c6 [forward-auth-c2, secure-headers]
+#                /api/v1/memory/*          → c7 [forward-auth-c2, secure-headers]
+#                /api/v1/mcp(/*)?          → c9 [forward-auth-c2, secure-headers]
+#                /uploads/*                → c12 [forward-auth-c2, secure-headers]
+# =============================================================================
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: aywizz-public
+  namespace: aywizz
+  labels:
+    app.kubernetes.io/name: c1-gateway
+    app.kubernetes.io/component: c1
+    app.kubernetes.io/part-of: aywizz-platform
+spec:
+  entryPoints:
+    - web
+  routes:
+    # C2 — POST /auth/login (rate-limited)
+    - match: Path(`/auth/login`) && Method(`POST`)
+      kind: Rule
+      priority: 100
+      services:
+        - name: c2-auth
+          port: 8000
+      middlewares:
+        - name: rate-limit-auth
+    # C2 — POST /auth/token (rate-limited)
+    - match: Path(`/auth/token`) && Method(`POST`)
+      kind: Rule
+      priority: 100
+      services:
+        - name: c2-auth
+          port: 8000
+      middlewares:
+        - name: rate-limit-auth
+    # C2 — /auth/* (catch-all, lower priority)
+    - match: PathPrefix(`/auth`)
+      kind: Rule
+      priority: 10
+      services:
+        - name: c2-auth
+          port: 8000
+    # C3
+    - match: PathPrefix(`/api/v1/conversations`)
+      kind: Rule
+      priority: 50
+      services:
+        - name: c3-conversation
+          port: 8000
+      middlewares:
+        - name: forward-auth-c2
+        - name: secure-headers
+    # C4
+    - match: PathPrefix(`/api/v1/orchestrator`)
+      kind: Rule
+      priority: 50
+      services:
+        - name: c4-orchestrator
+          port: 8000
+      middlewares:
+        - name: forward-auth-c2
+        - name: secure-headers
+    # C5
+    - match: PathPrefix(`/api/v1/projects`)
+      kind: Rule
+      priority: 50
+      services:
+        - name: c5-requirements
+          port: 8000
+      middlewares:
+        - name: forward-auth-c2
+        - name: secure-headers
+    # C6
+    - match: PathPrefix(`/api/v1/validation`)
+      kind: Rule
+      priority: 50
+      services:
+        - name: c6-validation
+          port: 8000
+      middlewares:
+        - name: forward-auth-c2
+        - name: secure-headers
+    # C7
+    - match: PathPrefix(`/api/v1/memory`)
+      kind: Rule
+      priority: 50
+      services:
+        - name: c7-memory
+          port: 8000
+      middlewares:
+        - name: forward-auth-c2
+        - name: secure-headers
+    # C9
+    - match: PathPrefix(`/api/v1/mcp`)
+      kind: Rule
+      priority: 50
+      services:
+        - name: c9-mcp
+          port: 8000
+      middlewares:
+        - name: forward-auth-c2
+        - name: secure-headers
+    # C12 (n8n) — /uploads/*
+    - match: PathPrefix(`/uploads`)
+      kind: Rule
+      priority: 50
+      services:
+        - name: c12-workflow
+          port: 5678
+      middlewares:
+        - name: forward-auth-c2
+        - name: secure-headers

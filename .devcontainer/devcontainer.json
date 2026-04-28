@@ -1,8 +1,16 @@
 // =============================================================================
 // VS Code Dev Container Configuration
-// Version: 5
+// Version: 6
 // Path: .devcontainer/devcontainer.json
 // Description: Dev container for Python/K8s development with Claude Code.
+// v6: re-enable testcontainers Ryuk for durable cleanup across pytest
+//     SIGKILL (was disabled in v5 as a workaround for docker-outside-of-
+//     docker uncertainty). Pre-pull `testcontainers/ryuk:0.8.1` (the
+//     version pinned by testcontainers-python 4.x) at devcontainer
+//     creation so first-test latency excludes the Ryuk image pull.
+//     Pre-pull is non-fatal — if offline, testcontainers falls back to
+//     pull-on-demand. `docker_test_cleanup.sh` remains as a belt-and-
+//     braces manual cleanup for the rare case where Ryuk itself fails.
 // v5: align the bind-mount target with the host source path
 //     (`${localWorkspaceFolder}`). With docker-outside-of-docker, compose
 //     bind-mount sources resolved inside the devcontainer must also exist
@@ -41,13 +49,17 @@
   "containerEnv": {
     "TZ": "Europe/Paris",
     "KUBECONFIG": "/home/developer/.kube-local/config",
-    // Testcontainers via docker-outside-of-docker
-    "TESTCONTAINERS_RYUK_DISABLED": "true",
+    // Testcontainers via docker-outside-of-docker. Ryuk re-enabled in v6;
+    // pre-pulled below at postCreateCommand. If Ryuk turns out to misbehave
+    // in this DooD setup, fall back by setting RYUK_DISABLED=true here.
     "DOCKER_HOST": "unix:///var/run/docker.sock"
   },
 
-  // Align docker group GID with the host socket + ensure developer is a member.
-  "postCreateCommand": "bash -c 'DOCKER_SOCK_GID=$(stat -c \"%g\" /var/run/docker.sock 2>/dev/null || echo 999); sudo groupmod -g $DOCKER_SOCK_GID docker 2>/dev/null || sudo groupadd -g $DOCKER_SOCK_GID docker; sudo usermod -aG docker developer; echo \"Docker group configured with GID $DOCKER_SOCK_GID\"'",
+  // Align docker group GID with the host socket + ensure developer is a
+  // member, then pre-pull the Ryuk image (v0.8.1, pinned by
+  // testcontainers-python 4.x) so the first integration test does not pay
+  // the pull cost. Non-fatal: offline runs fall back to pull-on-demand.
+  "postCreateCommand": "bash -c 'DOCKER_SOCK_GID=$(stat -c \"%g\" /var/run/docker.sock 2>/dev/null || echo 999); sudo groupmod -g $DOCKER_SOCK_GID docker 2>/dev/null || sudo groupadd -g $DOCKER_SOCK_GID docker; sudo usermod -aG docker developer; echo \"Docker group configured with GID $DOCKER_SOCK_GID\"; sudo docker pull testcontainers/ryuk:0.8.1 || echo \"Ryuk pre-pull skipped (offline/network) — testcontainers will pull on demand\"'",
 
   // Copy read-only host kube config to a writable location + rewrite API URL for Docker Desktop K8s
   "postStartCommand": "set -e; mkdir -p ~/.kube-local; if [ -f /tmp/host-kube/config ]; then cp -rf /tmp/host-kube/* ~/.kube-local/; fi; if [ -f ~/.kube-local/config ]; then sed -i 's#https://127\\.0\\.0\\.1:6443#https://kubernetes.docker.internal:6443#g' ~/.kube-local/config || true; sed -i 's#https://host\\.docker\\.internal:6443#https://kubernetes.docker.internal:6443#g' ~/.kube-local/config || true; fi",

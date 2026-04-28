@@ -1,0 +1,81 @@
+# =============================================================================
+# File: deployment.yaml
+# Version: 1
+# Path: infra/k8s/base/c1_gateway/deployment.yaml
+# Description: Traefik v3 Deployment (C1 ingress tier). Uses the
+#              Kubernetes CRD provider (`--providers.kubernetescrd`) +
+#              the standard Ingress provider — IngressRoute and
+#              Middleware CRDs in this directory are picked up
+#              automatically. RBAC granted via the bound ServiceAccount.
+#
+#              Public entry point exposed by `service.yaml` (Type:
+#              LoadBalancer in production overlays; ClusterIP +
+#              port-forward in kind/dev).
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: c1-gateway
+  namespace: aywizz
+  labels:
+    app.kubernetes.io/name: c1-gateway
+    app.kubernetes.io/component: c1
+    app.kubernetes.io/part-of: aywizz-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c1-gateway
+      app.kubernetes.io/component: c1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: c1-gateway
+        app.kubernetes.io/component: c1
+        app.kubernetes.io/part-of: aywizz-platform
+    spec:
+      serviceAccountName: traefik
+      containers:
+        - name: traefik
+          image: traefik:v3.3
+          imagePullPolicy: IfNotPresent
+          args:
+            - --entryPoints.web.address=:80
+            - --entryPoints.traefik.address=:8080
+            - --api.dashboard=true
+            - --api.insecure=true
+            - --providers.kubernetescrd=true
+            - --providers.kubernetescrd.allowCrossNamespace=false
+            - --providers.kubernetesingress=true
+            - --log.level=INFO
+            - --accesslog=true
+          ports:
+            - name: web
+              containerPort: 80
+              protocol: TCP
+            - name: traefik
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: traefik
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: traefik
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            limits:
+              cpu: "300m"
+              memory: "256Mi"
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
