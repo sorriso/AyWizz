@@ -40,7 +40,7 @@ Authentication-mode coverage (`local` / `entraid` / `none`) is tested at the C2 
 
 ## 3. Endpoint catalog
 
-**71 endpoints** across 7 components. Order: by component, method, path.
+**72 endpoints** across 7 components. Order: by component, method, path.
 
 ### c2_auth
 
@@ -126,6 +126,7 @@ Authentication-mode coverage (`local` / `entraid` / `none`) is tested at the C2 
 | `POST` | `/api/v1/memory/retrieve` | authenticated | tenant | any authenticated | — | — | 200 |
 | `POST` | `/api/v1/memory/projects/{project_id}/sources` | role_gated | project | `admin` · `project_editor` · `project_owner` | `tenant_manager` | arango · `c7_sources` | 201 |
 | `POST` | `/api/v1/memory/projects/{project_id}/sources/upload` | role_gated | project | `admin` · `project_editor` · `project_owner` | `tenant_manager` | both · `memory_sources` · bucket `memory` | 201 |
+| `POST` | `/api/v1/memory/projects/{project_id}/sources/{source_id}/extract-kg` | role_gated | project | `admin` · `project_editor` · `project_owner` | `tenant_manager` | arango · `memory_kg_entities` | 200 |
 | `GET` | `/api/v1/memory/projects/{project_id}/sources` | authenticated | project | any authenticated | — | — | 200 |
 | `GET` | `/api/v1/memory/projects/{project_id}/sources/{source_id}` | authenticated | project | any authenticated | — | — | 200 |
 | `DELETE` | `/api/v1/memory/projects/{project_id}/sources/{source_id}` | role_gated | project | `admin` · `project_owner` | `tenant_manager` | arango · `c7_sources` | 204 |

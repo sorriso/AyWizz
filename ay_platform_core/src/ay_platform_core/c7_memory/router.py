@@ -30,6 +30,7 @@ from fastapi import (
 from ay_platform_core.c7_memory.models import (
     ChunkPublic,
     EntityEmbedRequest,
+    KGExtractionResult,
     QuotaStatus,
     RetrievalRequest,
     RetrievalResponse,
@@ -158,6 +159,29 @@ async def upload_source(
         mime_type=mime_type,
         uploaded_by=actor,
         content_bytes=content_bytes,
+    )
+
+
+@router.post(
+    "/api/v1/memory/projects/{project_id}/sources/{source_id}/extract-kg",
+    response_model=KGExtractionResult,
+    status_code=status.HTTP_200_OK,
+)
+async def extract_kg(
+    project_id: str,
+    source_id: str,
+    _user: str = Depends(_require_actor),
+    tenant_id: str = Depends(_require_tenant),
+    x_user_roles: str | None = Header(default=None),
+    service: MemoryService = Depends(get_service),
+) -> KGExtractionResult:
+    """Phase F.1 — extract entities + relations from an existing source
+    via the C8 LLM gateway. Same role gate as `/sources` ingest:
+    `project_editor` / `project_owner` / `admin`. `tenant_manager`
+    excluded by E-100-002 v2."""
+    _require_role(x_user_roles, required=("project_editor", "project_owner", "admin"))
+    return await service.extract_kg(
+        tenant_id=tenant_id, project_id=project_id, source_id=source_id,
     )
 
 

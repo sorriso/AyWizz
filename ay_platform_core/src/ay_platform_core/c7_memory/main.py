@@ -24,9 +24,12 @@ from ay_platform_core.c7_memory.db.repository import MemoryRepository
 from ay_platform_core.c7_memory.embedding.base import EmbeddingProvider
 from ay_platform_core.c7_memory.embedding.deterministic import DeterministicHashEmbedder
 from ay_platform_core.c7_memory.embedding.ollama import OllamaEmbedder
+from ay_platform_core.c7_memory.kg.repository import KGRepository
 from ay_platform_core.c7_memory.router import router
 from ay_platform_core.c7_memory.service import MemoryService
 from ay_platform_core.c7_memory.storage.minio_storage import MemorySourceStorage
+from ay_platform_core.c8_llm.client import LLMGatewayClient
+from ay_platform_core.c8_llm.config import ClientSettings as C8ClientSettings
 from ay_platform_core.observability import (
     TraceContextMiddleware,
     configure_logging,
@@ -75,20 +78,35 @@ def create_app(config: MemoryConfig | None = None) -> FastAPI:
         secure=cfg.minio_secure,
     )
     storage = MemorySourceStorage(minio_client, cfg.minio_bucket)
+    kg_repo = KGRepository(db)
+    # Phase F.1 — C8 LLM gateway client for KG extraction. Reads its
+    # config from env (`C8_GATEWAY_URL`, etc.) the same way every
+    # other component talks to C8.
+    llm_client = LLMGatewayClient(
+        C8ClientSettings(),
+        bearer_token=None,
+    )
     service = MemoryService(
-        config=cfg, repo=repo, embedder=embedder, storage=storage,
+        config=cfg,
+        repo=repo,
+        embedder=embedder,
+        storage=storage,
+        kg_repo=kg_repo,
+        llm_client=llm_client,
     )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         repo._ensure_collections_sync()
         await storage.ensure_bucket()
+        await kg_repo.ensure_collections()
         yield
         # The Ollama adapter owns its httpx client; close it cleanly on
         # shutdown. Other adapters are no-op.
         aclose = getattr(embedder, "aclose", None)
         if aclose is not None:
             await aclose()
+        await llm_client.aclose()
 
     app = FastAPI(title="C7 Memory Service", lifespan=lifespan)
     app.add_middleware(TraceContextMiddleware, sample_rate=log_cfg.trace_sample_rate)

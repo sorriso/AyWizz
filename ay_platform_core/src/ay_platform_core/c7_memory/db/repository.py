@@ -1,6 +1,6 @@
 # =============================================================================
 # File: repository.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/src/ay_platform_core/c7_memory/db/repository.py
 # Description: ArangoDB repository for C7 — memory_chunks, memory_sources,
 #              memory_links (E-400-002, E-400-003). Reuses the lock pattern
@@ -8,6 +8,13 @@
 #              Cosine similarity is implemented client-side in Python
 #              rather than as an AQL UDF (AQL UDFs add a deployment step;
 #              the scan is bounded by a pre-filter and fits in-memory).
+#
+#              v2 (Phase F.2): adds `fetch_chunks_for_source_ids` —
+#              targeted fetch by explicit source_ids, used by the KG
+#              expansion path to retrieve chunks that the bounded
+#              `scan_chunks` may have cut off. Same tenant/project/
+#              index/model gating as scan; no scan_cap (caller bounds
+#              by source_ids cardinality).
 #
 # @relation implements:R-400-010
 # @relation implements:R-400-011
@@ -160,6 +167,73 @@ class MemoryRepository:
             include_deprecated=include_deprecated,
             include_history=include_history,
             scan_cap=scan_cap,
+        )
+
+    def _fetch_chunks_for_source_ids_sync(
+        self,
+        *,
+        tenant_id: str,
+        project_id: str,
+        source_ids: list[str],
+        indexes: list[str],
+        model_id: str,
+        include_deprecated: bool,
+        include_history: bool,
+    ) -> list[dict[str, Any]]:
+        if not source_ids:
+            return []
+        aql = """
+        FOR c IN memory_chunks
+            FILTER c.tenant_id == @tenant_id
+                AND c.project_id == @project_id
+                AND c.source_id IN @source_ids
+                AND c.index IN @indexes
+                AND c.model_id == @model_id
+                AND (
+                    c.status == 'active'
+                    OR (c.status == 'deprecated' AND @include_deprecated)
+                    OR (c.status == 'superseded' AND @include_history)
+                )
+            RETURN c
+        """
+        cursor = self._db.aql.execute(
+            aql,
+            bind_vars={
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "source_ids": source_ids,
+                "indexes": indexes,
+                "model_id": model_id,
+                "include_deprecated": include_deprecated,
+                "include_history": include_history,
+            },
+        )
+        return cast(list[dict[str, Any]], list(cursor))
+
+    async def fetch_chunks_for_source_ids(
+        self,
+        *,
+        tenant_id: str,
+        project_id: str,
+        source_ids: list[str],
+        indexes: list[str],
+        model_id: str,
+        include_deprecated: bool,
+        include_history: bool,
+    ) -> list[dict[str, Any]]:
+        """Targeted fetch of chunks belonging to an explicit list of
+        source_ids (Phase F.2 — KG expansion path). Same tenant/project/
+        index/model gating as `scan_chunks` but no scan_cap — the caller
+        is expected to bound `source_ids` cardinality."""
+        return await self._run(
+            self._fetch_chunks_for_source_ids_sync,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            source_ids=source_ids,
+            indexes=indexes,
+            model_id=model_id,
+            include_deprecated=include_deprecated,
+            include_history=include_history,
         )
 
     def _delete_chunks_for_source_sync(

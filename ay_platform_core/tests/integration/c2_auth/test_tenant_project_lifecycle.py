@@ -351,3 +351,114 @@ async def test_grant_user_in_other_tenant_returns_400(
         )
     assert response.status_code == 400
     assert "different tenant" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Project deletion + cascade (gap-fill 2026-04-28)
+# ---------------------------------------------------------------------------
+
+
+async def test_delete_project_cascades_member_grants_and_404s_on_re_delete(
+    c2_stack: tuple[FastAPI, AuthService],
+) -> None:
+    """End-to-end DELETE /api/v1/projects/{pid} :
+
+    - tenant_manager → tenant ; admin → projet + grant editor sur un user.
+    - admin DELETE le projet (204).
+    - re-DELETE → 404 (no leak via repeated deletes).
+    - cross-tenant DELETE (other tenant's admin) → 404.
+    - le grant project_editor du user a été cascade (gone from
+      role_assignments) — re-creating the same project doesn't
+      resurrect stale grants.
+    """
+    app, service = c2_stack
+    tm_headers = await _bearer_for(
+        service, "u-tm", "platform", [RBACGlobalRole.TENANT_MANAGER],
+    )
+    tenant_id = f"tenant-del-{uuid.uuid4().hex[:6]}"
+    other_tenant_id = f"tenant-del-other-{uuid.uuid4().hex[:6]}"
+    project_id = f"proj-del-{uuid.uuid4().hex[:6]}"
+
+    async with _client(app) as c:
+        await c.post(
+            "/admin/tenants",
+            headers=tm_headers,
+            json={"tenant_id": tenant_id, "name": tenant_id},
+        )
+        await c.post(
+            "/admin/tenants",
+            headers=tm_headers,
+            json={"tenant_id": other_tenant_id, "name": other_tenant_id},
+        )
+
+    a_admin = _forward_auth("u-adm-del", tenant_id, ("admin",))
+    other_admin = _forward_auth(
+        "u-adm-other-del", other_tenant_id, ("admin",),
+    )
+
+    # Seed: user + project + grant.
+    member = await service.create_user(
+        UserCreateRequest(
+            username=f"member-{uuid.uuid4().hex[:6]}@phase-a.test",
+            password="MemberPw1!",
+            tenant_id=tenant_id,
+            roles=[RBACGlobalRole.USER],
+        )
+    )
+    async with _client(app) as c:
+        create = await c.post(
+            "/api/v1/projects",
+            headers=a_admin,
+            json={"project_id": project_id, "name": "to-delete"},
+        )
+        assert create.status_code == 201
+        grant = await c.post(
+            f"/api/v1/projects/{project_id}/members/{member.user_id}",
+            headers=a_admin,
+            json={"role": "project_editor"},
+        )
+        assert grant.status_code == 204
+
+        # Cross-tenant DELETE → 404 (don't leak existence).
+        cross = await c.delete(
+            f"/api/v1/projects/{project_id}", headers=other_admin,
+        )
+        assert cross.status_code == 404
+
+        # Real DELETE → 204.
+        delete = await c.delete(
+            f"/api/v1/projects/{project_id}", headers=a_admin,
+        )
+        assert delete.status_code == 204
+
+        # Re-DELETE → 404.
+        re_del = await c.delete(
+            f"/api/v1/projects/{project_id}", headers=a_admin,
+        )
+        assert re_del.status_code == 404
+
+        # GET projects list no longer includes it.
+        listing = await c.get("/api/v1/projects", headers=a_admin)
+        ids = {p["project_id"] for p in listing.json()["items"]}
+        assert project_id not in ids
+
+    # Cascade verification: re-create the project and check that the
+    # member's old grant is GONE — they need a fresh grant. Since the
+    # JWT carries project_scopes from c2_role_assignments, we check
+    # by issuing a fresh token for the member and inspecting claims.
+    async with _client(app) as c:
+        recreate = await c.post(
+            "/api/v1/projects",
+            headers=a_admin,
+            json={"project_id": project_id, "name": "resurrected"},
+        )
+        assert recreate.status_code == 201
+
+    from ay_platform_core.c2_auth.models import LoginRequest  # noqa: PLC0415
+    member_token = await service.issue_token(
+        LoginRequest(username=member.username, password="MemberPw1!"),
+    )
+    member_claims = await service.verify_token(member_token.access_token)
+    assert project_id not in member_claims.project_scopes, (
+        "stale grant resurrected after project re-creation — cascade failed"
+    )

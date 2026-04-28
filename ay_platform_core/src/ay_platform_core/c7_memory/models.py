@@ -26,10 +26,18 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class IndexKind(StrEnum):
-    """Two logical indexes per R-400-010 / D-013."""
+    """Logical indexes per R-400-010 / D-013.
+
+    v2 (Phase E of v1 plan) adds CONVERSATIONS — chunks fed back from
+    C3 chat exchanges. Federated retrieval can target any subset; the
+    chat-with-RAG flow queries `EXTERNAL_SOURCES + CONVERSATIONS` so
+    follow-up questions benefit both from uploaded sources and from
+    the conversation's own prior turns.
+    """
 
     REQUIREMENTS = "requirements"
     EXTERNAL_SOURCES = "external_sources"
+    CONVERSATIONS = "conversations"
 
 
 class ChunkStatus(StrEnum):
@@ -248,3 +256,54 @@ class ChunkListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     chunks: list[ChunkPublic]
+
+
+# ---------------------------------------------------------------------------
+# Phase F (v1.1) — Knowledge graph extraction
+# ---------------------------------------------------------------------------
+
+
+class KGEntity(BaseModel):
+    """One entity extracted from a source.
+
+    Persisted in `memory_kg_entities` (vertex collection). Identified
+    by composite key `(tenant_id, project_id, name, type)`; multiple
+    sources mentioning the same entity converge on the same vertex.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+    type: str = Field(min_length=1, max_length=64)
+    """Free-form entity type (e.g. "person", "place", "organization",
+    "concept"). The LLM is prompted to use a small canonical set but
+    we accept whatever it returns — no enum constraint in v1."""
+
+
+class KGRelation(BaseModel):
+    """One directed relation between two entities, derived by the LLM.
+
+    Persisted in `memory_kg_relations` (Arango edge collection)
+    pointing from the subject vertex to the object vertex.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    subject: KGEntity
+    relation: str = Field(min_length=1, max_length=80)
+    object: KGEntity
+
+
+class KGExtractionResult(BaseModel):
+    """Response shape of POST /sources/{sid}/extract-kg.
+
+    Both lists may be empty when the source contains no nameable
+    entities; that's a legitimate outcome, not an error."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str
+    entities_added: int
+    relations_added: int
+    entities: list[KGEntity] = Field(default_factory=list)
+    relations: list[KGRelation] = Field(default_factory=list)

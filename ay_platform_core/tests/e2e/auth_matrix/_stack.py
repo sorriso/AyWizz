@@ -65,6 +65,7 @@ from ay_platform_core.c7_memory.db.repository import MemoryRepository
 from ay_platform_core.c7_memory.embedding.deterministic import (
     DeterministicHashEmbedder,
 )
+from ay_platform_core.c7_memory.kg.repository import KGRepository
 from ay_platform_core.c7_memory.router import router as c7_router
 from ay_platform_core.c7_memory.service import MemoryService
 from ay_platform_core.c7_memory.service import get_service as c7_get_service
@@ -224,12 +225,19 @@ def _build_c2(
 
 
 def _build_c3(
-    client: ArangoClient, db_name: str, password: str
+    client: ArangoClient,
+    db_name: str,
+    password: str,
+    *,
+    memory_service: MemoryService | None = None,
+    llm_client: LLMGatewayClient | None = None,
 ) -> tuple[FastAPI, ConversationService]:
     db = client.db(db_name, username="root", password=password)
     repo = ConversationRepository(db)
     repo._ensure_collections_sync()
-    service = ConversationService(repo)
+    service = ConversationService(
+        repo, memory_service=memory_service, llm_client=llm_client,
+    )
     app = FastAPI()
     app.include_router(c3_router)
     app.state.conversation_service = service
@@ -307,6 +315,8 @@ def _build_c7(
     password: str,
     minio_client: Minio,
     bucket: str,
+    *,
+    llm_client: LLMGatewayClient | None = None,
 ) -> tuple[FastAPI, MemoryService]:
     db = client.db(db_name, username="root", password=password)
     repo = MemoryRepository(db)
@@ -314,11 +324,15 @@ def _build_c7(
     embedder = DeterministicHashEmbedder()
     storage = MemorySourceStorage(minio_client, bucket)
     storage._ensure_bucket_sync()
+    kg_repo = KGRepository(db)
+    kg_repo._ensure_collections_sync()
     service = MemoryService(
         config=MemoryConfig(),
         repo=repo,
         embedder=embedder,
         storage=storage,
+        kg_repo=kg_repo,
+        llm_client=llm_client,
     )
     app = FastAPI()
     app.include_router(c7_router)
@@ -393,10 +407,9 @@ async def build_stack(
         c2_app, c2_service = _build_c2(
             arango_url, arango_password, db_names["c2_auth"], jwt_secret
         )
-        c3_app, _c3_service = _build_c3(
-            client, db_names["c3_conversation"], arango_password
-        )
 
+        # LLM gateway client + scripted upstream — needed by C4 (orchestrator)
+        # AND by C3 (Phase D RAG flow). Built before c3/c4 so both can wire it.
         scripted_llm = ScriptedLLM()
         mock_llm_app = _build_mock_llm_app(scripted_llm)
         llm_transport = httpx.ASGITransport(app=mock_llm_app)
@@ -422,6 +435,16 @@ async def build_stack(
         c7_app, c7_service = _build_c7(
             client, db_names["c7_memory"], arango_password,
             minio_client, bucket_names["c7_memory"],
+            llm_client=llm_client,
+        )
+        # C3 wired LAST so it can consume the live c7_service + llm_client
+        # (Phase D RAG flow). The auth-matrix tests still don't drive a
+        # full RAG round-trip — they just need the dependencies to exist
+        # so the role/isolation matrix runs end-to-end.
+        c3_app, _c3_service = _build_c3(
+            client, db_names["c3_conversation"], arango_password,
+            memory_service=c7_service,
+            llm_client=llm_client,
         )
         c9_app, c9_http_clients = _build_c9(c5_app, c6_app)
         for c in c9_http_clients:

@@ -565,6 +565,25 @@ _C7_MEMORY: list[EndpointSpec] = [
     ),
     EndpointSpec(
         component="c7_memory",
+        method="POST",
+        path="/api/v1/memory/projects/{project_id}/sources/{source_id}/extract-kg",
+        auth=Auth.ROLE_GATED,
+        scope=Scope.PROJECT,
+        success_status=200,
+        accept_roles=("project_editor", "project_owner"),
+        accept_global_roles=("admin",),
+        excluded_global_roles=("tenant_manager",),
+        backend=Backend.ARANGO,
+        backend_collection="memory_kg_entities",
+        notes=(
+            "Phase F.1 — LLM-based entity + relation extraction on an "
+            "existing source. Persists to memory_kg_entities (vertex) "
+            "and memory_kg_relations (edge). Hybrid retrieval (F.2) "
+            "deferred to v1.5."
+        ),
+    ),
+    EndpointSpec(
+        component="c7_memory",
         method="GET",
         path="/api/v1/memory/projects/{project_id}/sources",
         auth=Auth.AUTHENTICATED,

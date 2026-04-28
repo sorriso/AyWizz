@@ -1,10 +1,21 @@
 # =============================================================================
 # File: service.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/src/ay_platform_core/c7_memory/service.py
 # Description: Facade for the C7 Memory Service. Wires ingestion (parse +
 #              chunk + embed + index), federated retrieval, entity-event
 #              handlers, and the admin surface.
+#
+#              v2 (Phase F.2): hybrid retrieval. After the initial
+#              vector scan + score, if a KG repo is wired and the graph
+#              is non-empty for the project, expand the candidate pool
+#              with chunks of source_ids reachable in 1 hop from the
+#              top-K seeds (proposition A — pulls in chunks that
+#              `scan_cap` may have cut off), then apply a multiplicative
+#              boost to chunks whose source_id is graph-related to a
+#              seed (proposition B — small ranking bump for
+#              contextually-related-but-not-direct-vector matches).
+#              Both knobs are configurable; default 1-hop, boost 1.3.
 #
 # @relation implements:R-400-020
 # @relation implements:R-400-030
@@ -34,11 +45,17 @@ from ay_platform_core.c7_memory.ingestion.parser import (
     UnsupportedMimeError,
     parse,
 )
+from ay_platform_core.c7_memory.kg.extractor import (
+    KGExtractionError,
+    extract_entities_and_relations,
+)
+from ay_platform_core.c7_memory.kg.repository import KGRepository
 from ay_platform_core.c7_memory.models import (
     ChunkPublic,
     ChunkStatus,
     EntityEmbedRequest,
     IndexKind,
+    KGExtractionResult,
     ParseStatus,
     QuotaStatus,
     RetrievalHit,
@@ -50,6 +67,7 @@ from ay_platform_core.c7_memory.models import (
 )
 from ay_platform_core.c7_memory.retrieval.similarity import cosine, snippet
 from ay_platform_core.c7_memory.storage.minio_storage import MemorySourceStorage
+from ay_platform_core.c8_llm.client import LLMGatewayClient
 
 
 class MemoryService:
@@ -61,6 +79,8 @@ class MemoryService:
         repo: MemoryRepository,
         embedder: EmbeddingProvider,
         storage: MemorySourceStorage | None = None,
+        kg_repo: KGRepository | None = None,
+        llm_client: LLMGatewayClient | None = None,
     ) -> None:
         self._config = config
         self._repo = repo
@@ -69,6 +89,10 @@ class MemoryService:
         # endpoint can pass None. The /sources/upload route requires
         # storage to be present and 503's otherwise.
         self._storage = storage
+        # Phase F.1 — KG extraction. Both `kg_repo` and `llm_client`
+        # are required for the extract endpoint; absent → 503.
+        self._kg_repo = kg_repo
+        self._llm = llm_client
 
     # ------------------------------------------------------------------
     # Ingestion (admin/test direct path — C12 upload still goes via NATS
@@ -176,6 +200,44 @@ class MemoryService:
             parsed_text=text,
         )
 
+    async def ingest_conversation_turn(
+        self,
+        *,
+        tenant_id: str,
+        project_id: str,
+        conversation_id: str,
+        turn_id: str,
+        user_message: str,
+        assistant_reply: str,
+        actor_id: str,
+    ) -> SourcePublic:
+        """Phase E of v1 plan — index a conversation turn into the
+        CONVERSATIONS index so follow-up questions can retrieve prior
+        exchanges as context.
+
+        The user/assistant pair is concatenated into a single text body
+        (one chunk per ~chunk_token_size words) so retrieve sees the
+        full exchange as a single semantic unit. Source row is tagged
+        `mime_type=text/plain`, `uploaded_by=conv:{actor_id}` for
+        operator audit; quota is enforced same as upload.
+        """
+        body = (
+            f"User: {user_message.strip()}\n\n"
+            f"Assistant: {assistant_reply.strip()}"
+        )
+        size_bytes = len(body.encode("utf-8"))
+        await self._enforce_quota(tenant_id, project_id, size_bytes)
+        return await self._index_parsed_source(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            source_id=f"conv:{conversation_id}:{turn_id}",
+            mime_type="text/plain",
+            uploaded_by=f"conv:{actor_id}",
+            size_bytes=size_bytes,
+            parsed_text=body,
+            index_kind=IndexKind.CONVERSATIONS,
+        )
+
     async def _index_parsed_source(
         self,
         *,
@@ -186,10 +248,13 @@ class MemoryService:
         uploaded_by: str,
         size_bytes: int,
         parsed_text: str,
+        index_kind: IndexKind = IndexKind.EXTERNAL_SOURCES,
     ) -> SourcePublic:
-        """Shared post-parse pipeline used by both `ingest_source`
-        (string-based) and `ingest_uploaded_source` (bytes-based).
-        Chunks the text, embeds the chunks, and persists rows."""
+        """Shared post-parse pipeline used by `ingest_source`,
+        `ingest_uploaded_source`, and `ingest_conversation_turn`.
+        Chunks the text, embeds the chunks, and persists rows under
+        `index_kind` (default `EXTERNAL_SOURCES`; `CONVERSATIONS` for
+        Phase E conversation memory)."""
         # Synthesise a SourceIngestRequest-like payload for the helper
         # builders below. We use the typed model where it'd compose
         # cleanly; otherwise inline.
@@ -245,7 +310,7 @@ class MemoryService:
                 "chunk_id": chunk_id,
                 "tenant_id": tenant_id,
                 "project_id": project_id,
-                "index": IndexKind.EXTERNAL_SOURCES.value,
+                "index": index_kind.value,
                 "source_id": source_id,
                 "entity_id": None,
                 "entity_version": None,
@@ -269,6 +334,82 @@ class MemoryService:
         )
         await self._repo.upsert_source(source_row)
         return _source_public(source_row)
+
+    async def extract_kg(
+        self,
+        *,
+        tenant_id: str,
+        project_id: str,
+        source_id: str,
+    ) -> KGExtractionResult:
+        """Phase F.1 — extract entities + relations from a previously
+        ingested source via the C8 LLM gateway, then persist to the
+        knowledge graph collections.
+
+        Requires both `llm_client` and `kg_repo` to have been wired at
+        construction time; absent → 503. The source must already be in
+        Arango (POST /sources or POST /sources/upload before this).
+        """
+        if self._llm is None or self._kg_repo is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "KG extraction not configured — wire C8 LLMGatewayClient "
+                    "and KGRepository to enable POST /sources/{sid}/extract-kg"
+                ),
+            )
+
+        existing = await self._repo.get_source(tenant_id, project_id, source_id)
+        if existing is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="source not found",
+            )
+
+        # Reconstruct the source's text from its persisted chunks. Cheap
+        # for v1 sources (≤ a few MB); avoids re-parsing the raw blob.
+        chunk_rows = await self._repo.scan_chunks(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            indexes=[IndexKind.EXTERNAL_SOURCES.value],
+            model_id=self._embedder.model_id,
+            include_deprecated=False,
+            include_history=False,
+            scan_cap=self._config.retrieval_scan_cap,
+        )
+        source_chunks = sorted(
+            (c for c in chunk_rows if c.get("source_id") == source_id),
+            key=lambda c: c.get("chunk_index", 0),
+        )
+        source_text = "\n\n".join(c["content"] for c in source_chunks).strip()
+
+        try:
+            entities, relations = await extract_entities_and_relations(
+                llm_client=self._llm,
+                source_text=source_text,
+                tenant_id=tenant_id,
+                project_id=project_id,
+                source_id=source_id,
+            )
+        except KGExtractionError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"LLM-based KG extraction failed: {exc}",
+            ) from exc
+
+        added_entities, added_relations = await self._kg_repo.persist(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            source_id=source_id,
+            entities=entities,
+            relations=relations,
+        )
+        return KGExtractionResult(
+            source_id=source_id,
+            entities_added=added_entities,
+            relations_added=added_relations,
+            entities=entities,
+            relations=relations,
+        )
 
     async def delete_source(
         self, tenant_id: str, project_id: str, source_id: str
@@ -374,13 +515,37 @@ class MemoryService:
 
         weights = payload.weights or {}
 
-        def _weighted_score(row: dict[str, Any]) -> float:
+        def _cosine_weighted(row: dict[str, Any]) -> float:
             raw = cosine(query_vector, list(row["vector"]))
             multiplier = weights.get(IndexKind(row["index"]), 1.0)
             return raw * multiplier
 
-        scored = [(row, _weighted_score(row)) for row in filtered]
+        scored: list[tuple[dict[str, Any], float]] = [
+            (row, _cosine_weighted(row)) for row in filtered
+        ]
         scored.sort(key=lambda pair: pair[1], reverse=True)
+
+        # ----------------------------------------------------------------
+        # Phase F.2 — KG expansion (hybrid retrieval).
+        # Active iff a KG repo is wired AND the initial top-K seeds have
+        # source_ids that the graph knows about. Two effects combined:
+        #   (A) pool widening — chunks of graph-neighbour source_ids that
+        #       the `scan_cap` cut off are fetched directly and added to
+        #       the candidate pool.
+        #   (B) ranking boost — chunks whose source_id is reachable in
+        #       the graph from a seed source_id get their score
+        #       multiplied by `kg_expansion_boost` (default 1.3). Pure-
+        #       vector ranking still wins for clearly more relevant
+        #       direct matches; graph signal only nudges borderline.
+        # ----------------------------------------------------------------
+        if self._kg_repo is not None and scored:
+            scored = await self._apply_kg_expansion(
+                scored=scored,
+                payload=payload,
+                tenant_id=tenant_id,
+                cosine_fn=_cosine_weighted,
+            )
+
         top = scored[: payload.top_k]
 
         hits = [
@@ -403,6 +568,74 @@ class MemoryService:
             hits=hits,
             latency_ms=int((time.monotonic() - started) * 1000),
         )
+
+    async def _apply_kg_expansion(
+        self,
+        *,
+        scored: list[tuple[dict[str, Any], float]],
+        payload: RetrievalRequest,
+        tenant_id: str,
+        cosine_fn: Any,
+    ) -> list[tuple[dict[str, Any], float]]:
+        """Phase F.2 hybrid expansion. Returns a re-sorted scored list
+        with (A) extra chunks pulled from graph-neighbour source_ids
+        and (B) boosted scores for chunks whose source_id is graph-
+        related to a top-K seed."""
+        assert self._kg_repo is not None  # invariant — caller checked
+        top_seeds = scored[: payload.top_k]
+        seed_source_ids = sorted({
+            sid for row, _ in top_seeds
+            if (sid := row.get("source_id")) is not None
+        })
+        if not seed_source_ids:
+            return scored
+
+        neighbour_source_ids = await self._kg_repo.find_neighbor_source_ids(
+            tenant_id=tenant_id,
+            project_id=payload.project_id,
+            seed_source_ids=seed_source_ids,
+            depth=self._config.kg_expansion_depth,
+        )
+        if not neighbour_source_ids:
+            return scored
+
+        # Cap the new source_ids we'll bring in (proposition A) — bound
+        # the cost of the extra fetch + scoring round.
+        capped_neighbours = sorted(set(neighbour_source_ids))[
+            : self._config.kg_expansion_neighbour_cap
+        ]
+        already_seen = {
+            sid for row, _ in scored
+            if (sid := row.get("source_id")) is not None
+        }
+        extra_source_ids = [s for s in capped_neighbours if s not in already_seen]
+        if extra_source_ids:
+            extra_rows = await self._repo.fetch_chunks_for_source_ids(
+                tenant_id=tenant_id,
+                project_id=payload.project_id,
+                source_ids=extra_source_ids,
+                indexes=[ix.value for ix in payload.indexes],
+                model_id=self._embedder.model_id,
+                include_deprecated=payload.include_deprecated,
+                include_history=payload.include_history,
+            )
+            extra_filtered = [r for r in extra_rows if _row_matches_filters(r, payload)]
+            scored = scored + [(row, cosine_fn(row)) for row in extra_filtered]
+
+        # Proposition B: boost any chunk whose source_id is in the graph-
+        # neighbour set (including the just-added extras). Seeds
+        # themselves are NOT boosted (they're already at the top by
+        # vector similarity; double-counting would hide cosine signal).
+        neighbour_set = set(capped_neighbours)
+        boost = self._config.kg_expansion_boost
+        if boost != 1.0:
+            scored = [
+                (row, score * boost
+                 if row.get("source_id") in neighbour_set else score)
+                for row, score in scored
+            ]
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return scored
 
     # ------------------------------------------------------------------
     # Quota (R-400-024)
