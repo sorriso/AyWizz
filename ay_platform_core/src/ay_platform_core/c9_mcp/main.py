@@ -32,6 +32,7 @@ from ay_platform_core.observability import (
     configure_logging,
     make_traced_client,
 )
+from ay_platform_core.observability.auth_guard import AuthGuardMiddleware
 from ay_platform_core.observability.config import LoggingSettings
 
 
@@ -76,6 +77,11 @@ def create_app(
         await c6_client.aclose()
 
     app = FastAPI(title="C9 MCP Server", lifespan=lifespan)
+    app.add_middleware(
+        AuthGuardMiddleware,
+        component="c9_mcp",
+        exempt_prefixes=["/health", "/api/v1/mcp/health"],
+    )
     app.add_middleware(TraceContextMiddleware, sample_rate=log_cfg.trace_sample_rate)
     app.include_router(router)
     app.state.mcp_server = server

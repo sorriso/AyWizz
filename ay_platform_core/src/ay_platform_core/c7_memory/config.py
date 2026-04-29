@@ -100,6 +100,19 @@ class MemoryConfig(BaseSettings):
     # the chunker still bounds memory at the chunking stage.
     max_upload_bytes: int = Field(default=50 * 1024 * 1024, ge=1024)
 
+    # When True (default), `ingest_uploaded_source` triggers
+    # `extract_kg` on the freshly indexed source so the F.2 hybrid
+    # retrieval graph is populated without a separate manual call.
+    # Only fires when both `kg_repo` and `llm_client` are wired —
+    # otherwise this flag is moot. Best-effort: a KG extraction
+    # failure SHALL NOT cause the upload to fail.
+    #
+    # Set to False in environments where:
+    #   - The LLM is rate-limited and KG is best-extracted
+    #     out-of-band (cron job or NATS worker).
+    #   - Upload latency is critical (extract_kg adds ~5-30 s).
+    auto_extract_kg_on_upload: bool = True
+
     # ---- Phase F.2 — KG expansion at retrieve time ------------------------
     # Active iff `kg_repo` is wired AND the project graph has at least
     # one entity touching the seed source_ids. Dormant otherwise.

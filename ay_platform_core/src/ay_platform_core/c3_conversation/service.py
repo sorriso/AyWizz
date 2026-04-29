@@ -38,6 +38,7 @@ from ay_platform_core.c3_conversation.models import (
     MessageRole,
 )
 from ay_platform_core.c7_memory.models import IndexKind, RetrievalRequest
+from ay_platform_core.c7_memory.remote import RemoteMemoryService
 from ay_platform_core.c7_memory.service import MemoryService
 from ay_platform_core.c8_llm.client import LLMGatewayClient
 from ay_platform_core.c8_llm.models import ChatCompletionRequest, ChatMessage, ChatRole
@@ -83,7 +84,7 @@ class ConversationService:
         self,
         repo: ConversationRepository,
         *,
-        memory_service: MemoryService | None = None,
+        memory_service: MemoryService | RemoteMemoryService | None = None,
         llm_client: LLMGatewayClient | None = None,
         rag_top_k: int = 5,
         rag_history_turns: int = 6,
@@ -92,6 +93,10 @@ class ConversationService:
         # Phase D wiring — optional. When BOTH are provided AND the
         # conversation has a project_id, `send_message_stream` runs the
         # RAG pipeline; otherwise it falls back to the static stub.
+        # `MemoryService` is the in-process variant (test stack);
+        # `RemoteMemoryService` is the HTTP variant (K8s production).
+        # Both expose the same retrieve()/ingest_conversation_turn()
+        # surface — ConversationService is agnostic to the choice.
         self._memory = memory_service
         self._llm = llm_client
         self._rag_top_k = rag_top_k
@@ -177,6 +182,7 @@ class ConversationService:
         content: str,
         *,
         tenant_id: str | None = None,
+        user_roles: str = "project_editor",
     ) -> AsyncIterator[str]:
         """Persist the user message and yield SSE chunks for the
         assistant reply.
@@ -215,6 +221,8 @@ class ConversationService:
                 conversation_id=conversation_id,
                 project_id=project_id,
                 tenant_id=tenant_id,
+                user_id=user_id,
+                user_roles=user_roles,
                 user_message=content,
             )
         return self._stub_stream(conversation_id)
@@ -245,10 +253,16 @@ class ConversationService:
         conversation_id: UUID,
         project_id: str,
         tenant_id: str,
+        user_id: str,
+        user_roles: str,
         user_message: str,
     ) -> AsyncIterator[str]:
         async def _generate() -> AsyncIterator[str]:
-            # 1. Retrieve top-K chunks from C7.
+            # 1. Retrieve top-K chunks from C7. The forward-auth kwargs
+            #    (`user_id`, `user_roles`) are required by the remote
+            #    HTTP variant and ignored by the in-process variant —
+            #    passing them unconditionally keeps both code paths
+            #    consistent.
             assert self._memory is not None  # narrowed in caller
             assert self._llm is not None
             retrieval = await self._memory.retrieve(
@@ -262,6 +276,8 @@ class ConversationService:
                     top_k=self._rag_top_k,
                 ),
                 tenant_id=tenant_id,
+                user_id=user_id,
+                user_roles=user_roles,
             )
             context_block = _format_retrieved_chunks(retrieval.hits)
 
@@ -332,6 +348,11 @@ class ConversationService:
                         user_message=user_message,
                         assistant_reply=full_reply,
                         actor_id=str(conversation_id),
+                        # Remote variant raises NotImplementedError here
+                        # in v1; the suppress() catches it so chat
+                        # streaming is unaffected.
+                        user_id=user_id,
+                        user_roles=user_roles,
                     )
 
         return _generate()

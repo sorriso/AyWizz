@@ -23,6 +23,7 @@ from fastapi import (
     Form,
     Header,
     HTTPException,
+    Response,
     UploadFile,
     status,
 )
@@ -210,6 +211,39 @@ async def get_source(
     service: MemoryService = Depends(get_service),
 ) -> SourcePublic:
     return await service.get_source(tenant_id, project_id, source_id)
+
+
+@router.get(
+    "/api/v1/memory/projects/{project_id}/sources/{source_id}/blob",
+    responses={
+        200: {"description": "Raw source bytes streamed back to the caller."},
+        404: {"description": "Source row exists but its blob is missing."},
+        503: {"description": "Blob storage not configured (no MinIO wired)."},
+    },
+)
+async def download_source_blob(
+    project_id: str,
+    source_id: str,
+    _user: str = Depends(_require_actor),
+    tenant_id: str = Depends(_require_tenant),
+    service: MemoryService = Depends(get_service),
+) -> Response:
+    """Stream the raw uploaded file from MinIO. Same project-scope auth
+    as `GET /sources/{source_id}` (its metadata sibling). The
+    `Content-Disposition` header carries a synthesised filename so
+    browsers can download with a sensible name.
+
+    v1: full bytes loaded into memory then returned (capped at
+    `C7_MAX_UPLOAD_BYTES`, default 50 MiB). True streaming chunks
+    deferred until uploads exceed that budget.
+    """
+    blob, mime_type, filename = await service.download_source(
+        tenant_id, project_id, source_id,
+    )
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
+    return Response(content=blob, media_type=mime_type, headers=headers)
 
 
 @router.delete(

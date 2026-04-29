@@ -1,5 +1,5 @@
 {
-  "_comment_header": "File: .claude/settings.json | Version: 12 | Path: .claude/settings.json | Claude Code permissions for the ay_monorepo. Evaluation order: deny > ask > allow. v12 allowlists `ay_platform_core/scripts/run_k8s_system_tests.sh` (kind cluster bring-up + apply + pytest -m system_k8s + teardown). v11 allowlists run.sh / stop.sh. v10 allowlists k8s_validate.sh / k8s_kind_smoke.sh. v9 allowlists docker_test_cleanup.sh. v8 added the `model` field.",
+  "_comment_header": "File: .claude/settings.json | Version: 13 | Path: .claude/settings.json | Claude Code permissions for the ay_monorepo. Evaluation order: deny > ask > allow. v13 allowlists the UI test/lint/typecheck pipeline (`npm run lint`, `npm run typecheck`, `npm run test*`, `npm run ci`, `npm run format`, `npm run build`) for `ay_platform_ui/` ; `npm install*` stays denied per §5.3. v12 allowlists `ay_platform_core/scripts/run_k8s_system_tests.sh`. v11 allowlists run.sh / stop.sh. v10 allowlists k8s_validate.sh / k8s_kind_smoke.sh. v9 allowlists docker_test_cleanup.sh. v8 added the `model` field.",
 
   "model": "opus",
 
@@ -58,6 +58,27 @@
       "Bash(pip show:*)",
       "Bash(pip list:*)",
       "Bash(pip freeze:*)",
+
+      "Bash(npm run lint:*)",
+      "Bash(npm run typecheck:*)",
+      "Bash(npm run test:*)",
+      "Bash(npm run test)",
+      "Bash(npm run ci:*)",
+      "Bash(npm run ci)",
+      "Bash(npm run format:*)",
+      "Bash(npm run build:*)",
+      "Bash(npm run build)",
+      "Bash(npm list:*)",
+      "Bash(npm ls:*)",
+      "Bash(npm --prefix ay_platform_ui run lint:*)",
+      "Bash(npm --prefix ay_platform_ui run typecheck:*)",
+      "Bash(npm --prefix ay_platform_ui run test:*)",
+      "Bash(npm --prefix ay_platform_ui run test)",
+      "Bash(npm --prefix ay_platform_ui run ci:*)",
+      "Bash(npm --prefix ay_platform_ui run ci)",
+      "Bash(npm --prefix ay_platform_ui run format:*)",
+      "Bash(npm --prefix ay_platform_ui run build:*)",
+      "Bash(npm --prefix ay_platform_ui run build)",
 
       "Bash(ls:*)",
       "Bash(tree:*)",

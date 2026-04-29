@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
 # =============================================================================
 # File: e2e_stack.sh
-# Version: 3
+# Version: 4
 # Path: ay_platform_core/scripts/e2e_stack.sh
 # Description: One-stop helper for the system-test stack.
 #              Wraps `docker compose` + seed + `pytest tests/system/`.
 #
+#              v4: adds the `dev` subcommand for manual browser-driven
+#              testing. `dev` layers `<monorepo>/.env.dev` on top of
+#              `.env.test` (multiple --env-file, later overrides
+#              earlier) and brings up the same compose stack with
+#              the demo seed enabled (C2_DEMO_SEED_ENABLED=true) +
+#              UX dev mode (C2_UX_DEV_MODE_ENABLED=true). The
+#              tenant + 4 users + project + grants are seeded by
+#              C2's lifespan ; no separate seed step needed.
 #              v3: pass `--env-file <ENV_FILE>` to every `docker compose`
 #              invocation so Compose's ${VAR} substitution reads from
 #              the test env file (R-100-118 v2). Without this, the root
@@ -16,7 +24,8 @@
 #              tests at ay_platform_core/tests/docker-compose.yml.
 #
 # Usage (from anywhere — this script resolves its own location):
-#   ./ay_platform_core/scripts/e2e_stack.sh up        # build + start
+#   ./ay_platform_core/scripts/e2e_stack.sh up        # build + start (test env)
+#   ./ay_platform_core/scripts/e2e_stack.sh dev       # build + start (test+dev env, demo seed)
 #   ./ay_platform_core/scripts/e2e_stack.sh down      # tear down + volumes
 #   ./ay_platform_core/scripts/e2e_stack.sh seed      # inject test data
 #   ./ay_platform_core/scripts/e2e_stack.sh system    # pytest tests/system/
@@ -55,6 +64,34 @@ cmd_up() {
   echo "    Traefik dashboard: http://localhost:56080   # R-100-122 BASE+80"
   echo "    Mock-LLM admin:    http://localhost:59800   # R-100-122 BASE+9800 (test only)"
   echo "    Observability:     http://localhost:59900   # R-100-122 BASE+9900 (test only)"
+}
+
+cmd_dev() {
+  # Manual-test stack with demo seed + UX dev mode. Layers
+  # `<monorepo>/.env.dev` on top of `.env.test` so the deltas live
+  # in one tiny file (.env.dev = 2 flag flips). docker compose
+  # supports multiple --env-file, later overrides earlier.
+  _require_docker
+  local dev_env="$MONOREPO_ROOT/.env.dev"
+  if [[ ! -f "$dev_env" ]]; then
+    echo "ERROR: $dev_env not found. Cannot start dev stack." >&2
+    exit 1
+  fi
+  echo "==> Building images + starting DEV stack (demo seed enabled)"
+  echo "    compose file: $COMPOSE_FILE"
+  echo "    env files:    $ENV_FILE  +  $dev_env"
+  docker compose \
+    --env-file "$ENV_FILE" \
+    --env-file "$dev_env" \
+    -f "$COMPOSE_FILE" up -d --build
+  echo "==> Demo seed will run on C2 startup ; ready in ~10-20s"
+  echo "    Open: $STACK_BASE_URL    # login page surfaces 4 demo creds"
+  echo ""
+  echo "    Demo accounts (also visible on /login when stack is up) :"
+  echo "      superroot       / dev-superroot   (tenant_manager super-root)"
+  echo "      tenant-admin    / dev-tenant      (admin of tenant-test)"
+  echo "      project-editor  / dev-editor      (editor on project-test)"
+  echo "      project-viewer  / dev-viewer      (viewer on project-test)"
 }
 
 cmd_down() {
@@ -109,6 +146,7 @@ main() {
   local sub="${1:-}"
   case "$sub" in
     up)     cmd_up ;;
+    dev)    cmd_dev ;;
     down)   cmd_down ;;
     status) cmd_status ;;
     logs)   shift; cmd_logs "$@" ;;
@@ -116,7 +154,7 @@ main() {
     system) cmd_system ;;
     full)   cmd_full ;;
     "")
-      echo "usage: $0 {up|down|status|logs <svc>|seed|system|full}" >&2
+      echo "usage: $0 {up|dev|down|status|logs <svc>|seed|system|full}" >&2
       exit 2
       ;;
     *)

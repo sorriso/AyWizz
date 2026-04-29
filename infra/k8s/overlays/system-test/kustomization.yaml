@@ -46,7 +46,12 @@ resources:
   - ../../base/c7_memory
   - ../../base/c9_mcp
   - ../../base/c12_workflow
+  - ../../base/ay_platform_ui
   - ../../base/c1_gateway
+  # Test-only mock LLM — system-test overlay opt-ins; never shipped
+  # to dev/prod overlays per R-100-121 (underscore-prefixed modules
+  # forbidden in staging/production).
+  - ../../base/_mock_llm
   - ../../base/_init
 
 # Excise the Ollama Deployment, Service, PVC + the ollama-seed Job.
@@ -118,4 +123,7 @@ generatorOptions:
 images:
   - name: ghcr.io/sorriso/aywizz-api
     newName: aywizz-api
+    newTag: test
+  - name: ghcr.io/sorriso/aywizz-ui
+    newName: aywizz-ui
     newTag: test

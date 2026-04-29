@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 # =============================================================================
 # File: run_k8s_system_tests.sh
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/scripts/run_k8s_system_tests.sh
 # Description: Bring up a kind cluster, deploy the system-test overlay,
 #              run pytest against it, tear down. End-to-end self-contained.
 #
+#              v2 (2026-04-29) : also builds + kind-loads the UI image
+#              (`aywizz-ui:test` from `infra/docker/Dockerfile.ui`)
+#              and waits for the `ay-platform-ui` Deployment.
+#
 #              Phases:
 #                1. Pre-flight  : kind, kubectl, docker on PATH.
 #                2. Cluster up  : kind create + Traefik CRDs install.
-#                3. Image       : `docker build -t aywizz-api:test` +
-#                                 `kind load docker-image`.
+#                3. Images      : build api+ui + `kind load docker-image`.
 #                4. Apply       : `kubectl apply -k overlays/system-test`.
 #                5. Wait        : Deployments Available / StatefulSets Ready /
 #                                 Jobs Complete.
@@ -21,10 +24,6 @@
 #                ay_platform_core/scripts/run_k8s_system_tests.sh
 #                ay_platform_core/scripts/run_k8s_system_tests.sh --keep-cluster
 #                ay_platform_core/scripts/run_k8s_system_tests.sh --skip-build
-#
-#              --keep-cluster : do not destroy the cluster on exit (debug).
-#              --skip-build   : reuse an existing aywizz-api:test image
-#                               already loaded in kind (faster reruns).
 # =============================================================================
 
 set -euo pipefail
@@ -33,11 +32,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUBPROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 MONOREPO_ROOT="$(cd "${SUBPROJECT_ROOT}/.." && pwd)"
 OVERLAY_PATH="${MONOREPO_ROOT}/infra/k8s/overlays/system-test"
-DOCKERFILE="${MONOREPO_ROOT}/infra/docker/Dockerfile.api"
+DOCKERFILE_API="${MONOREPO_ROOT}/infra/docker/Dockerfile.api"
+DOCKERFILE_UI="${MONOREPO_ROOT}/infra/docker/Dockerfile.ui"
 
 CLUSTER_NAME="aywizz-systest"
 NAMESPACE="aywizz"
-IMAGE_TAG="aywizz-api:test"
+IMAGE_TAG_API="aywizz-api:test"
+IMAGE_TAG_UI="aywizz-ui:test"
 TRAEFIK_VERSION="v3.3"
 TRAEFIK_CRDS_URL="https://raw.githubusercontent.com/traefik/traefik/${TRAEFIK_VERSION}/docs/content/reference/dynamic-configuration/kubernetes-crd-definition-v1.yml"
 
@@ -96,12 +97,15 @@ kubectl apply -f "${TRAEFIK_CRDS_URL}"
 # -----------------------------------------------------------------------------
 
 if [ "${SKIP_BUILD}" -eq 0 ]; then
-    echo "==> Building image ${IMAGE_TAG} from ${DOCKERFILE}"
-    docker build -t "${IMAGE_TAG}" -f "${DOCKERFILE}" "${MONOREPO_ROOT}"
-    echo "==> Loading image into kind"
-    kind load docker-image "${IMAGE_TAG}" --name "${CLUSTER_NAME}"
+    echo "==> Building API image ${IMAGE_TAG_API}"
+    docker build -t "${IMAGE_TAG_API}" -f "${DOCKERFILE_API}" "${MONOREPO_ROOT}"
+    echo "==> Building UI image ${IMAGE_TAG_UI}"
+    docker build -t "${IMAGE_TAG_UI}" -f "${DOCKERFILE_UI}" "${MONOREPO_ROOT}"
+    echo "==> Loading images into kind"
+    kind load docker-image "${IMAGE_TAG_API}" --name "${CLUSTER_NAME}"
+    kind load docker-image "${IMAGE_TAG_UI}" --name "${CLUSTER_NAME}"
 else
-    echo "==> --skip-build: assuming ${IMAGE_TAG} already loaded"
+    echo "==> --skip-build: assuming ${IMAGE_TAG_API} + ${IMAGE_TAG_UI} already loaded"
 fi
 
 # -----------------------------------------------------------------------------
@@ -126,6 +130,7 @@ DEPLOYMENTS=(
     c7-memory
     c9-mcp
     c12-workflow
+    ay-platform-ui
 )
 for d in "${DEPLOYMENTS[@]}"; do
     echo "    waiting for deployment/${d}"

@@ -1,13 +1,23 @@
 // =============================================================================
 // File: layout.tsx
-// Version: 1
+// Version: 3
 // Path: ay_platform_ui/app/layout.tsx
-// Description: Root layout. Imports Tailwind styles and sets the document
-//              metadata. Page-level UI is scaffold-only in v0 — see
-//              ay_platform_ui/README.md for the feature roadmap.
+// Description: Root layout. Wraps every page in two providers :
+//                - <ConfigProvider> bootstraps runtime + UX config.
+//                - <AuthProvider>   hydrates JWT from localStorage.
+//
+//              Order : Auth nested INSIDE Config so brand-aware
+//              error rendering can read the config. Both run their
+//              effects on mount in parallel.
+//
+//              v3 (2026-04-29) : adds AuthProvider.
 // =============================================================================
 
 import type { Metadata } from "next";
+
+import { AuthProvider } from "./auth-provider";
+import { ConfigProvider } from "./providers";
+
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -18,7 +28,11 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body className="min-h-screen antialiased">{children}</body>
+      <body className="min-h-screen antialiased">
+        <ConfigProvider>
+          <AuthProvider>{children}</AuthProvider>
+        </ConfigProvider>
+      </body>
     </html>
   );
 }

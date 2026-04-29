@@ -47,3 +47,5 @@ generatorOptions:
 images:
   - name: ghcr.io/sorriso/aywizz-api
     newTag: latest
+  - name: ghcr.io/sorriso/aywizz-ui
+    newTag: latest

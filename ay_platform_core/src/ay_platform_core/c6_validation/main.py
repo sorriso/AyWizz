@@ -31,6 +31,7 @@ from ay_platform_core.observability import (
     TraceContextMiddleware,
     configure_logging,
 )
+from ay_platform_core.observability.auth_guard import AuthGuardMiddleware
 from ay_platform_core.observability.config import LoggingSettings
 
 
@@ -66,6 +67,14 @@ def create_app(config: ValidationConfig | None = None) -> FastAPI:
         yield
 
     app = FastAPI(title="C6 Validation Pipeline Registry", lifespan=lifespan)
+    # `/api/v1/validation/health` is a public status endpoint that
+    # K8s probes / smoke tests hit without auth — exempt explicitly.
+    # In K8s, Traefik forward-auth still gates it at the edge.
+    app.add_middleware(
+        AuthGuardMiddleware,
+        component="c6_validation",
+        exempt_prefixes=["/health", "/api/v1/validation/health"],
+    )
     app.add_middleware(TraceContextMiddleware, sample_rate=log_cfg.trace_sample_rate)
     app.include_router(router)
     app.state.validation_service = service

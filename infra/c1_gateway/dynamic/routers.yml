@@ -52,6 +52,14 @@ http:
         - web
       priority: 10
 
+    # UX bootstrap config — public, no forward-auth.
+    c2-ux-config:
+      rule: "PathPrefix(`/ux`)"
+      service: c2
+      entryPoints:
+        - web
+      priority: 10
+
     # -------------------------------------------------------------------------
     # C3 — Conversation Service
     # -------------------------------------------------------------------------

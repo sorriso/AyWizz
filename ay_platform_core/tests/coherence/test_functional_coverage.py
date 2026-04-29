@@ -64,7 +64,7 @@ def _extract_path_literals(text: str) -> set[str]:
     out: set[str] = set()
     for match in _URL_LITERAL_RE.finditer(text):
         url = match.group(1).split("?", 1)[0]
-        if url.startswith(("/auth", "/admin", "/api/v1")):
+        if url.startswith(("/auth", "/admin", "/api/v1", "/ux")):
             out.add(url)
     return out
 

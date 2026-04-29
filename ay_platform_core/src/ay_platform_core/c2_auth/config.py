@@ -1,8 +1,20 @@
 # =============================================================================
 # File: config.py
-# Version: 3
+# Version: 4
 # Path: ay_platform_core/src/ay_platform_core/c2_auth/config.py
 # Description: Configuration for C2 Auth Service.
+#
+#              v4: adds the **demo seed** + **UX dev-mode** envelope. Two
+#              independent flags drive a defense-in-depth pattern :
+#                - `demo_seed_enabled`         seeds DB with a test
+#                                              tenant + 4 users + 1
+#                                              project + 2 grants.
+#                - `ux_dev_mode_enabled`       exposes those credentials
+#                                              on /ux/config so the UX
+#                                              login page can render an
+#                                              auto-fill panel.
+#              Both default False ; production overlays SHALL leave
+#              both False. Local stack overlay flips both to True.
 #
 #              v3: env-var single-source refactor (R-100-110 v2, R-100-111 v2).
 #              Facts that are platform-wide identical (Arango URL, DB name,
@@ -91,9 +103,97 @@ class AuthConfig(BaseSettings):
     # (R-100-110 v2). R-100-118 v2.
     local_admin_username: str = Field(
         default="admin",
-        description="Username of the bootstrap admin (auth_mode=local).",
+        description="Username of the bootstrap admin (auth_mode=local). "
+        "Granted global ADMIN role (= tenant_admin scope per E-100-002 v2).",
     )
     local_admin_password: str = Field(
         default="changeme",
         description="Password of the bootstrap admin (auth_mode=local).",
     )
+
+    # Pre-existing tenant_manager (super-root) user bootstrapped by the
+    # C2 lifespan when `auth_mode == "local"` AND both fields are
+    # non-empty. The tenant_manager is content-blind per E-100-002 v2:
+    # tenant lifecycle (create / list / delete tenants) ONLY, no
+    # access to projects / sources / conversations / etc. Empty fields
+    # → no tenant_manager bootstrap (admin alone suffices for
+    # single-tenant setups).
+    local_tenant_manager_username: str = Field(
+        default="",
+        description="Username of the bootstrap tenant_manager "
+        "(auth_mode=local, both _USERNAME and _PASSWORD set).",
+    )
+    local_tenant_manager_password: str = Field(
+        default="",
+        description="Password of the bootstrap tenant_manager.",
+    )
+
+    # ---- UX bootstrap config (served via GET /ux/config) ------------------
+    # These fields drive the Next.js frontend's runtime self-
+    # configuration — change them via env vars to skin / toggle the
+    # platform per deployment without rebuilding the UI bundle.
+    ux_brand_name: str = Field(
+        default="AyWizz Platform",
+        description="Full brand name displayed in the UX header.",
+    )
+    ux_brand_short_name: str = Field(
+        default="AyWizz",
+        description="Short brand name for tabs, mobile, etc.",
+    )
+    ux_brand_accent_color: str = Field(
+        default="#3b82f6",
+        description="Primary accent color (hex with leading #).",
+    )
+    ux_feature_chat_enabled: bool = Field(default=True)
+    ux_feature_kg_enabled: bool = Field(default=True)
+    ux_feature_cross_tenant_enabled: bool = Field(
+        default=False,
+        description="Cross-tenant source promotion — server-side "
+        "feature deferred (gap UX #4); UX hides the affordance "
+        "until this flips True.",
+    )
+    ux_feature_file_download_enabled: bool = Field(default=True)
+
+    # ---- UX dev mode (separate from demo seed) ----------------------------
+    # When True, /ux/config exposes the demo credentials so the login
+    # page renders an auto-fill panel. Independent of demo_seed_enabled
+    # (defense-in-depth) : staging may seed without exposing ; prod
+    # leaves both False.
+    ux_dev_mode_enabled: bool = Field(
+        default=False,
+        description="Expose demo credentials on /ux/config for auto-fill "
+        "in the UX login page. PRODUCTION SHALL leave this False.",
+    )
+
+    # ---- Demo seed (manual-test bootstrap data) ---------------------------
+    # When demo_seed_enabled=True AND auth_mode=='local', the C2
+    # lifespan creates a complete test scenario : 1 tenant + 4 users
+    # (super-root, tenant-admin, project-editor, project-viewer) + 1
+    # project + 2 project grants. Idempotent. PRODUCTION SHALL leave
+    # this False — demo accounts have well-known passwords by design.
+    demo_seed_enabled: bool = Field(
+        default=False,
+        description="Bootstrap a complete test scenario on C2 startup. "
+        "PRODUCTION SHALL leave this False (well-known passwords).",
+    )
+    demo_seed_tenant_id: str = Field(
+        default="tenant-test",
+        description="Tenant id created by the demo seed.",
+    )
+    demo_seed_tenant_name: str = Field(default="Test Tenant")
+    demo_seed_project_id: str = Field(
+        default="project-test",
+        description="Project id created by the demo seed under tenant-test.",
+    )
+    demo_seed_project_name: str = Field(default="Test Project")
+    # Per-user credentials. Defaults are intentionally non-trivial yet
+    # well-known so they can be auto-filled from /ux/config without
+    # secret-leak risk (prod has demo_seed_enabled=False anyway).
+    demo_seed_superroot_username: str = Field(default="superroot")
+    demo_seed_superroot_password: str = Field(default="dev-superroot")
+    demo_seed_tenant_admin_username: str = Field(default="tenant-admin")
+    demo_seed_tenant_admin_password: str = Field(default="dev-tenant")
+    demo_seed_project_editor_username: str = Field(default="project-editor")
+    demo_seed_project_editor_password: str = Field(default="dev-editor")
+    demo_seed_project_viewer_username: str = Field(default="project-viewer")
+    demo_seed_project_viewer_password: str = Field(default="dev-viewer")

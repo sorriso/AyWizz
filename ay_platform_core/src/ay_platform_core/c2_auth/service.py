@@ -23,6 +23,9 @@ from ay_platform_core.c2_auth.config import AuthConfig
 from ay_platform_core.c2_auth.db.repository import AuthRepository
 from ay_platform_core.c2_auth.models import (
     AuthConfigResponse,
+    BrandConfig,
+    DevCredential,
+    FeatureFlags,
     JWTClaims,
     LoginRequest,
     ProjectCreate,
@@ -38,6 +41,7 @@ from ay_platform_core.c2_auth.models import (
     UserPublic,
     UserStatus,
     UserUpdateRequest,
+    UXConfigResponse,
 )
 from ay_platform_core.c2_auth.modes.base import AuthMode
 from ay_platform_core.c2_auth.modes.local_mode import LocalMode
@@ -133,6 +137,71 @@ class AuthService:
 
     def config_response(self) -> AuthConfigResponse:
         return AuthConfigResponse(auth_mode=self._config.auth_mode)
+
+    def ux_config_response(self) -> UXConfigResponse:
+        """Bootstrap config served at `GET /ux/config` for the Next.js
+        frontend. Read from `AuthConfig.ux_*` fields (env-tunable
+        without rebuild).
+
+        `dev_credentials` is populated ONLY when both
+        `auth_mode == 'local'` AND `ux_dev_mode_enabled == True` —
+        defense-in-depth, two independent flags. Outside dev the
+        field stays None (omitted from JSON) so prod responses are
+        identical to v1.
+        """
+        return UXConfigResponse(
+            api_version="v1",
+            auth_mode=self._config.auth_mode,
+            brand=BrandConfig(
+                name=self._config.ux_brand_name,
+                short_name=self._config.ux_brand_short_name,
+                accent_color_hex=self._config.ux_brand_accent_color,
+            ),
+            features=FeatureFlags(
+                chat_enabled=self._config.ux_feature_chat_enabled,
+                kg_enabled=self._config.ux_feature_kg_enabled,
+                cross_tenant_enabled=self._config.ux_feature_cross_tenant_enabled,
+                file_download_enabled=self._config.ux_feature_file_download_enabled,
+            ),
+            dev_credentials=self._dev_credentials(),
+        )
+
+    def _dev_credentials(self) -> list[DevCredential] | None:
+        """Build the dev-credentials list when (and only when) dev
+        mode is on AND auth_mode is local. Returns None otherwise so
+        `UXConfigResponse.dev_credentials` is omitted from the JSON
+        payload entirely."""
+        cfg = self._config
+        if cfg.auth_mode != "local":
+            return None
+        if not cfg.ux_dev_mode_enabled:
+            return None
+        return [
+            DevCredential(
+                username=cfg.demo_seed_superroot_username,
+                password=cfg.demo_seed_superroot_password,
+                role_label="super-root (tenant_manager)",
+                note="Content-blind: lifecycle ops only, no project access.",
+            ),
+            DevCredential(
+                username=cfg.demo_seed_tenant_admin_username,
+                password=cfg.demo_seed_tenant_admin_password,
+                role_label="tenant admin",
+                note=f"Admin of tenant {cfg.demo_seed_tenant_id!r}.",
+            ),
+            DevCredential(
+                username=cfg.demo_seed_project_editor_username,
+                password=cfg.demo_seed_project_editor_password,
+                role_label="project editor (read/write)",
+                note=f"On project {cfg.demo_seed_project_id!r}.",
+            ),
+            DevCredential(
+                username=cfg.demo_seed_project_viewer_username,
+                password=cfg.demo_seed_project_viewer_password,
+                role_label="project viewer (read-only)",
+                note=f"On project {cfg.demo_seed_project_id!r}.",
+            ),
+        ]
 
     async def issue_token(self, request: LoginRequest) -> TokenResponse:
         """Authenticate credentials and return a signed JWT. R-100-038."""

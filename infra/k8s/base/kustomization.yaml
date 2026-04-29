@@ -23,6 +23,8 @@ resources:
   - ollama
   # Workflow engine.
   - c12_workflow
+  # UI tier.
+  - ay_platform_ui
   # API tier.
   - c2_auth
   - c3_conversation

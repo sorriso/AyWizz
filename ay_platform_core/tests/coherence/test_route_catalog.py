@@ -19,6 +19,7 @@ from fastapi.routing import APIRoute
 from ay_platform_core.c2_auth.admin_router import router as c2_admin_router
 from ay_platform_core.c2_auth.projects_router import router as c2_projects_router
 from ay_platform_core.c2_auth.router import router as c2_router
+from ay_platform_core.c2_auth.ux_router import ux_router as c2_ux_router
 from ay_platform_core.c3_conversation.router import router as c3_router
 from ay_platform_core.c4_orchestrator.router import router as c4_router
 from ay_platform_core.c5_requirements.router import router as c5_router
@@ -37,6 +38,7 @@ _ROUTERS: list[tuple[str, object, str]] = [
     ("c2_auth", c2_router, "/auth"),
     ("c2_auth", c2_admin_router, "/admin"),
     ("c2_auth", c2_projects_router, "/api/v1/projects"),
+    ("c2_auth", c2_ux_router, "/ux"),
     ("c3_conversation", c3_router, ""),
     ("c4_orchestrator", c4_router, ""),
     ("c5_requirements", c5_router, ""),

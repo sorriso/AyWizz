@@ -58,6 +58,13 @@ spec:
       services:
         - name: c2-auth
           port: 8000
+    # C2 — /ux/* (UX bootstrap config, public, no forward-auth)
+    - match: PathPrefix(`/ux`)
+      kind: Rule
+      priority: 10
+      services:
+        - name: c2-auth
+          port: 8000
     # C3
     - match: PathPrefix(`/api/v1/conversations`)
       kind: Rule
@@ -128,3 +135,14 @@ spec:
       middlewares:
         - name: forward-auth-c2
         - name: secure-headers
+    # Next.js UI — catch-all `/`. PRIORITY 1 so every API prefix above
+    # (priorities 10 / 50 / 100) takes precedence ; only paths nothing
+    # else claimed land on the UI. NO forward-auth on this route — the
+    # UI shell is public ; the UI handles login redirects internally
+    # by reading auth_mode from `GET /ux/config`.
+    - match: PathPrefix(`/`)
+      kind: Rule
+      priority: 1
+      services:
+        - name: ay-platform-ui
+          port: 3000

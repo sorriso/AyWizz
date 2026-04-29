@@ -1,6 +1,6 @@
 # =============================================================================
 # File: models.py
-# Version: 3
+# Version: 4
 # Path: ay_platform_core/src/ay_platform_core/c2_auth/models.py
 # Description: Pydantic v2 models for C2 Auth Service public contracts.
 #              JWTClaims implements E-100-001.
@@ -8,6 +8,11 @@
 #              5-role hierarchy: tenant_manager (super-root, no content),
 #              admin (tenant-scoped admin, alias of tenant_admin),
 #              project_owner / project_editor / project_viewer.
+#
+#              v4: adds `DevCredential` + optional `dev_credentials`
+#              field on `UXConfigResponse` for the demo-seed auto-fill
+#              affordance (gated server-side by `ux_dev_mode_enabled`,
+#              must remain `None` in production).
 #
 #              v3: Tenant + Project lifecycle models added (Phase A of the
 #              v1 functional plan). Tenants are owned by `tenant_manager`;
@@ -116,6 +121,86 @@ class AuthConfigResponse(BaseModel):
     """Response for GET /auth/config (public endpoint)."""
 
     auth_mode: Literal["none", "local", "sso"]
+
+
+# ---------------------------------------------------------------------------
+# UX bootstrap config — public endpoint that the Next.js frontend hits
+# at startup so it can self-configure (feature flags, brand, auth mode)
+# WITHOUT a rebuild. The actual API base URL is provided to the UX via
+# a static `runtime-config.json` mounted as a K8s ConfigMap (different
+# concern: deployment-time wiring, not runtime feature config). This
+# endpoint covers everything that can change PER PLATFORM ENVIRONMENT
+# without redeploying the frontend image.
+# ---------------------------------------------------------------------------
+
+
+class BrandConfig(BaseModel):
+    """Brand identity served to the UX. Override via `C2_UX_BRAND_*`
+    env vars to skin the platform per tenant / per environment without
+    rebuilding the frontend bundle."""
+
+    name: str
+    short_name: str
+    accent_color_hex: str
+
+
+class FeatureFlags(BaseModel):
+    """Capability toggles the UX checks before showing UI affordances.
+    All flags default to True for v1 platforms; flip to False per
+    deployment to hide features that aren't ready or aren't licensed.
+
+    `cross_tenant_enabled` defaults to False because the underlying
+    server-side feature is itself deferred (gap UX #4 — spec
+    amendment required)."""
+
+    chat_enabled: bool
+    kg_enabled: bool
+    cross_tenant_enabled: bool
+    file_download_enabled: bool
+
+
+class DevCredential(BaseModel):
+    """A single demo-seed credential surfaced to the UX login page for
+    auto-fill. Returned ONLY when both `auth_mode == 'local'` AND
+    `ux_dev_mode_enabled == True` server-side. Production MUST leave
+    that flag False — well-known passwords have no place there."""
+
+    username: str
+    password: str
+    role_label: str = Field(
+        description="Human-readable role for display (e.g. "
+        "'super-root', 'tenant admin', 'project editor', "
+        "'project viewer').",
+    )
+    note: str | None = Field(
+        default=None,
+        description="Optional hint shown alongside the credential "
+        "(e.g. content-blind warning for super-root).",
+    )
+
+
+class UXConfigResponse(BaseModel):
+    """Bootstrap config served to the UX on startup.
+
+    The UX's bootstrap sequence is:
+      1. Fetch `/runtime-config.json` (static, K8s-ConfigMap-mounted)
+         → discover `apiBaseUrl`.
+      2. Fetch `<apiBaseUrl>/ux/config` (this response) → discover
+         brand, feature flags, auth mode.
+      3. Render shell ; fetch component-specific data (LLM models,
+         project list, etc.) lazily as the user navigates.
+    """
+
+    api_version: str
+    auth_mode: Literal["none", "local", "sso"]
+    brand: BrandConfig
+    features: FeatureFlags
+    dev_credentials: list[DevCredential] | None = Field(
+        default=None,
+        description="Demo-seed credentials for auto-fill on the login "
+        "page. None outside dev mode ; populated only when "
+        "`C2_UX_DEV_MODE_ENABLED=true`.",
+    )
 
 
 # ---------------------------------------------------------------------------

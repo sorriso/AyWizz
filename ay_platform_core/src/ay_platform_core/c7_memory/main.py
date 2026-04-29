@@ -34,6 +34,7 @@ from ay_platform_core.observability import (
     TraceContextMiddleware,
     configure_logging,
 )
+from ay_platform_core.observability.auth_guard import AuthGuardMiddleware
 from ay_platform_core.observability.config import LoggingSettings
 
 
@@ -109,6 +110,11 @@ def create_app(config: MemoryConfig | None = None) -> FastAPI:
         await llm_client.aclose()
 
     app = FastAPI(title="C7 Memory Service", lifespan=lifespan)
+    app.add_middleware(
+        AuthGuardMiddleware,
+        component="c7_memory",
+        exempt_prefixes=["/health", "/api/v1/memory/health"],
+    )
     app.add_middleware(TraceContextMiddleware, sample_rate=log_cfg.trace_sample_rate)
     app.include_router(router)
     app.state.memory_service = service

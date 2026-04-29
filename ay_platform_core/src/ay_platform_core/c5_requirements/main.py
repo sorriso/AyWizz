@@ -26,6 +26,7 @@ from ay_platform_core.observability import (
     TraceContextMiddleware,
     configure_logging,
 )
+from ay_platform_core.observability.auth_guard import AuthGuardMiddleware
 from ay_platform_core.observability.config import LoggingSettings
 
 
@@ -55,6 +56,7 @@ def create_app(config: RequirementsConfig | None = None) -> FastAPI:
         yield
 
     app = FastAPI(title="C5 Requirements Service", lifespan=lifespan)
+    app.add_middleware(AuthGuardMiddleware, component="c5_requirements")
     app.add_middleware(TraceContextMiddleware, sample_rate=log_cfg.trace_sample_rate)
     app.include_router(router)
     app.state.requirements_service = service

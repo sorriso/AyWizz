@@ -30,6 +30,7 @@ from ay_platform_core.observability import (
     TraceContextMiddleware,
     configure_logging,
 )
+from ay_platform_core.observability.auth_guard import AuthGuardMiddleware
 from ay_platform_core.observability.config import LoggingSettings
 
 
@@ -61,6 +62,7 @@ def create_app(config: OrchestratorConfig | None = None) -> FastAPI:
         await llm_client.aclose()
 
     app = FastAPI(title="C4 Orchestrator", lifespan=lifespan)
+    app.add_middleware(AuthGuardMiddleware, component="c4_orchestrator")
     app.add_middleware(TraceContextMiddleware, sample_rate=log_cfg.trace_sample_rate)
     app.include_router(router)
     app.state.orchestrator_service = service

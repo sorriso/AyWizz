@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import time
 import uuid
@@ -190,7 +191,7 @@ class MemoryService:
             mime_type=mime_type,
         )
 
-        return await self._index_parsed_source(
+        public = await self._index_parsed_source(
             tenant_id=tenant_id,
             project_id=project_id,
             source_id=source_id,
@@ -199,6 +200,26 @@ class MemoryService:
             size_bytes=size_bytes,
             parsed_text=text,
         )
+
+        # Auto KG extraction (gap UX #3) — when C7 is wired with both
+        # a KG repo and an LLM client AND the config opts in
+        # (`C7_AUTO_EXTRACT_KG_ON_UPLOAD=True`, default), trigger KG
+        # extraction on the freshly indexed source. Best-effort: a
+        # failure here SHALL NOT cause the upload to fail (the source
+        # row + chunks are already persisted; KG can be re-extracted
+        # later via the explicit endpoint).
+        if (
+            self._config.auto_extract_kg_on_upload
+            and self._kg_repo is not None
+            and self._llm is not None
+        ):
+            with contextlib.suppress(Exception):
+                await self.extract_kg(
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                    source_id=source_id,
+                )
+        return public
 
     async def ingest_conversation_turn(
         self,
@@ -210,7 +231,12 @@ class MemoryService:
         user_message: str,
         assistant_reply: str,
         actor_id: str,
+        **_forward_auth_kwargs: Any,
     ) -> SourcePublic:
+        # `**_forward_auth_kwargs` mirrors `retrieve()` — keeps the call
+        # signature compatible with `RemoteMemoryService` so callers
+        # (C3 _rag_stream) don't need to branch on which variant is
+        # wired.
         """Phase E of v1 plan — index a conversation turn into the
         CONVERSATIONS index so follow-up questions can retrieve prior
         exchanges as context.
@@ -411,6 +437,57 @@ class MemoryService:
             relations=relations,
         )
 
+    async def download_source(
+        self, tenant_id: str, project_id: str, source_id: str,
+    ) -> tuple[bytes, str, str]:
+        """Fetch the raw bytes of a previously-uploaded source from
+        MinIO. Returns `(bytes, mime_type, filename)` so the router
+        can set Content-Type + Content-Disposition correctly.
+
+        Errors:
+          - 503 if MinIO storage isn't wired (e.g. test stack without
+            blob storage).
+          - 404 if the source row doesn't exist (wrong tenant/project,
+            or source deleted).
+          - 404 if the row exists but the MinIO object is missing
+            (sources ingested via the JSON-only `POST /sources` path
+            never wrote a blob; download is meaningless for those).
+        """
+        if self._storage is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "blob storage not configured — download requires "
+                    "MinIO storage to be wired"
+                ),
+            )
+        existing = await self._repo.get_source(tenant_id, project_id, source_id)
+        if existing is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="source not found",
+            )
+        mime_type = str(existing["mime_type"])
+        try:
+            blob = await self._storage.get_source_blob(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                source_id=source_id,
+                mime_type=mime_type,
+            )
+        except FileNotFoundError as exc:
+            # Row present, blob absent — the source was ingested via
+            # the JSON `POST /sources` endpoint which doesn't persist
+            # to MinIO. Surface 404 rather than 500.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="source has no downloadable blob "
+                "(ingested without upload)",
+            ) from exc
+        import mimetypes as _mt  # noqa: PLC0415 — keep module hot path lean
+        ext = _mt.guess_extension(mime_type) or ""
+        filename = f"{source_id}{ext}"
+        return blob, mime_type, filename
+
     async def delete_source(
         self, tenant_id: str, project_id: str, source_id: str
     ) -> None:
@@ -491,8 +568,18 @@ class MemoryService:
     # ------------------------------------------------------------------
 
     async def retrieve(
-        self, payload: RetrievalRequest, *, tenant_id: str
+        self,
+        payload: RetrievalRequest,
+        *,
+        tenant_id: str,
+        **_forward_auth_kwargs: Any,
     ) -> RetrievalResponse:
+        # `**_forward_auth_kwargs` swallows `user_id` / `user_roles`
+        # passed by callers that share their signature with
+        # `RemoteMemoryService.retrieve` — the in-process variant
+        # already trusts its `tenant_id` arg, so the headers are
+        # informational here. Keeping the kwargs ensures the two
+        # implementations are call-compatible.
         started = time.monotonic()
         # R-400-042: the query is embedded with the ACTIVE embedder; we
         # only compare against stored chunks that used the same model.

@@ -20,3 +20,10 @@ yarn-error.log*
 # Biome / ts build cache
 .biomejs/
 *.tsbuildinfo
+
+# Test artefacts (Vitest + Playwright)
+coverage/
+playwright-report/
+test-results/
+.playwright/
+blob-report/

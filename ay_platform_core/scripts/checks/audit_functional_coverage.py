@@ -84,7 +84,7 @@ def _extract_path_literals(file_text: str) -> set[str]:
     out: set[str] = set()
     for match in _URL_LITERAL_RE.finditer(file_text):
         url = match.group(1)
-        if not url.startswith(("/auth", "/admin", "/api/v1")):
+        if not url.startswith(("/auth", "/admin", "/api/v1", "/ux")):
             continue
         # Drop query string for catalog matching (catalog paths never
         # contain query params; tests routinely append filters).
