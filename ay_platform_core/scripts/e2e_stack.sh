@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # =============================================================================
 # File: e2e_stack.sh
-# Version: 4
+# Version: 6
 # Path: ay_platform_core/scripts/e2e_stack.sh
 # Description: One-stop helper for the system-test stack.
 #              Wraps `docker compose` + seed + `pytest tests/system/`.
 #
+#              v5: `dev` subcommand now runs `seed_demo_ux.py` after
+#              compose `up` so the UX demo sources (Phase C) are
+#              ingested before the operator opens the browser. The
+#              seeder polls /ux/config until ready (which transitively
+#              waits for C2's lifespan demo seed) so we don't race.
 #              v4: adds the `dev` subcommand for manual browser-driven
 #              testing. `dev` layers `<monorepo>/.env.dev` on top of
 #              `.env.test` (multiple --env-file, later overrides
@@ -46,6 +51,19 @@ ENV_FILE="$AY_CORE/tests/.env.test"
 
 STACK_BASE_URL="${STACK_BASE_URL:-http://localhost:56000}"
 
+# When running inside a Docker container (devcontainer), `localhost`
+# points at the container itself — not the host where the compose
+# stack publishes its ports. Resolve the "internal" URL by rewriting
+# localhost → host.docker.internal. The user-facing URL stays
+# `localhost` for browser instructions (the user opens on the host).
+_internal_url() {
+  if [[ -f /.dockerenv ]]; then
+    echo "${STACK_BASE_URL//localhost/host.docker.internal}"
+  else
+    echo "$STACK_BASE_URL"
+  fi
+}
+
 _require_docker() {
   if ! command -v docker >/dev/null 2>&1; then
     echo "ERROR: docker CLI not found on PATH" >&2
@@ -67,24 +85,51 @@ cmd_up() {
 }
 
 cmd_dev() {
-  # Manual-test stack with demo seed + UX dev mode. Layers
-  # `<monorepo>/.env.dev` on top of `.env.test` so the deltas live
-  # in one tiny file (.env.dev = 2 flag flips). docker compose
-  # supports multiple --env-file, later overrides earlier.
+  # Manual-test stack with demo seed + UX dev mode. Layers an override
+  # compose file (`docker-compose.dev.override.yml`) on top of the
+  # base compose ; the override adds `<monorepo>/.env.dev` to c2's
+  # `env_file:` list. docker compose's env_file directive is REPLACED
+  # (not merged) by overrides, so the override re-states both files.
   _require_docker
   local dev_env="$MONOREPO_ROOT/.env.dev"
+  local dev_override="$AY_CORE/tests/docker-compose.dev.override.yml"
   if [[ ! -f "$dev_env" ]]; then
     echo "ERROR: $dev_env not found. Cannot start dev stack." >&2
     exit 1
   fi
+  if [[ ! -f "$dev_override" ]]; then
+    echo "ERROR: $dev_override not found. Cannot start dev stack." >&2
+    exit 1
+  fi
+  # Build-version stamp = ISO timestamp. Compose reads it via
+  # `${BUILD_VERSION:-dev}` in both api + ui build.args blocks, the
+  # Dockerfiles forward it into a runtime ENV that C2 exposes through
+  # /ux/config and Next.js bakes into the client bundle as
+  # NEXT_PUBLIC_BUILD_VERSION. Visible in the UX footer to confirm a
+  # rebuild actually shipped.
+  export BUILD_VERSION="${BUILD_VERSION:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
   echo "==> Building images + starting DEV stack (demo seed enabled)"
-  echo "    compose file: $COMPOSE_FILE"
-  echo "    env files:    $ENV_FILE  +  $dev_env"
+  echo "    compose:   $COMPOSE_FILE"
+  echo "    override:  $dev_override"
+  echo "    env:       $ENV_FILE  +  $dev_env (via override env_file)"
+  echo "    version:   $BUILD_VERSION"
   docker compose \
     --env-file "$ENV_FILE" \
-    --env-file "$dev_env" \
-    -f "$COMPOSE_FILE" up -d --build
+    -f "$COMPOSE_FILE" \
+    -f "$dev_override" up -d --build
   echo "==> Demo seed will run on C2 startup ; ready in ~10-20s"
+
+  # Run the UX demo data seeder (Phase C+). Non-fatal — if the seed
+  # fails (e.g. Ollama still warming), the operator can still test
+  # auth + nav and re-run `seed_demo_ux.py` manually later.
+  local internal_url
+  internal_url="$(_internal_url)"
+  echo "==> Waiting for stack readiness ($internal_url), then seeding UX demo data…"
+  (cd "$AY_CORE" && \
+    python scripts/seed_demo_ux.py --base-url "$internal_url" --timeout-s 180) \
+    || echo "==> WARNING: demo-ux seed failed ; non-fatal, see logs above"
+
+  echo ""
   echo "    Open: $STACK_BASE_URL    # login page surfaces 4 demo creds"
   echo ""
   echo "    Demo accounts (also visible on /login when stack is up) :"

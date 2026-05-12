@@ -1,10 +1,17 @@
 # =============================================================================
 # File: test_service.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/tests/unit/c3_conversation/test_service.py
 # Description: Unit tests for ConversationService — mocked repository.
 #              Covers CRUD access control, soft-delete, SSE generation,
 #              and expert-mode stub.
+#
+#              v2: regression coverage for the chat-UX work — prompt
+#              assembly switches between the RAG-augmented variant
+#              and the general-knowledge fallback based on
+#              `has_relevant_hits`, and threads the optional user /
+#              project behavioural preambles in the user-mandated
+#              order.
 # =============================================================================
 
 from __future__ import annotations
@@ -230,3 +237,91 @@ async def test_expert_mode_stream_yields_unavailable_event() -> None:
         chunks.append(chunk)
     assert len(chunks) == 1
     assert '"type":"unavailable"' in chunks[0]
+
+
+# ---------------------------------------------------------------------------
+# Prompt assembly — RAG vs general-knowledge fallback + user/project preambles
+# ---------------------------------------------------------------------------
+# These are pure functions ; we import them directly to keep the tests fast
+# (no service / repo / mocks needed).
+
+
+from ay_platform_core.c3_conversation.service import (  # noqa: E402
+    _assemble_system_prompt,
+)
+
+
+@pytest.mark.unit
+def test_prompt_uses_rag_variant_when_relevant_hits() -> None:
+    """A non-zero `has_relevant_hits` SHALL select the RAG-augmented
+    prompt — recognisable by the "Retrieved context" framing + the
+    citation instructions."""
+    prompt = _assemble_system_prompt(
+        project_id="proj-x",
+        context="[1] (source=A, score=0.812)\nHello world.",
+        user_prompt=None,
+        project_prompt=None,
+        has_relevant_hits=True,
+    )
+    assert "Retrieved context" in prompt
+    assert "cite which excerpt" in prompt
+    assert "proj-x" in prompt
+
+
+@pytest.mark.unit
+def test_prompt_drops_retrieved_context_when_no_relevant_hits() -> None:
+    """When no chunk cleared the relevance threshold, the prompt
+    SHALL switch to the general-knowledge variant — no "Retrieved
+    context" block at all, just an "answer from general knowledge"
+    instruction. This is the fix for the small-model hallucination
+    pattern where qwen2.5:3b confabulated bridges between an
+    irrelevant context block and the user's question."""
+    prompt = _assemble_system_prompt(
+        project_id="proj-x",
+        # `context` content is irrelevant when has_relevant_hits=False
+        # — verify the function ignores it entirely.
+        context="(no excerpts above the relevance threshold)",
+        user_prompt=None,
+        project_prompt=None,
+        has_relevant_hits=False,
+    )
+    assert "Retrieved context" not in prompt
+    assert "cite which excerpt" not in prompt
+    assert "general knowledge" in prompt
+    assert "proj-x" in prompt
+
+
+@pytest.mark.unit
+def test_prompt_prepends_user_and_project_behavioural_preambles() -> None:
+    """User + project behavioural prompts SHALL be prepended in that
+    EXACT order, ahead of the RAG section. Order matters : E-100-002
+    has the user prompt outrank the project prompt, and both outrank
+    the RAG instructions."""
+    prompt = _assemble_system_prompt(
+        project_id="proj-x",
+        context="[1] (source=A, score=0.8)\nSome context.",
+        user_prompt="Be concise.",
+        project_prompt="Answer in formal French.",
+        has_relevant_hits=True,
+    )
+    # The two preambles appear above the RAG section, in user-then-
+    # project order.
+    user_pos = prompt.index("Be concise.")
+    project_pos = prompt.index("Answer in formal French.")
+    rag_pos = prompt.index("Retrieved context")
+    assert user_pos < project_pos < rag_pos
+
+
+@pytest.mark.unit
+def test_prompt_drops_empty_behavioural_preambles() -> None:
+    """Empty / whitespace-only / None preambles SHALL be skipped so
+    the LLM doesn't see dangling section headers."""
+    prompt = _assemble_system_prompt(
+        project_id="proj-x",
+        context="[1] (source=A, score=0.8)\nSomething.",
+        user_prompt="   ",
+        project_prompt=None,
+        has_relevant_hits=True,
+    )
+    assert "[User instructions]" not in prompt
+    assert "[Project instructions]" not in prompt

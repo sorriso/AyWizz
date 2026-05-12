@@ -1,9 +1,18 @@
 # =============================================================================
 # File: service.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/src/ay_platform_core/c2_auth/service.py
 # Description: C2 Auth Service facade. Orchestrates pluggable auth modes,
 #              JWT issuance/verification, and user management.
+#
+#              v2: per-user preferences (trigram + LLM user prompt
+#              override) and project-level system_prompt override.
+#              `get_user_preferences` / `update_user_preferences` and
+#              `update_project` resolve override-vs-default with the
+#              C2-wide defaults from `AuthConfig`. `ProjectPublic`
+#              responses now carry the EFFECTIVE `system_prompt` plus
+#              an `is_default` flag so the UX has everything it needs
+#              in a single round-trip.
 #
 # @relation implements:R-100-030
 # @relation implements:R-100-038
@@ -12,9 +21,11 @@
 
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import UTC, datetime
 from functools import lru_cache
+from typing import Any
 
 import jwt
 from fastapi import HTTPException, status
@@ -30,6 +41,7 @@ from ay_platform_core.c2_auth.models import (
     LoginRequest,
     ProjectCreate,
     ProjectPublic,
+    ProjectUpdate,
     RBACProjectRole,
     ResetPasswordRequest,
     SessionInfo,
@@ -38,6 +50,8 @@ from ay_platform_core.c2_auth.models import (
     TokenResponse,
     UserCreateRequest,
     UserInternal,
+    UserPreferencesResponse,
+    UserPreferencesUpdate,
     UserPublic,
     UserStatus,
     UserUpdateRequest,
@@ -151,6 +165,11 @@ class AuthService:
         """
         return UXConfigResponse(
             api_version="v1",
+            # Build stamp read straight from the container ENV (set by
+            # `Dockerfile.api` via the BUILD_VERSION build-arg). Not a
+            # Pydantic-settings field — see `config.py` for the
+            # rationale.
+            build_version=os.environ.get("BUILD_VERSION", "dev"),
             auth_mode=self._config.auth_mode,
             brand=BrandConfig(
                 name=self._config.ux_brand_name,
@@ -230,6 +249,7 @@ class AuthService:
             tenant_id=user.tenant_id,
             roles=user.roles,
             project_scopes=project_scopes,
+            username=user.username,
             name=user.name,
             email=user.email,
         )
@@ -373,6 +393,29 @@ class AuthService:
 
     # ---- Project lifecycle (admin / tenant_admin) ---------------------------
 
+    def _project_doc_to_public(self, doc: dict[str, Any]) -> ProjectPublic:
+        """Render an Arango project document into a `ProjectPublic`
+        response, resolving the `system_prompt` field against the
+        C2-wide default. Absence of the key in the stored doc → use
+        default + flag `is_default=True`."""
+        override = doc.get("system_prompt")
+        if override is None:
+            effective = self._config.default_project_prompt
+            is_default = True
+        else:
+            effective = override
+            is_default = False
+        return ProjectPublic(
+            project_id=doc["_key"],
+            tenant_id=doc["tenant_id"],
+            name=doc["name"],
+            profile=doc.get("profile", "code"),
+            created_at=datetime.fromisoformat(doc["created_at"]),
+            created_by=doc["created_by"],
+            system_prompt=effective,
+            system_prompt_is_default=is_default,
+        )
+
     async def create_project(
         self, payload: ProjectCreate, tenant_id: str, actor_id: str
     ) -> ProjectPublic:
@@ -391,28 +434,58 @@ class AuthService:
         now = datetime.now(UTC)
         await repo.insert_project(
             payload.project_id, tenant_id, payload.name, now, actor_id,
+            profile=payload.profile,
         )
-        return ProjectPublic(
-            project_id=payload.project_id,
-            tenant_id=tenant_id,
-            name=payload.name,
-            created_at=now,
-            created_by=actor_id,
-        )
+        doc = await repo.get_project(payload.project_id)
+        assert doc is not None  # just inserted
+        return self._project_doc_to_public(doc)
+
+    async def get_project(self, project_id: str, tenant_id: str) -> ProjectPublic:
+        repo = self._require_repo()
+        doc = await repo.get_project(project_id)
+        if doc is None or doc["tenant_id"] != tenant_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"project {project_id!r} not found",
+            )
+        return self._project_doc_to_public(doc)
 
     async def list_projects(self, tenant_id: str) -> list[ProjectPublic]:
         repo = self._require_repo()
         rows = await repo.list_projects(tenant_id)
-        return [
-            ProjectPublic(
-                project_id=r["_key"],
-                tenant_id=r["tenant_id"],
-                name=r["name"],
-                created_at=datetime.fromisoformat(r["created_at"]),
-                created_by=r["created_by"],
+        return [self._project_doc_to_public(r) for r in rows]
+
+    async def update_project(
+        self, project_id: str, tenant_id: str, payload: ProjectUpdate,
+    ) -> ProjectPublic:
+        """Partial update of a project. Currently mutates `name` and
+        `system_prompt`. For `system_prompt`, the semantics are :
+          - field omitted (`None`) → no change ;
+          - empty string `""`     → clear the override (UNSET the
+                                    Arango field so reads fall back
+                                    to the C2 default and the
+                                    `is_default` flag reverts to True);
+          - non-empty string      → persist as the project's override.
+        """
+        repo = self._require_repo()
+        doc = await repo.get_project(project_id)
+        if doc is None or doc["tenant_id"] != tenant_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"project {project_id!r} not found",
             )
-            for r in rows
-        ]
+        patch: dict[str, Any] = {}
+        if payload.name is not None:
+            patch["name"] = payload.name
+        if payload.system_prompt is not None and payload.system_prompt != "":
+            patch["system_prompt"] = payload.system_prompt
+        if patch:
+            await repo.update_project(project_id, patch)
+        if payload.system_prompt == "":
+            await repo.unset_project_field(project_id, "system_prompt")
+        refreshed = await repo.get_project(project_id)
+        assert refreshed is not None
+        return self._project_doc_to_public(refreshed)
 
     async def delete_project(self, project_id: str, tenant_id: str) -> None:
         repo = self._require_repo()
@@ -475,6 +548,104 @@ class AuthService:
                     f"user {user_id!r} has no role on project {project_id!r}"
                 ),
             )
+
+    # ---- User preferences (self-service, any authenticated user) ------------
+
+    @staticmethod
+    def _is_valid_trigram(value: str) -> bool:
+        """Trigram rules : 3-4 alphanumeric chars. Mirror the regex
+        the UI enforces in `lib/preferences.ts` so the server and
+        client validate identically (cheap defence-in-depth — the
+        UX is authoritative on display, the server is authoritative
+        on persistence)."""
+        if not 3 <= len(value) <= 4:
+            return False
+        return value.isalnum() and value.isascii()
+
+    @staticmethod
+    def _is_valid_hex_color(value: str) -> bool:
+        """Hex colour rule : `#RRGGBB` (case-insensitive). Short form
+        `#RGB` and 8-digit RGBA are intentionally rejected — the UI
+        renders the bubble + avatar with this colour at full opacity,
+        and accepting alpha would let a user submit a near-invisible
+        tint."""
+        if len(value) != 7 or value[0] != "#":
+            return False
+        return all(c in "0123456789abcdefABCDEF" for c in value[1:])
+
+    def _prefs_doc_to_response(
+        self, doc: dict[str, Any] | None,
+    ) -> UserPreferencesResponse:
+        """Resolve a (possibly absent) stored prefs document into the
+        effective response shape. `trigram` and `user_color` are
+        exposed as-stored (None when no override) ; `user_prompt` is
+        the override OR the C2 default, with `user_prompt_is_default`
+        flagging the latter so the UI can render a 'Reset to default'
+        button only when meaningful."""
+        stored_trigram = (doc or {}).get("trigram")
+        stored_user_prompt = (doc or {}).get("user_prompt")
+        stored_user_color = (doc or {}).get("user_color")
+        if stored_user_prompt is None:
+            user_prompt = self._config.default_user_prompt
+            is_default = True
+        else:
+            user_prompt = stored_user_prompt
+            is_default = False
+        return UserPreferencesResponse(
+            trigram=stored_trigram if isinstance(stored_trigram, str) else None,
+            user_prompt=user_prompt,
+            user_prompt_is_default=is_default,
+            user_color=(
+                stored_user_color if isinstance(stored_user_color, str) else None
+            ),
+        )
+
+    async def get_user_preferences(self, user_id: str) -> UserPreferencesResponse:
+        repo = self._require_repo()
+        doc = await repo.get_user_preferences(user_id)
+        return self._prefs_doc_to_response(doc)
+
+    async def update_user_preferences(
+        self, user_id: str, payload: UserPreferencesUpdate,
+    ) -> UserPreferencesResponse:
+        """Merge-update the user's prefs. Semantics per field :
+          - omitted (`None`)       → no change.
+          - empty string `""`      → clear override (delete the field
+                                     from the stored doc).
+          - non-empty string       → persist as override.
+        Trigram non-empty values are validated (3-4 alnum) ; invalid
+        values raise 400 BAD_REQUEST."""
+        repo = self._require_repo()
+        patch: dict[str, Any] = {}
+        if payload.trigram is not None:
+            if payload.trigram == "":
+                patch["trigram"] = None  # signal: drop from doc
+            elif self._is_valid_trigram(payload.trigram):
+                patch["trigram"] = payload.trigram
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="trigram must be 3-4 alphanumeric characters",
+                )
+        if payload.user_prompt is not None:
+            if payload.user_prompt == "":
+                patch["user_prompt"] = None  # signal: drop from doc
+            else:
+                patch["user_prompt"] = payload.user_prompt
+        if payload.user_color is not None:
+            if payload.user_color == "":
+                patch["user_color"] = None  # signal: drop from doc
+            elif self._is_valid_hex_color(payload.user_color):
+                patch["user_color"] = payload.user_color.lower()
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="user_color must be a 7-char hex like '#3b82f6'",
+                )
+        if patch:
+            await repo.upsert_user_preferences(user_id, patch)
+        refreshed = await repo.get_user_preferences(user_id)
+        return self._prefs_doc_to_response(refreshed)
 
 
 # ---------------------------------------------------------------------------

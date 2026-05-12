@@ -1152,8 +1152,8 @@ The following contracts are declared here and fully specified in the owning comp
 
 ```yaml
 id: E-100-001
-version: 1
-status: draft
+version: 2
+status: approved
 category: architecture
 ```
 
@@ -1176,14 +1176,19 @@ The JWT issued by C2 SHALL contain the following claims, in JSON structure. Fiel
     "<project-id>": ["owner" | "editor" | "viewer"]
   },
 
+  "username": "<login name, optional>",
   "name": "<display name, optional>",
   "email": "<optional, may be absent in none mode>"
 }
 ```
 
+**Identity fields.** `sub` is the stable internal user_id (durable across renames, used for ACL lookups). `username` is the human-readable login name (surfaced in nav / dashboards, may change). `name` is the optional display name (free-form, for human presentation). The three are distinct on purpose : `sub` for identity, `username` for login UX, `name` for display.
+
 **Signing.** HS256 in development, RS256 or EdDSA in production. The signing key is rotated per Q-100-005.
 
 **Expiration.** Default 1 hour. Refresh tokens out of scope for v1; users re-authenticate on expiry.
+
+**Versions.** v1 → v2 (2026-05-11) adds `username` so the UX can render a stable login-name distinct from `sub` (internal id) and `name` (display name).
 
 #### E-100-002: RBAC model
 

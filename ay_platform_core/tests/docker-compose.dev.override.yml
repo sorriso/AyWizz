@@ -1,0 +1,109 @@
+# =============================================================================
+# File: docker-compose.dev.override.yml
+# Version: 2
+# Path: ay_platform_core/tests/docker-compose.dev.override.yml
+# Description: Compose override layered on `docker-compose.yml` by
+#              `e2e_stack.sh dev` to flip C2 into demo-mode AND wire
+#              the Next.js UI into the stack so the operator gets a
+#              true same-origin experience at `http://localhost:56000`
+#              (Traefik routes `/auth/*`, `/api/v1/*`, `/ux/*` to the
+#              Python services and the catch-all `/` to the UI).
+#
+#              docker compose's `env_file:` directive is REPLACED (not
+#              merged) by overrides — so we re-state both files
+#              explicitly. `.env.dev` lives at the monorepo root ;
+#              from this compose file's location (`tests/`) the
+#              relative path is `../../.env.dev`.
+#
+#              Only c2 carries C2_DEMO_SEED_* / C2_UX_DEV_MODE_* flags ;
+#              other services don't read those vars, so we leave them
+#              untouched.
+#
+#              v2 (2026-05-11) : adds the `ui` service built from
+#              `infra/docker/Dockerfile.ui` (next.js standalone) and
+#              adds it to c1's depends_on so Traefik routes resolve.
+# =============================================================================
+
+services:
+  c2:
+    env_file:
+      - .env.test
+      - ../../.env.dev
+
+  # c3 picks up `C3_C7_BASE_URL` from .env.dev so the RAG flow
+  # (C3 → C7 retrieval → C8 LLM) is wired in the manual-test stack.
+  # Pytest e2e leaves .env.test's empty value in place to keep the
+  # auth-matrix deterministic.
+  c3:
+    env_file:
+      - .env.test
+      - ../../.env.dev
+
+  # Pull a chat model into Ollama in addition to the embedding model
+  # already seeded by docker-compose.yml. The dev stack routes C8
+  # (`C8_GATEWAY_URL` in `.env.dev`) to Ollama's OpenAI-compat
+  # endpoint, so a real chat model must be available before any
+  # /messages call hits C8. `llama3.2:1b` is the smallest reasonable
+  # generation model (~1.3 GB) ; swap freely (e.g. `qwen2.5:0.5b`
+  # for an even smaller footprint, `llama3.1:8b` for quality at the
+  # cost of disk + RAM).
+  ollama_model_seed:
+    entrypoint:
+      - "/bin/sh"
+      - "-c"
+      - |
+        set -e
+        echo "[dev] Pulling embedding model all-minilm"
+        ollama pull all-minilm
+        echo "[dev] Pulling chat model qwen2.5:3b (this is a ~2 GB download on first run)"
+        ollama pull qwen2.5:3b
+        echo "[dev] Seed done."
+
+  # Next.js UI — built from the monorepo root via Dockerfile.ui
+  # (multi-stage standalone Next bundle). Exposed only inside the
+  # compose network ; Traefik (c1) routes the catch-all `/` to it.
+  ui:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.ui
+      args:
+        # Forwards the BUILD_VERSION env into the Dockerfile so it gets
+        # baked into the Next.js client bundle as
+        # NEXT_PUBLIC_BUILD_VERSION ; visible in the UX footer to
+        # confirm a rebuild took effect.
+        BUILD_VERSION: ${BUILD_VERSION:-dev}
+    image: ay-ui:local
+    container_name: ay-ui
+    networks:
+      - platform
+    expose:
+      - "3000"
+    # The UI doesn't need any env vars at runtime — apiBaseUrl comes
+    # from /runtime-config.json (mounted/baked default = empty string,
+    # i.e. same-origin via Traefik).
+    healthcheck:
+      test:
+        - "CMD"
+        - "node"
+        - "-e"
+        - "fetch('http://127.0.0.1:3000/').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 384M
+        reservations:
+          cpus: "0.05"
+          memory: 64M
+
+  # c1 (Traefik) gets `ui` as an additional dependency so it doesn't
+  # start spitting 502s before the UI is ready. compose merges
+  # depends_on lists (does NOT replace them) for overrides.
+  c1:
+    depends_on:
+      ui:
+        condition: service_started

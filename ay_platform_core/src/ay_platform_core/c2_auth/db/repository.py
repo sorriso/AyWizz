@@ -1,10 +1,16 @@
 # =============================================================================
 # File: repository.py
-# Version: 2
+# Version: 3
 # Path: ay_platform_core/src/ay_platform_core/c2_auth/db/repository.py
 # Description: ArangoDB access layer for C2-owned collections.
 #              All public methods are async, wrapping python-arango
 #              (synchronous) with asyncio.to_thread(). R-100-012.
+#
+#              v3: per-user `c2_user_preferences` (trigram + user prompt
+#              override, keyed by `user_id`) and project-level
+#              `system_prompt` field (override stored on the project
+#              document). New helpers: `get_user_preferences` /
+#              `upsert_user_preferences` and `update_project`.
 #
 #              v2: Tenant + Project + role-grant CRUD added (Phase A of
 #              the v1 functional plan). New collection `c2_projects`.
@@ -29,6 +35,7 @@ COLL_TENANTS = "c2_tenants"
 COLL_PROJECTS = "c2_projects"
 COLL_ROLE_ASSIGNMENTS = "c2_role_assignments"
 COLL_SESSIONS = "c2_sessions"
+COLL_USER_PREFERENCES = "c2_user_preferences"
 
 
 class AuthRepository:
@@ -58,7 +65,8 @@ class AuthRepository:
 
     def _ensure_collections_sync(self) -> None:
         for name in (COLL_USERS, COLL_TENANTS, COLL_PROJECTS,
-                     COLL_ROLE_ASSIGNMENTS, COLL_SESSIONS):
+                     COLL_ROLE_ASSIGNMENTS, COLL_SESSIONS,
+                     COLL_USER_PREFERENCES):
             if not self._db.has_collection(name):
                 self._db.create_collection(name)
 
@@ -299,12 +307,17 @@ class AuthRepository:
         name: str,
         created_at: datetime,
         created_by: str,
+        profile: str,
     ) -> None:
+        # `system_prompt` is intentionally omitted on insert — the absence
+        # of the field is the unambiguous signal that no per-project
+        # override has been set yet. PATCH /api/v1/projects/{pid} adds it.
         self._db.collection(COLL_PROJECTS).insert(
             {
                 "_key": project_id,
                 "tenant_id": tenant_id,
                 "name": name,
+                "profile": profile,
                 "created_at": created_at.isoformat(),
                 "created_by": created_by,
             }
@@ -317,11 +330,37 @@ class AuthRepository:
         name: str,
         created_at: datetime,
         created_by: str,
+        profile: str = "code",
     ) -> None:
         await asyncio.to_thread(
             self._insert_project_sync,
-            project_id, tenant_id, name, created_at, created_by,
+            project_id, tenant_id, name, created_at, created_by, profile,
         )
+
+    def _update_project_sync(self, project_id: str, patch: dict[str, Any]) -> None:
+        # `_db.collection(...).update()` only writes the keys we hand it,
+        # so other fields (created_at, created_by, profile, ...) stay put.
+        # Removing a key requires AQL UNSET — used by the service layer
+        # when system_prompt is cleared.
+        self._db.collection(COLL_PROJECTS).update({"_key": project_id, **patch})
+
+    async def update_project(self, project_id: str, patch: dict[str, Any]) -> None:
+        await asyncio.to_thread(self._update_project_sync, project_id, patch)
+
+    def _unset_project_field_sync(self, project_id: str, field: str) -> None:
+        # Drop a single field from a project document so absence of the
+        # key is the canonical signal that no override is set (allows
+        # `system_prompt_is_default` to be derived from "key missing"
+        # rather than "value == default", which is ambiguous when the
+        # operator coincidentally typed the default).
+        self._db.aql.execute(
+            "FOR p IN @@col FILTER p._key == @key "
+            "REPLACE p WITH UNSET(p, @field) IN @@col",
+            bind_vars={"@col": COLL_PROJECTS, "key": project_id, "field": field},
+        )
+
+    async def unset_project_field(self, project_id: str, field: str) -> None:
+        await asyncio.to_thread(self._unset_project_field_sync, project_id, field)
 
     def _get_project_sync(self, project_id: str) -> dict[str, Any] | None:
         doc: dict[str, Any] | None = self._db.collection(COLL_PROJECTS).get(project_id)  # type: ignore[assignment]
@@ -357,3 +396,47 @@ class AuthRepository:
 
     async def delete_project(self, project_id: str) -> bool:
         return await asyncio.to_thread(self._delete_project_sync, project_id)
+
+    # ---- User preferences ---------------------------------------------------
+
+    def _get_user_preferences_sync(self, user_id: str) -> dict[str, Any] | None:
+        doc: dict[str, Any] | None = self._db.collection(COLL_USER_PREFERENCES).get(user_id)  # type: ignore[assignment]
+        return doc
+
+    async def get_user_preferences(self, user_id: str) -> dict[str, Any] | None:
+        """Return the raw prefs document keyed by `user_id`, or None
+        when nothing has been written for that user yet. The shape is
+        intentionally loose so future fields can be added without a
+        repository migration — the service layer normalises before
+        returning to clients."""
+        return await asyncio.to_thread(self._get_user_preferences_sync, user_id)
+
+    def _upsert_user_preferences_sync(
+        self, user_id: str, patch: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Merge-upsert the prefs doc. Keys present in `patch` with a
+        `None` value are DROPPED from the stored document (override
+        cleared) ; non-None values overwrite."""
+        coll = self._db.collection(COLL_USER_PREFERENCES)
+        existing: dict[str, Any] = coll.get(user_id) or {"_key": user_id}  # type: ignore[assignment]
+        merged = {k: v for k, v in existing.items() if not k.startswith("_") or k == "_key"}
+        for key, value in patch.items():
+            if value is None:
+                merged.pop(key, None)
+            else:
+                merged[key] = value
+        merged["_key"] = user_id
+        if coll.has(user_id):
+            # REPLACE so absent keys in `merged` actually disappear from
+            # the stored doc (UPDATE would not remove fields).
+            coll.replace(merged)
+        else:
+            coll.insert(merged)
+        return merged
+
+    async def upsert_user_preferences(
+        self, user_id: str, patch: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self._upsert_user_preferences_sync, user_id, patch,
+        )

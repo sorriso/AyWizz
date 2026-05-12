@@ -262,13 +262,31 @@ async def test_rag_flow_round_trip(rag_stack: dict[str, Any]) -> None:
         json={"content": "When was Voyager 1 launched?"},
     ) as response:
         assert response.status_code == 200
+        # Tokens (default `message` events with `data:` lines) end up
+        # in `chunks` ; `event: stage` lines are tracked separately so
+        # the assertions below can verify both protocols.
         chunks: list[str] = []
+        stage_event_count = 0
+        current_event_type = "message"
         async for line in response.aiter_lines():
-            if line.startswith("data: "):
-                chunks.append(line[len("data: "):])
+            if line.startswith("event: "):
+                current_event_type = line[len("event: "):].strip()
+            elif line.startswith("data: "):
+                if current_event_type == "stage":
+                    stage_event_count += 1
+                else:
+                    chunks.append(line[len("data: "):])
+            elif line == "":
+                # Blank line resets the event type per SSE spec.
+                current_event_type = "message"
 
     # 4. Assert SSE framing — at least the [DONE] sentinel is present.
     assert "[DONE]" in chunks, f"no [DONE] sentinel in stream: {chunks}"
+    # And that the named `event: stage` channel emitted at least one
+    # payload (regression : the live pipeline chip depends on it).
+    assert stage_event_count >= 2, (
+        f"expected ≥2 stage SSE events, got {stage_event_count}"
+    )
 
     # 5. Reconstruct the assistant reply from the streamed tokens.
     reply_tokens = [c for c in chunks if c != "[DONE]"]
@@ -293,6 +311,24 @@ async def test_rag_flow_round_trip(rag_stack: dict[str, Any]) -> None:
     assert messages[0].role == MessageRole.USER
     assert messages[1].role == MessageRole.ASSISTANT
     assert "Voyager" in messages[1].content
+
+    # 8. Pipeline timeline persisted alongside the assistant message
+    #    (regression for the chat-UX work : without this, navigating
+    #    away and back loses the chip + collapsible panel). At least
+    #    `retrieve`, `generate`, `done` SHALL be present, each as a
+    #    `status='done'` row with a non-null `duration_ms`.
+    assert messages[1].stages is not None, "stages were not persisted"
+    stage_names = [s.name for s in messages[1].stages]
+    assert "retrieve" in stage_names
+    assert "generate" in stage_names
+    assert "done" in stage_names
+    for s in messages[1].stages:
+        assert s.status == "done", f"non-done stage persisted : {s}"
+        assert s.duration_ms is not None, f"missing duration on {s.name}"
+    # The user message has no stages — they only attach to assistant
+    # turns (server enforces by only persisting on the assistant
+    # append_message call).
+    assert messages[0].stages is None
 
 
 async def test_stub_fallback_when_llm_not_wired(

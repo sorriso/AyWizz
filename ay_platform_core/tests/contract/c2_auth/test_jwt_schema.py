@@ -76,11 +76,14 @@ class TestJWTClaimsSchema:
             )
 
     def test_no_extra_undeclared_fields_in_spec(self) -> None:
-        """Exactly the fields from E-100-001 — no silent additions."""
+        """Exactly the fields from E-100-001 v2 — no silent additions.
+
+        v2 added `username` (login name, distinct from `name` display).
+        """
         expected = {
             "iss", "sub", "aud", "iat", "exp", "jti",
             "auth_mode", "tenant_id", "roles", "project_scopes",
-            "name", "email",
+            "username", "name", "email",
         }
         actual = set(JWTClaims.model_fields.keys())
         assert actual == expected, (

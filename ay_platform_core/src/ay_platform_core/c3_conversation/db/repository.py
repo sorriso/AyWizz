@@ -1,6 +1,6 @@
 # =============================================================================
 # File: repository.py
-# Version: 2
+# Version: 3
 # Path: ay_platform_core/src/ay_platform_core/c3_conversation/db/repository.py
 # Description: ArangoDB repository for C3 — conversations and messages.
 #              All public methods are async (asyncio.to_thread wrapper over
@@ -8,6 +8,11 @@
 #              c3_messages.
 #              soft-delete: conversations get deleted=True, never physically
 #              removed. Messages are not deleted when a conversation is deleted.
+#              v3: append_message accepts an optional `stages` list (the
+#                  pipeline timeline captured during the SSE stream) and
+#                  persists it alongside the assistant message so the UX
+#                  can re-render the same chip + timeline after navigation
+#                  or reload.
 #              v2: _append_message_sync AQL rewritten — OLD is not bound in
 #                  WITH of `UPDATE @key`; use LET doc = DOCUMENT(...) to read
 #                  the current message_count before the UPDATE.
@@ -145,10 +150,11 @@ class ConversationRepository:
         conversation_id: UUID,
         role: str,
         content: str,
+        stages: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         msg_id = uuid4()
         now = datetime.now(UTC).isoformat()
-        doc = {
+        doc: dict[str, Any] = {
             "_key": str(msg_id),
             "id": str(msg_id),
             "conversation_id": str(conversation_id),
@@ -156,6 +162,12 @@ class ConversationRepository:
             "content": content,
             "timestamp": now,
         }
+        # Only persist `stages` when the caller supplied a non-empty
+        # list. Absent field == "no timeline available", which the UX
+        # interprets as "render the bubble without a pipeline chip"
+        # (same fallback as legacy messages from before this feature).
+        if stages:
+            doc["stages"] = stages
         self._db.collection(COLL_MESSAGES).insert(doc)
         # Increment message_count on the parent conversation. OLD is not bound
         # in the WITH clause of `UPDATE @key`; bind the current document via
@@ -177,9 +189,10 @@ class ConversationRepository:
         conversation_id: UUID,
         role: str,
         content: str,
+        stages: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         return await asyncio.to_thread(
-            self._append_message_sync, conversation_id, role, content
+            self._append_message_sync, conversation_id, role, content, stages,
         )
 
     def _list_messages_sync(self, conversation_id: UUID) -> list[dict[str, Any]]:

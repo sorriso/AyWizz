@@ -1,14 +1,18 @@
 # =============================================================================
 # File: routers.yml
-# Version: 2
+# Version: 4
 # Path: infra/c1_gateway/dynamic/routers.yml
-# Description: Traefik HTTP router definitions. v2 aligns with real router
-#              paths and adds C7 / C9 public surfaces.
+# Description: Traefik HTTP router definitions. v3 adds the UI catch-all
+#              (priority 1) so the Next.js standalone server receives
+#              everything not claimed by an explicit backend route
+#              (`/`, `/login`, `/dashboard`, `/_next/*`, etc.).
+#              v2 aligns with real router paths and adds C7 / C9 public surfaces.
 #
 #   Route table (matches actual FastAPI routers as of session of 2026-04-23):
 #     /auth/login     POST → C2 [rate-limit-auth]                          public
 #     /auth/token     POST → C2 [rate-limit-auth]                          public
 #     /auth/*              → C2  []                                        public
+#     /ux/*                → C2  []                                        public
 #     /api/v1/conversations/*          → C3 [forward-auth-c2, secure-hdrs]
 #     /api/v1/orchestrator/*           → C4 [forward-auth-c2, secure-hdrs]
 #     /api/v1/projects/*/requirements/* → C5 [forward-auth-c2, secure-hdrs]
@@ -16,6 +20,7 @@
 #     /api/v1/memory/*                 → C7 [forward-auth-c2, secure-hdrs]
 #     /api/v1/mcp, /api/v1/mcp/*       → C9 [forward-auth-c2, secure-hdrs]
 #     /uploads/*                       → C12 [forward-auth-c2, secure-hdrs]
+#     <everything else>                → UI (priority 1)                   public
 #
 # @relation R-100-039 R-100-042 R-100-015 A-C1-1
 # =============================================================================
@@ -89,19 +94,65 @@ http:
       priority: 50
 
     # -------------------------------------------------------------------------
-    # C5 — Requirements Service
-    # (routes live under /api/v1/projects/<pid>/requirements/*)
+    # C2 — Admin (tenants lifecycle, tenant_manager only)
     # -------------------------------------------------------------------------
 
-    c5-requirements:
-      rule: "PathPrefix(`/api/v1/projects`)"
-      service: c5
+    c2-admin:
+      rule: "PathPrefix(`/admin`)"
+      service: c2
       entryPoints:
         - web
       middlewares:
         - forward-auth-c2
         - secure-headers
       priority: 50
+
+    # -------------------------------------------------------------------------
+    # C2 — Projects (lifecycle + membership grants)
+    # -------------------------------------------------------------------------
+
+    c2-projects:
+      rule: "PathPrefix(`/api/v1/projects`)"
+      service: c2
+      entryPoints:
+        - web
+      middlewares:
+        - forward-auth-c2
+        - secure-headers
+      priority: 50
+
+    # -------------------------------------------------------------------------
+    # C2 — Self-service per-user preferences (trigram, LLM user prompt,
+    # bubble colour). Any authenticated tenant member ; gated server-side.
+    # -------------------------------------------------------------------------
+
+    c2-preferences:
+      rule: "PathPrefix(`/api/v1/users/me/preferences`)"
+      service: c2
+      entryPoints:
+        - web
+      middlewares:
+        - forward-auth-c2
+        - secure-headers
+      priority: 50
+
+    # -------------------------------------------------------------------------
+    # C5 — Requirements Service
+    # (routes ONLY under /api/v1/projects/<pid>/requirements/*).
+    # PathRegexp + priority 100 wins over c2-projects (priority 50)
+    # for the `/requirements/...` subpath, leaving C2 to handle bare
+    # /api/v1/projects, /api/v1/projects/<pid>, and members endpoints.
+    # -------------------------------------------------------------------------
+
+    c5-requirements:
+      rule: "PathRegexp(`^/api/v1/projects/[^/]+/requirements(/.*)?$`)"
+      service: c5
+      entryPoints:
+        - web
+      middlewares:
+        - forward-auth-c2
+        - secure-headers
+      priority: 100
 
     # -------------------------------------------------------------------------
     # C6 — Validation Pipeline Registry
@@ -158,3 +209,17 @@ http:
         - forward-auth-c2
         - secure-headers
       priority: 50
+
+    # -------------------------------------------------------------------------
+    # UI catch-all (priority 1). Routes EVERYTHING not claimed above to
+    # the Next.js standalone server. Priority 1 = lowest, so any backend
+    # route wins. In `e2e_stack.sh up` (without dev override) the `ui`
+    # service doesn't exist ; Traefik returns 502 only if `/` is hit,
+    # which the pytest e2e tier never does.
+    # -------------------------------------------------------------------------
+    ui-catchall:
+      rule: "PathPrefix(`/`)"
+      service: ui
+      entryPoints:
+        - web
+      priority: 1

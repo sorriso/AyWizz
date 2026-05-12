@@ -1,6 +1,6 @@
 # =============================================================================
 # File: _catalog.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/tests/e2e/auth_matrix/_catalog.py
 # Description: SINGLE SOURCE OF TRUTH for the auth x role x scope test matrix.
 #              Every HTTP route exposed by any platform component SHALL be
@@ -14,6 +14,11 @@
 #              `test_isolation.py`) auto-cover the new endpoint along
 #              every dimension; only `test_backend_state.py` requires
 #              hand-written assertions per resource type.
+#
+#              v2: adds C2 routes for the per-project + per-user
+#              prompt-customization surface (`GET /api/v1/projects/{pid}`,
+#              `PATCH /api/v1/projects/{pid}`, GET/PUT
+#              `/api/v1/users/me/preferences`).
 #
 # Reference: E-100-002 v2 (5-role hierarchy), CLAUDE.md §13.
 # =============================================================================
@@ -299,6 +304,33 @@ _C2_AUTH: list[EndpointSpec] = [
     ),
     EndpointSpec(
         component="c2_auth",
+        method="GET",
+        path="/api/v1/projects/{project_id}",
+        auth=Auth.AUTHENTICATED,
+        scope=Scope.TENANT,
+        success_status=200,
+        excluded_global_roles=("tenant_manager",),
+        notes=(
+            "Any tenant member reads a single project (incl. the "
+            "effective system_prompt + is_default flag for the "
+            "settings page)."
+        ),
+    ),
+    EndpointSpec(
+        component="c2_auth",
+        method="PATCH",
+        path="/api/v1/projects/{project_id}",
+        auth=Auth.ROLE_GATED,
+        scope=Scope.TENANT,
+        success_status=200,
+        accept_roles=("project_owner",),
+        accept_global_roles=("admin", "tenant_admin"),
+        excluded_global_roles=("tenant_manager",),
+        backend=Backend.ARANGO,
+        backend_collection="c2_projects",
+    ),
+    EndpointSpec(
+        component="c2_auth",
         method="DELETE",
         path="/api/v1/projects/{project_id}",
         auth=Auth.ROLE_GATED,
@@ -308,6 +340,28 @@ _C2_AUTH: list[EndpointSpec] = [
         excluded_global_roles=("tenant_manager",),
         backend=Backend.ARANGO,
         backend_collection="c2_projects",
+    ),
+    # Self-service per-user preferences. Any tenant member writes their
+    # own record ; tenant_manager is content-blind and rejected.
+    EndpointSpec(
+        component="c2_auth",
+        method="GET",
+        path="/api/v1/users/me/preferences",
+        auth=Auth.AUTHENTICATED,
+        scope=Scope.TENANT,
+        success_status=200,
+        excluded_global_roles=("tenant_manager",),
+    ),
+    EndpointSpec(
+        component="c2_auth",
+        method="PUT",
+        path="/api/v1/users/me/preferences",
+        auth=Auth.AUTHENTICATED,
+        scope=Scope.TENANT,
+        success_status=200,
+        excluded_global_roles=("tenant_manager",),
+        backend=Backend.ARANGO,
+        backend_collection="c2_user_preferences",
     ),
     EndpointSpec(
         component="c2_auth",

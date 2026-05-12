@@ -1,6 +1,6 @@
 // =============================================================================
 // File: auth-provider.tsx
-// Version: 2
+// Version: 3
 // Path: ay_platform_ui/app/auth-provider.tsx
 // Description: Authentication state provider. Hydrates the JWT from
 //              localStorage on mount, exposes a typed `useAuth()` hook
@@ -17,6 +17,13 @@
 //                login()  : ApiClient.login() → token → setToken(token)
 //                logout() : clearAuth() → router.push("/login")
 //
+//              v3 : registers a session-revoked handler with
+//              `ApiClient` so any 401 surfaced by C2 (token expired,
+//              session wiped after a backend restart, key rotation)
+//              transparently flips the state to "anonymous" — the
+//              protected gate then redirects to /login instead of
+//              every page rendering a raw "API 401 …" string.
+//
 //              v2 (2026-04-29) : adds a 60s expiration watchdog so a
 //              user who stays on a protected page past the token's
 //              `exp` is bounced to login proactively (instead of
@@ -29,7 +36,12 @@
 "use client";
 
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useState } from "react";
-import { clearStoredToken, readStoredToken, writeStoredToken } from "@/lib/apiClient";
+import {
+  clearStoredToken,
+  readStoredToken,
+  setSessionRevokedHandler,
+  writeStoredToken,
+} from "@/lib/apiClient";
 import { decodeJWT, isTokenExpired, type JWTClaims } from "@/lib/auth";
 
 export type AuthState =
@@ -97,6 +109,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const clearAuth = useCallback(() => {
     clearStoredToken();
     setState({ status: "anonymous" });
+  }, []);
+
+  // Wire the session-revoked funnel : any 401 surfaced by `ApiClient`
+  // on a token-bearing request calls back here, we clear the token,
+  // and the protected gate's useEffect redirects to /login on the
+  // next render. Re-registering on every mount keeps the handler
+  // current after fast-refresh / route changes ; the unregister on
+  // unmount avoids leaking a stale closure into the next session.
+  useEffect(() => {
+    setSessionRevokedHandler(() => {
+      clearStoredToken();
+      setState({ status: "anonymous" });
+    });
+    return () => {
+      setSessionRevokedHandler(null);
+    };
   }, []);
 
   // Expiration watchdog. Re-evaluates the current token's `exp` every

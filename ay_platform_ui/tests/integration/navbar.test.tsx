@@ -29,6 +29,9 @@ const { mockRouter } = vi.hoisted(() => ({
 
 vi.mock("next/navigation", () => ({
   useRouter: () => mockRouter,
+  // Navbar v3 reads usePathname to mark the active nav item ;
+  // tests don't care about active state, so a stable "/" suffices.
+  usePathname: () => "/",
 }));
 
 beforeEach(() => {
@@ -79,12 +82,15 @@ describe("Navbar rendering", () => {
     await waitFor(() => {
       expect(screen.getByText("AyWizz")).toBeInTheDocument();
     });
-    // Brand link points at the dashboard.
+    // Brand link points at the projects list (post-Phase A landing).
     const link = screen.getByRole("link", { name: /aywizz/i });
-    expect(link).toHaveAttribute("href", "/dashboard");
+    expect(link).toHaveAttribute("href", "/projects");
   });
 
-  it("renders username + tenant + roles from JWT claims", async () => {
+  it("renders the user trigram avatar with full-name tooltip", async () => {
+    // Navbar v5 : the user area is now a 3-letter trigram avatar
+    // with the full identity in the `title` attribute (tooltip). The
+    // detailed username + tenant + roles line lives in /profile.
     seedAuthenticated({
       username: "platform-admin",
       tenant_id: "acme-prod",
@@ -93,28 +99,24 @@ describe("Navbar rendering", () => {
     renderNavbar();
 
     await waitFor(() => {
-      expect(screen.getByText("platform-admin")).toBeInTheDocument();
+      // Default trigram derivation from username "platform-admin" =
+      // first 3 chars uppercase = "PLA".
+      expect(screen.getByText("PLA")).toBeInTheDocument();
     });
-    // Tenant + roles surface in the small subline.
-    expect(screen.getByText(/acme-prod/)).toBeInTheDocument();
-    expect(screen.getByText(/tenant_manager, admin/)).toBeInTheDocument();
+    // The link's aria-label carries the full identity for screen
+    // readers ; sighted users see the tooltip via `title`.
+    const link = screen.getByTestId("navbar-link-profile");
+    expect(link).toHaveAttribute("aria-label", expect.stringContaining("platform-admin"));
+    expect(link).toHaveAttribute("href", "/preferences");
   });
 
-  it("falls back to sub when username is absent", async () => {
+  it("falls back to sub-derived trigram when username is absent", async () => {
     seedAuthenticated({ username: undefined });
     renderNavbar();
 
     await waitFor(() => {
-      expect(screen.getByText("user-alice")).toBeInTheDocument();
-    });
-  });
-
-  it('shows "no roles" when the roles claim is empty', async () => {
-    seedAuthenticated({ roles: [] });
-    renderNavbar();
-
-    await waitFor(() => {
-      expect(screen.getByText(/no roles/)).toBeInTheDocument();
+      // sub is "user-alice" → first 3 chars uppercase = "USE".
+      expect(screen.getByText("USE")).toBeInTheDocument();
     });
   });
 });

@@ -137,3 +137,9 @@ class ClientSettings(BaseSettings):
     connect_timeout_seconds: float = Field(default=5.0, ge=0.1)
     # Streaming heartbeat interval (Q-800-003 baseline: 15 s).
     sse_heartbeat_seconds: float = Field(default=15.0, ge=1.0)
+    # Default model identifier injected into `ChatCompletionRequest`
+    # when the caller leaves `model` empty. Required when the gateway
+    # is a strict OpenAI-compat provider (Ollama, LiteLLM with no
+    # model alias) ; the mock LLM ignores `model`. Leave empty in
+    # K8s prod, set per-environment via env_file.
+    default_model: str = ""

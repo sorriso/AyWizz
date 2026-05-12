@@ -1,6 +1,6 @@
 // =============================================================================
 // File: layout.tsx
-// Version: 3
+// Version: 4
 // Path: ay_platform_ui/app/(protected)/layout.tsx
 // Description: Auth gate for the route group `(protected)`. Every page
 //              under this folder is rendered ONLY when the auth state
@@ -13,6 +13,14 @@
 //              boundary without adding a path segment to the URL —
 //              `app/(protected)/dashboard/page.tsx` resolves to
 //              `/dashboard`, not `/protected/dashboard`.
+//
+//              v4 (2026-05-11) : wraps the gate in a `<Suspense>`
+//              boundary. Next 16's `next build` prerenders every page
+//              by default ; `useSearchParams()` triggers a CSR bailout
+//              that the prerender can't tolerate without a Suspense
+//              fallback. Splitting the gate into an inner component
+//              ("ProtectedGate") under `<Suspense>` lets the build
+//              succeed while keeping runtime behaviour identical.
 //
 //              v3 (2026-04-29) : also gates on the config state.
 //              AuthProvider hydrates synchronously from localStorage ;
@@ -33,14 +41,26 @@
 "use client";
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { type ReactNode, useEffect } from "react";
+import { type ReactNode, Suspense, useEffect } from "react";
 
 import { Navbar } from "@/components/navbar";
 
 import { useAuth } from "../auth-provider";
 import { useConfigState } from "../providers";
 
-export default function ProtectedLayout({ children }: { children: ReactNode }) {
+function LoadingPlaceholder() {
+  return (
+    <main className="mx-auto max-w-5xl px-6 py-16">
+      <p className="text-neutral-500">Loading…</p>
+    </main>
+  );
+}
+
+/** Inner gate that uses `useSearchParams()`. Split out so it sits
+ *  under a `<Suspense>` boundary — required by Next 16's prerender
+ *  pipeline (useSearchParams CSR-bails-out at build time and the
+ *  static generator needs a fallback to swap in until hydration). */
+function ProtectedGate({ children }: { children: ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -74,11 +94,7 @@ export default function ProtectedLayout({ children }: { children: ReactNode }) {
 
   // Either bootstrap pending → unified placeholder.
   if (authState.status === "loading" || configState.status === "loading") {
-    return (
-      <main className="mx-auto max-w-5xl px-6 py-16">
-        <p className="text-neutral-500">Loading…</p>
-      </main>
-    );
+    return <LoadingPlaceholder />;
   }
 
   if (authState.status === "anonymous") {
@@ -96,5 +112,13 @@ export default function ProtectedLayout({ children }: { children: ReactNode }) {
       <Navbar />
       {children}
     </>
+  );
+}
+
+export default function ProtectedLayout({ children }: { children: ReactNode }) {
+  return (
+    <Suspense fallback={<LoadingPlaceholder />}>
+      <ProtectedGate>{children}</ProtectedGate>
+    </Suspense>
   );
 }

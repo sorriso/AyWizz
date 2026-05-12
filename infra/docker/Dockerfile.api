@@ -1,6 +1,6 @@
 # =============================================================================
 # File: Dockerfile.api
-# Version: 2
+# Version: 3
 # Path: infra/docker/Dockerfile.api
 # Description: Shared image for the platform's Python API tier.
 #
@@ -31,6 +31,11 @@
 # =============================================================================
 
 ARG PYTHON_VERSION=3.13-slim
+# Build-time version stamp baked into the runtime image. Defaults to a
+# placeholder so a CI build without --build-arg still produces a valid
+# image ; `e2e_stack.sh dev` injects the current timestamp so every
+# manual rebuild gets a fresh stamp visible in the UX footer.
+ARG BUILD_VERSION=dev
 
 
 # ----------------------------------------------------------------------------
@@ -85,9 +90,16 @@ LABEL org.opencontainers.image.title="AyWizz API" \
       org.opencontainers.image.source="https://github.com/Sorriso/AyWizz" \
       org.opencontainers.image.documentation="https://github.com/Sorriso/AyWizz/blob/main/requirements/050-ARCHITECTURE-OVERVIEW.md"
 
+# Re-declare ARG in the runtime stage so the BUILD_VERSION from the top
+# of the file flows into the final image's ENV. Docker scopes ARG per
+# stage — without this line, the `${BUILD_VERSION}` inside ENV below
+# would expand to empty.
+ARG BUILD_VERSION=dev
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PATH="/opt/venv/bin:${PATH}"
+    PATH="/opt/venv/bin:${PATH}" \
+    BUILD_VERSION="${BUILD_VERSION}"
 
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /app /app

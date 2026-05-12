@@ -1,6 +1,6 @@
 # =============================================================================
 # File: config.py
-# Version: 4
+# Version: 5
 # Path: ay_platform_core/src/ay_platform_core/c2_auth/config.py
 # Description: Configuration for C2 Auth Service.
 #
@@ -57,6 +57,19 @@ class AuthConfig(BaseSettings):
     platform_environment: Literal["development", "testing", "staging", "production"] = (
         Field(default="development", validation_alias="PLATFORM_ENVIRONMENT")
     )
+
+    # NOTE : the API tier's build stamp is intentionally NOT a
+    # Pydantic-settings field. It is baked into the container ENV by
+    # `Dockerfile.api` (`ENV BUILD_VERSION=${BUILD_VERSION}`) and read
+    # directly via `os.environ` in `service.py`. Two reasons :
+    #   - keeping it out of `AuthConfig` keeps it out of the env-file
+    #     completeness coherence check ; we explicitly don't want it
+    #     declared in `.env.test` / `.env.example` because the env-file
+    #     value would WIN over the Dockerfile ENV (docker compose's
+    #     env_file directive overrides image ENV) and flatten the
+    #     per-build distinction we're after.
+    #   - the value is infra metadata, not application config — the
+    #     application's behaviour does not branch on it.
 
     # Shared ArangoDB connection — every component talks to the same cluster
     # and the same logical database; ownership boundaries are enforced at the
@@ -144,6 +157,29 @@ class AuthConfig(BaseSettings):
         default="#3b82f6",
         description="Primary accent color (hex with leading #).",
     )
+    # ---- LLM behavioural defaults --------------------------------------------
+    # Default user-level system prompt prepended to every chat message
+    # for users who haven't overridden it via /preferences. The user
+    # may override per-account (stored in c2_user_preferences).
+    default_user_prompt: str = Field(
+        default=(
+            "Do not invent things. Do not cheat. Do not lie. "
+            "If you don't know, say so. "
+            "If you are missing information, ask for it."
+        ),
+        description="System default user prompt prepended to chat. "
+        "Override per-user via PUT /api/v1/users/me/preferences.",
+    )
+    # Default project-level addendum applied to every conversation in
+    # the project. Empty by default ; admins / project_owners can set
+    # one per project via PATCH /api/v1/projects/{pid}.
+    default_project_prompt: str = Field(
+        default="",
+        description="System default project prompt addendum. Empty "
+        "means no per-project override applied. Per-project override "
+        "via PATCH /api/v1/projects/{pid}.",
+    )
+
     ux_feature_chat_enabled: bool = Field(default=True)
     ux_feature_kg_enabled: bool = Field(default=True)
     ux_feature_cross_tenant_enabled: bool = Field(

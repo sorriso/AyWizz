@@ -128,15 +128,27 @@ class TestForwardAuthWiring:
                 )
 
     def test_auth_routes_do_not_have_forward_auth(self) -> None:
-        """C2 validates tokens internally; forward-auth on /auth/* would create a loop."""
+        """Routes targeting `/auth/*` SHALL NOT carry the forward-auth
+        middleware (would loop : forward-auth itself calls /auth/verify).
+
+        Other C2 routes (`/admin/*`, `/api/v1/projects/*`, `/ux/*`)
+        target the c2 service too but live on distinct paths — they
+        legitimately consume the forward-auth headers, so they MUST
+        have the middleware. The assertion narrows to /auth/ routes
+        only.
+        """
         routers = _routers()
         for name, r in routers.items():
-            if r["service"] == "c2":
-                mw = r.get("middlewares", [])
-                assert "forward-auth-c2" not in mw, (
-                    f"forward-auth-c2 must not be applied to C2 router '{name}' — "
-                    "this would create an auth loop"
-                )
+            if r["service"] != "c2":
+                continue
+            rule = r.get("rule", "")
+            if "/auth" not in rule:
+                continue
+            mw = r.get("middlewares", [])
+            assert "forward-auth-c2" not in mw, (
+                f"forward-auth-c2 must not be applied to C2 /auth router '{name}' "
+                "— this would create an auth loop"
+            )
 
 
 @pytest.mark.contract

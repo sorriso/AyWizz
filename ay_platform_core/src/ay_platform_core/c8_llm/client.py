@@ -105,6 +105,10 @@ class LLMGatewayClient:
                 "chat_completion() does not support streaming payloads; "
                 "call chat_completion_stream() instead"
             )
+        if payload.model is None and self._settings.default_model:
+            payload = payload.model_copy(
+                update={"model": self._settings.default_model}
+            )
         headers = self._headers(
             agent_name=agent_name,
             session_id=session_id,
@@ -144,6 +148,13 @@ class LLMGatewayClient:
         connection is released even when the caller cancels early.
         """
         stream_payload = payload.model_copy(update={"stream": True})
+        # Inject the configured default model when the caller didn't
+        # specify one — Ollama / strict OpenAI gateways require it
+        # (mock_llm ignores `model` either way).
+        if stream_payload.model is None and self._settings.default_model:
+            stream_payload = stream_payload.model_copy(
+                update={"model": self._settings.default_model}
+            )
         headers = self._headers(
             agent_name=agent_name,
             session_id=session_id,

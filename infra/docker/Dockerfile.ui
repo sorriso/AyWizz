@@ -1,6 +1,6 @@
 # =============================================================================
 # File: Dockerfile.ui
-# Version: 1
+# Version: 2
 # Path: infra/docker/Dockerfile.ui
 # Description: Production image for the Next.js UI (`ay_platform_ui/`).
 #              Multi-stage build leveraging Next.js 16's `output:
@@ -20,6 +20,13 @@
 # =============================================================================
 
 ARG NODE_VERSION=25-alpine
+# Build-time version stamp. Next.js bakes any `NEXT_PUBLIC_*` env var
+# present at `next build` time into the client bundle, so we expose
+# `NEXT_PUBLIC_BUILD_VERSION` and read it from `process.env` in the
+# footer component. Defaults to `dev` for ad-hoc local builds ;
+# `e2e_stack.sh dev` injects a timestamp via --build-arg so every
+# rebuild produces a fresh stamp.
+ARG BUILD_VERSION=dev
 
 # ----------------------------------------------------------------------------
 # Builder stage : install ALL deps (incl. dev) + run `next build`.
@@ -29,6 +36,12 @@ FROM node:${NODE_VERSION} AS builder
 LABEL stage="builder"
 
 WORKDIR /app
+
+# Re-declare for this stage + propagate to Next.js as a NEXT_PUBLIC_
+# env var so it ends up baked into the client bundle (server reads
+# server-only env at runtime ; NEXT_PUBLIC_ is baked at compile).
+ARG BUILD_VERSION=dev
+ENV NEXT_PUBLIC_BUILD_VERSION="${BUILD_VERSION}"
 
 # 1. Install dependencies first so the layer is cached when only source
 #    changes. `npm ci` requires a lockfile ; we copy both package.json

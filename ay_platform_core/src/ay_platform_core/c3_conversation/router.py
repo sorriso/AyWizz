@@ -1,11 +1,16 @@
 # =============================================================================
 # File: router.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/src/ay_platform_core/c3_conversation/router.py
 # Description: FastAPI APIRouter for C3 — 8 endpoints.
 #              JWT identity is read from X-User-Id header propagated by C1
 #              forward-auth (Traefik → C2 /auth/verify → X-User-Id).
 #              In local dev / testing, X-User-Id can be injected directly.
+#
+#              v2: `send_message` forwards `user_prompt` /
+#              `project_prompt` from the body to the service, so the
+#              RAG prompt assembly can prepend both ahead of the
+#              retrieved context block.
 # @relation R-100-039 R-100-042
 # =============================================================================
 
@@ -138,6 +143,8 @@ async def send_message(
         payload.content,
         tenant_id=x_tenant_id,
         user_roles=x_user_roles,
+        user_prompt=payload.user_prompt,
+        project_prompt=payload.project_prompt,
     )
     return StreamingResponse(stream, media_type="text/event-stream")
 

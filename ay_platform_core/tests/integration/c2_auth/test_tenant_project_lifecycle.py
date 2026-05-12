@@ -1,6 +1,6 @@
 # =============================================================================
 # File: test_tenant_project_lifecycle.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/tests/integration/c2_auth/test_tenant_project_lifecycle.py
 # Description: Phase A integration tests — tenant + project lifecycle and
 #              membership grants. Round-trip through real ArangoDB:
@@ -8,6 +8,12 @@
 #              in it, project_owner grants project_editor on a user,
 #              that user's JWT issued at next login carries the
 #              project_scopes.
+#
+#              v2: adds smoke tests for GET / PATCH `/api/v1/projects/
+#              {pid}` (effective `system_prompt` resolution + override
+#              persistence) and GET / PUT `/api/v1/users/me/preferences`
+#              (trigram + user prompt round-trip through C2's prefs
+#              collection).
 #
 # @relation validates:E-100-002
 # =============================================================================
@@ -33,6 +39,7 @@ from ay_platform_core.c2_auth.models import (
     RBACGlobalRole,
     UserCreateRequest,
 )
+from ay_platform_core.c2_auth.preferences_router import router as c2_preferences_router
 from ay_platform_core.c2_auth.projects_router import router as c2_projects_router
 from ay_platform_core.c2_auth.router import router as c2_router
 from ay_platform_core.c2_auth.service import AuthService
@@ -66,6 +73,11 @@ async def c2_stack(arango_container: ArangoEndpoint) -> AsyncIterator[tuple[Fast
             "auth_mode": "local",
             "jwt_secret_key": "phase-a-test-secret-32-chars-min!",
             "platform_environment": "testing",
+            # Non-empty user-prompt default lets the prefs round-trip
+            # test assert `user_prompt_is_default=True` returns this
+            # exact text when no override has been stored.
+            "default_user_prompt": "Be precise. Do not invent.",
+            "default_project_prompt": "",
         }
     )
     service = AuthService(config, repo)
@@ -73,6 +85,7 @@ async def c2_stack(arango_container: ArangoEndpoint) -> AsyncIterator[tuple[Fast
     app.include_router(c2_router, prefix="/auth")
     app.include_router(c2_admin_router, prefix="/admin")
     app.include_router(c2_projects_router, prefix="/api/v1/projects")
+    app.include_router(c2_preferences_router, prefix="/api/v1/users/me/preferences")
     app.dependency_overrides[c2_get_service] = lambda: service
     try:
         yield app, service
@@ -462,3 +475,167 @@ async def test_delete_project_cascades_member_grants_and_404s_on_re_delete(
     assert project_id not in member_claims.project_scopes, (
         "stale grant resurrected after project re-creation — cascade failed"
     )
+
+
+# ---------------------------------------------------------------------------
+# v2 — Project read + system_prompt override + user preferences
+# ---------------------------------------------------------------------------
+
+
+async def test_get_project_returns_effective_system_prompt(
+    c2_stack: tuple[FastAPI, AuthService],
+) -> None:
+    """`GET /api/v1/projects/{pid}` is the per-project read for the UX.
+    On a freshly-created project (no per-project override) the
+    `system_prompt` field SHALL equal the C2-wide default and
+    `system_prompt_is_default` SHALL be True."""
+    app, service = c2_stack
+    tm_headers = await _bearer_for(
+        service, "u-tm", "platform", [RBACGlobalRole.TENANT_MANAGER],
+    )
+    async with _client(app) as c:
+        await c.post(
+            "/admin/tenants",
+            headers=tm_headers,
+            json={"tenant_id": "tenant-sp", "name": "sp"},
+        )
+        admin_fa = _forward_auth("u-adm", "tenant-sp", ("admin",))
+        await c.post(
+            "/api/v1/projects",
+            headers=admin_fa,
+            json={"project_id": "proj-sp", "name": "sp"},
+        )
+        read = await c.get("/api/v1/projects/proj-sp", headers=admin_fa)
+        assert read.status_code == 200, read.text
+        body = read.json()
+        assert body["project_id"] == "proj-sp"
+        # default_project_prompt is empty in the fixture config.
+        assert body["system_prompt"] == ""
+        assert body["system_prompt_is_default"] is True
+
+
+async def test_patch_project_sets_and_clears_system_prompt(
+    c2_stack: tuple[FastAPI, AuthService],
+) -> None:
+    """End-to-end PATCH cycle: empty (default) → override → reset
+    (empty string clears). Each step's response reflects the new
+    state and the `is_default` flag tracks accordingly."""
+    app, service = c2_stack
+    tm_headers = await _bearer_for(
+        service, "u-tm", "platform", [RBACGlobalRole.TENANT_MANAGER],
+    )
+    async with _client(app) as c:
+        await c.post(
+            "/admin/tenants",
+            headers=tm_headers,
+            json={"tenant_id": "tenant-patch", "name": "patch"},
+        )
+        admin_fa = _forward_auth("u-adm", "tenant-patch", ("admin",))
+        await c.post(
+            "/api/v1/projects",
+            headers=admin_fa,
+            json={"project_id": "proj-patch", "name": "patch"},
+        )
+
+        # Set an override.
+        set_resp = await c.patch(
+            "/api/v1/projects/proj-patch",
+            headers=admin_fa,
+            json={"system_prompt": "Talk like a pirate."},
+        )
+        assert set_resp.status_code == 200, set_resp.text
+        body = set_resp.json()
+        assert body["system_prompt"] == "Talk like a pirate."
+        assert body["system_prompt_is_default"] is False
+
+        # Re-read confirms persistence.
+        read = await c.get("/api/v1/projects/proj-patch", headers=admin_fa)
+        assert read.json()["system_prompt"] == "Talk like a pirate."
+        assert read.json()["system_prompt_is_default"] is False
+
+        # Clear the override (empty string sentinel).
+        clear_resp = await c.patch(
+            "/api/v1/projects/proj-patch",
+            headers=admin_fa,
+            json={"system_prompt": ""},
+        )
+        assert clear_resp.status_code == 200, clear_resp.text
+        body = clear_resp.json()
+        assert body["system_prompt"] == ""  # default is empty in fixture
+        assert body["system_prompt_is_default"] is True
+
+
+async def test_user_preferences_round_trip(
+    c2_stack: tuple[FastAPI, AuthService],
+) -> None:
+    """GET initially returns the C2 defaults; PUT writes an override;
+    GET reflects the override; PUT with empty strings reverts to
+    defaults. Trigram persists as null when not yet stored."""
+    app, _service = c2_stack
+    user_fa = _forward_auth("u-prefs", "tenant-prefs", ("project_editor",))
+
+    async with _client(app) as c:
+        # Initial GET — no record yet, defaults flow through.
+        initial = await c.get(
+            "/api/v1/users/me/preferences", headers=user_fa,
+        )
+        assert initial.status_code == 200, initial.text
+        body = initial.json()
+        assert body["trigram"] is None
+        assert body["user_prompt"] == "Be precise. Do not invent."
+        assert body["user_prompt_is_default"] is True
+        assert body["user_color"] is None
+
+        # PUT all overridable fields → overrides set.
+        put_resp = await c.put(
+            "/api/v1/users/me/preferences",
+            headers=user_fa,
+            json={
+                "trigram": "PRO",
+                "user_prompt": "Answer in French.",
+                "user_color": "#3B82F6",
+            },
+        )
+        assert put_resp.status_code == 200, put_resp.text
+        body = put_resp.json()
+        assert body["trigram"] == "PRO"
+        assert body["user_prompt"] == "Answer in French."
+        assert body["user_prompt_is_default"] is False
+        # Hex colour is normalised to lowercase server-side so
+        # downstream consumers can compare without re-casing.
+        assert body["user_color"] == "#3b82f6"
+
+        # GET reflects the override.
+        re_read = await c.get(
+            "/api/v1/users/me/preferences", headers=user_fa,
+        )
+        assert re_read.json() == body
+
+        # PUT empty strings → clear overrides.
+        clear = await c.put(
+            "/api/v1/users/me/preferences",
+            headers=user_fa,
+            json={"trigram": "", "user_prompt": "", "user_color": ""},
+        )
+        assert clear.status_code == 200, clear.text
+        body = clear.json()
+        assert body["trigram"] is None
+        assert body["user_prompt"] == "Be precise. Do not invent."
+        assert body["user_prompt_is_default"] is True
+        assert body["user_color"] is None
+
+        # Invalid trigram → 400.
+        bad = await c.put(
+            "/api/v1/users/me/preferences",
+            headers=user_fa,
+            json={"trigram": "X!"},
+        )
+        assert bad.status_code == 400
+
+        # Invalid hex colour → 400.
+        bad_color = await c.put(
+            "/api/v1/users/me/preferences",
+            headers=user_fa,
+            json={"user_color": "blue"},
+        )
+        assert bad_color.status_code == 400

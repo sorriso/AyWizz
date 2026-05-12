@@ -98,6 +98,11 @@ name: ay-platform
 x-api-build: &api-build
   context: ../..
   dockerfile: infra/docker/Dockerfile.api
+  args:
+    # Forwards the BUILD_VERSION env into the Dockerfile ARG so every
+    # rebuild stamps the image with a unique value visible in the UX
+    # footer. Falls back to "dev" when the shell didn't export the var.
+    BUILD_VERSION: ${BUILD_VERSION:-dev}
 
 # Python-runtime env shared by all Python services. Application-level
 # settings (anything Pydantic-settings reads) live in `.env.test` and are

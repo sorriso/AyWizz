@@ -32,7 +32,7 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { type FormEvent, useEffect, useMemo, useState } from "react";
+import { type FormEvent, Suspense, useEffect, useMemo, useState } from "react";
 
 import { ApiClient, ApiError } from "@/lib/apiClient";
 import { sanitizeRedirect } from "@/lib/auth";
@@ -40,7 +40,11 @@ import { sanitizeRedirect } from "@/lib/auth";
 import { useAuth } from "../auth-provider";
 import { useConfigState } from "../providers";
 
-export default function LoginPage() {
+// `LoginForm` uses `useSearchParams()` for `?redirect=` handling.
+// Next 16's prerender pipeline CSR-bails-out on that hook, so the
+// page exports a thin wrapper that puts the form under a `<Suspense>`
+// boundary — runtime behaviour is unchanged.
+function LoginForm() {
   const state = useConfigState();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -206,5 +210,21 @@ export default function LoginPage() {
         </section>
       ) : null}
     </main>
+  );
+}
+
+function LoginLoadingFallback() {
+  return (
+    <main className="mx-auto max-w-md px-6 py-16">
+      <p className="text-neutral-500">Loading…</p>
+    </main>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={<LoginLoadingFallback />}>
+      <LoginForm />
+    </Suspense>
   );
 }

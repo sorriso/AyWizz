@@ -1,6 +1,6 @@
 # =============================================================================
 # File: main.py
-# Version: 4
+# Version: 5
 # Path: ay_platform_core/src/ay_platform_core/c2_auth/main.py
 # Description: FastAPI app factory for C2 Auth Service. Used by the
 #              production container (uvicorn ay_platform_core.c2_auth.main:app)
@@ -9,6 +9,11 @@
 #              are bootstrapped during the lifespan; in `local` auth mode an
 #              admin user is also bootstrapped from C2_LOCAL_ADMIN_*
 #              (R-100-118 v2).
+#
+#              v5: mounts the preferences_router at
+#              `/api/v1/users/me/preferences` (any authenticated user,
+#              minus tenant_manager). Hosts the per-user trigram + LLM
+#              `user_prompt` override.
 #
 #              v4: adds `_ensure_demo_seed()` for the manual-test stack
 #              (gated by `C2_DEMO_SEED_ENABLED`). Pre-provisions a
@@ -46,6 +51,7 @@ from ay_platform_core.c2_auth.models import (
     UserStatus,
 )
 from ay_platform_core.c2_auth.modes.local_mode import LocalMode
+from ay_platform_core.c2_auth.preferences_router import router as preferences_router
 from ay_platform_core.c2_auth.projects_router import router as projects_router
 from ay_platform_core.c2_auth.router import router
 from ay_platform_core.c2_auth.service import AuthService
@@ -218,6 +224,9 @@ async def _ensure_demo_seed(repo: AuthRepository, cfg: AuthConfig) -> None:
         )
 
     # 3. Project — created by the tenant-admin user. Pre-check by id.
+    # `profile=code` matches the only production-domain plugin shipped
+    # in v1 (C4 orchestrator). Future profiles (data / doc / etc.) will
+    # be selectable via a new env var or a per-tenant default.
     if await repo.get_project(project_id) is None:
         await repo.insert_project(
             project_id,
@@ -225,9 +234,10 @@ async def _ensure_demo_seed(repo: AuthRepository, cfg: AuthConfig) -> None:
             cfg.demo_seed_project_name,
             now,
             "demo-tenant-admin",
+            profile="code",
         )
         _log.info(
-            "demo seed: created project %r in tenant %r",
+            "demo seed: created project %r in tenant %r (profile=code)",
             project_id, tenant_id,
         )
 
@@ -286,6 +296,7 @@ def create_app(config: AuthConfig | None = None) -> FastAPI:
     app.include_router(router, prefix="/auth")
     app.include_router(admin_router, prefix="/admin")
     app.include_router(projects_router, prefix="/api/v1/projects")
+    app.include_router(preferences_router, prefix="/api/v1/users/me/preferences")
     app.include_router(ux_router, prefix="/ux")
     service = AuthService(cfg, repo)
     app.dependency_overrides[c2_get_service] = lambda: service
