@@ -904,6 +904,75 @@ _C4_ORCHESTRATOR: list[EndpointSpec] = [
         accept_global_roles=("admin",),
         excluded_global_roles=("tenant_manager",),
     ),
+    # Project artifacts surface — Pass 1 of the Code source / DocGen
+    # feature (R-200-131). Read-only for any tenant member ;
+    # tenant_manager is rejected because artifacts are tenant content
+    # (E-100-002 v2). Profile-agnostic — same endpoints serve
+    # `codegen` and `docgen` projects.
+    EndpointSpec(
+        component="c4_orchestrator",
+        method="GET",
+        path="/api/v1/projects/{project_id}/artifacts/runs",
+        auth=Auth.AUTHENTICATED,
+        scope=Scope.PROJECT,
+        success_status=200,
+        excluded_global_roles=("tenant_manager",),
+        backend=Backend.ARANGO,
+        backend_collection="c4_artifact_runs",
+    ),
+    EndpointSpec(
+        component="c4_orchestrator",
+        method="GET",
+        path="/api/v1/projects/{project_id}/artifacts/runs/{run_id}/tree",
+        auth=Auth.AUTHENTICATED,
+        scope=Scope.PROJECT,
+        success_status=200,
+        excluded_global_roles=("tenant_manager",),
+        backend=Backend.MINIO,
+        backend_bucket="orchestrator",
+    ),
+    EndpointSpec(
+        component="c4_orchestrator",
+        method="GET",
+        path="/api/v1/projects/{project_id}/artifacts/runs/{run_id}/blob",
+        auth=Auth.AUTHENTICATED,
+        scope=Scope.PROJECT,
+        success_status=200,
+        excluded_global_roles=("tenant_manager",),
+        backend=Backend.MINIO,
+        backend_bucket="orchestrator",
+    ),
+    # Admin seed endpoint — dev-only path used by `seed_demo_ux.py`
+    # to pre-populate a demo run. Admin / tenant_admin only ; not a
+    # public surface but covered by the matrix to lock the role gate.
+    EndpointSpec(
+        component="c4_orchestrator",
+        method="POST",
+        path="/api/v1/admin/projects/{project_id}/artifacts/seed",
+        auth=Auth.ROLE_GATED,
+        scope=Scope.TENANT,
+        success_status=200,
+        accept_global_roles=("admin", "tenant_admin"),
+        excluded_global_roles=("tenant_manager",),
+        backend=Backend.BOTH,
+        backend_collection="c4_artifact_runs",
+        backend_bucket="orchestrator",
+    ),
+    # Project versioning — commit history proxy over Gitea (R-200-147).
+    # Read-only for any tenant member ; tenant_manager rejected in-app.
+    EndpointSpec(
+        component="c4_orchestrator",
+        method="GET",
+        path="/api/v1/projects/{project_id}/git/commits",
+        auth=Auth.AUTHENTICATED,
+        scope=Scope.PROJECT,
+        success_status=200,
+        excluded_global_roles=("tenant_manager",),
+        notes=(
+            "Transparent Gitea proxy (R-200-145) — UX never reaches "
+            "Gitea directly. Returns [] when Gitea is not wired."
+        ),
+    ),
 ]
 
 

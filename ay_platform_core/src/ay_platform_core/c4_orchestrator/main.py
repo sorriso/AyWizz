@@ -1,12 +1,22 @@
 # =============================================================================
 # File: main.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/src/ay_platform_core/c4_orchestrator/main.py
 # Description: FastAPI app factory for C4 Orchestrator. Wires the in-process
 #              dispatcher backed by a real C8 LLM client (the C8 URL is read
 #              from C4_LLM_GATEWAY_URL).
 #
+#              v2: mounts the project-artifacts surface
+#              (`artifacts_router`) under
+#              `/api/v1/projects/{pid}/artifacts/*` + instantiates
+#              the `ArtifactsService` over the shared MinIO client and
+#              the orchestrator repository (which gains the
+#              `c4_artifact_runs` collection). Lifespan ensures the
+#              bucket exists at startup so a fresh dev stack just
+#              works.
+#
 # @relation implements:R-100-114
+# @relation implements:R-200-131
 # =============================================================================
 
 from __future__ import annotations
@@ -16,7 +26,14 @@ from contextlib import asynccontextmanager
 
 from arango import ArangoClient  # type: ignore[attr-defined]
 from fastapi import FastAPI
+from minio import Minio
 
+from ay_platform_core.c2_auth.gitea_client import GiteaClient
+from ay_platform_core.c4_orchestrator.artifacts_router import (
+    router as artifacts_router,
+)
+from ay_platform_core.c4_orchestrator.artifacts_service import ArtifactsService
+from ay_platform_core.c4_orchestrator.artifacts_storage import ArtifactStorage
 from ay_platform_core.c4_orchestrator.config import OrchestratorConfig
 from ay_platform_core.c4_orchestrator.db.repository import OrchestratorRepository
 from ay_platform_core.c4_orchestrator.dispatcher.in_process import InProcessDispatcher
@@ -55,17 +72,48 @@ def create_app(config: OrchestratorConfig | None = None) -> FastAPI:
         publisher=NullPublisher(),
     )
 
+    # MinIO client + artifacts service. Same bucket (`orchestrator`)
+    # as the existing run state ; artifacts live under the
+    # `c4-artifacts/` prefix (R-200-130) — clear separation from the
+    # `c4-runs/` prefix that holds orchestrator internal state.
+    minio_client = Minio(
+        cfg.minio_endpoint,
+        access_key=cfg.minio_access_key,
+        secret_key=cfg.minio_secret_key,
+        secure=cfg.minio_secure,
+    )
+    artifact_storage = ArtifactStorage(minio_client, cfg.minio_bucket)
+    # Gitea client — wired when `C4_GITEA_BASE_URL` is non-empty.
+    # Pushes artifacts at run completion (R-200-146) AND backs the
+    # `/git/commits` proxy (R-200-147).
+    gitea: GiteaClient | None = None
+    if cfg.gitea_base_url:
+        gitea = GiteaClient(
+            base_url=cfg.gitea_base_url,
+            admin_username=cfg.gitea_admin_username,
+            admin_password=cfg.gitea_admin_password,
+        )
+    artifacts_service = ArtifactsService(
+        repo=repo, storage=artifact_storage, gitea=gitea,
+    )
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         repo._ensure_collections_sync()
+        # Idempotent ; covers the rare case of a fresh MinIO bucket.
+        await artifact_storage.ensure_bucket()
         yield
         await llm_client.aclose()
+        if gitea is not None:
+            await gitea.aclose()
 
     app = FastAPI(title="C4 Orchestrator", lifespan=lifespan)
     app.add_middleware(AuthGuardMiddleware, component="c4_orchestrator")
     app.add_middleware(TraceContextMiddleware, sample_rate=log_cfg.trace_sample_rate)
     app.include_router(router)
+    app.include_router(artifacts_router)
     app.state.orchestrator_service = service
+    app.state.artifacts_service = artifacts_service
 
     @app.get("/health")
     async def health() -> dict[str, str]:

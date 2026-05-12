@@ -144,6 +144,30 @@ export default function ProjectSettingsPage() {
         </p>
       </header>
 
+      {project.git_repo_url ? (
+        <section
+          className="mt-8 rounded-lg border border-neutral-200 bg-white p-6"
+          data-testid="project-git-repo"
+        >
+          <h3 className="text-sm font-medium uppercase tracking-wide text-neutral-500">
+            Git repository
+          </h3>
+          <p className="mt-2 text-sm text-neutral-600">
+            HTTPS clone URL of the project&rsquo;s versioned source. Use it to{" "}
+            <code className="rounded bg-neutral-100 px-1">git clone</code> the repo from your own
+            machine ; the platform pushes every generated artifact here on each run.
+          </p>
+          <input
+            type="text"
+            readOnly
+            value={project.git_repo_url}
+            className="mt-3 block w-full select-all rounded-md border border-neutral-300 bg-neutral-50 px-3 py-1.5 font-mono text-xs text-neutral-800"
+            data-testid="project-git-clone-url"
+            onFocus={(e) => e.currentTarget.select()}
+          />
+        </section>
+      ) : null}
+
       <section
         className="mt-8 rounded-lg border border-neutral-200 bg-white p-6"
         data-testid="project-system-prompt"

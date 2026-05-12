@@ -71,6 +71,29 @@ class AuthConfig(BaseSettings):
     #   - the value is infra metadata, not application config — the
     #     application's behaviour does not branch on it.
 
+    # ---- Gitea backend (R-200-140..145) ----------------------------------
+    # Connection details for the bundled Gitea instance. C2 talks to
+    # it via HTTP Basic auth using the root admin creds bootstrapped
+    # by `gitea_init` (compose). Production overlays SHALL migrate to
+    # per-deployment tokens stored in a vault — Q-100-020 tracks the
+    # threat-model upgrade.
+    gitea_base_url: str = Field(
+        default="http://gitea:3000",
+        validation_alias="C2_GITEA_BASE_URL",
+        description="Base URL of the bundled Gitea instance. Empty "
+        "disables provisioning (legacy stack without Gitea).",
+    )
+    gitea_admin_username: str = Field(
+        default="aywizz",
+        validation_alias="GITEA_ROOT_USERNAME",
+        description="Root admin username for the bundled Gitea.",
+    )
+    gitea_admin_password: str = Field(
+        default="change-me-gitea-root-password",
+        validation_alias="GITEA_ROOT_PASSWORD",
+        description="Root admin password for the bundled Gitea.",
+    )
+
     # Shared ArangoDB connection — every component talks to the same cluster
     # and the same logical database; ownership boundaries are enforced at the
     # collection level (R-100-012 v3) and via the dedicated app user.

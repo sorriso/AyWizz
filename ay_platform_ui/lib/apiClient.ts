@@ -34,6 +34,9 @@
 // =============================================================================
 
 import type {
+  ArtifactCommitList,
+  ArtifactRunList,
+  ArtifactTree,
   Conversation,
   ConversationList,
   ConversationResponse,
@@ -537,6 +540,98 @@ export class ApiClient {
       `/api/v1/validation/runs/${encodeURIComponent(runId)}/findings${qs}`,
       { method: "GET" },
     );
+  }
+
+  // -------------------------------------------------------------------------
+  // C4 — Project artifacts (Code source / DocGen). Transparent MinIO
+  // surface ; UX never sees the storage backend (R-200-133).
+  // -------------------------------------------------------------------------
+
+  /** GET /api/v1/projects/{pid}/artifacts/runs — list runs. */
+  async listArtifactRuns(projectId: string): Promise<ArtifactRunList> {
+    return this.request<ArtifactRunList>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/artifacts/runs`,
+      { method: "GET" },
+    );
+  }
+
+  /** GET /api/v1/projects/{pid}/artifacts/runs/{rid}/tree — flat
+   *  node list ; UX rebuilds the hierarchy by splitting `path`. */
+  async getArtifactTree(projectId: string, runId: string): Promise<ArtifactTree> {
+    return this.request<ArtifactTree>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/artifacts/runs/${encodeURIComponent(runId)}/tree`,
+      { method: "GET" },
+    );
+  }
+
+  /** GET /api/v1/projects/{pid}/artifacts/runs/{rid}/blob?path=...
+   *  Returns the raw bytes as text (decoded UTF-8) so the Monaco /
+   *  pre viewer can render directly. For binary files (PDF, images)
+   *  the caller switches to `artifactBlobUrl()` + auth-aware download. */
+  async getArtifactBlobText(
+    projectId: string,
+    runId: string,
+    path: string,
+  ): Promise<{ text: string; contentType: string }> {
+    const url = this.url(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/artifacts/runs/${encodeURIComponent(runId)}/blob?path=${encodeURIComponent(path)}`,
+    );
+    const headers = new Headers();
+    const token = readStoredToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const resp = await fetch(url, { method: "GET", headers, cache: "no-store" });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      if (resp.status === 401 && token) {
+        _notifySessionRevoked();
+      }
+      throw new ApiError(resp.status, url, body);
+    }
+    const text = await resp.text();
+    const contentType = resp.headers.get("Content-Type") ?? "text/plain";
+    return { text, contentType };
+  }
+
+  /** GET /api/v1/projects/{pid}/git/commits — paginated commit list
+   *  proxied from the project's Gitea repo (R-200-147). Returns
+   *  empty when Gitea is not wired or the repo has no commits yet. */
+  async listProjectCommits(
+    projectId: string,
+    page = 1,
+  ): Promise<ArtifactCommitList> {
+    return this.request<ArtifactCommitList>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/git/commits?page=${page}`,
+      { method: "GET" },
+    );
+  }
+
+  /** Auth-aware download : fetch the blob with `download=1` so the
+   *  server emits `Content-Disposition: attachment`, return a Blob
+   *  the caller can pipe into a programmatic download. */
+  async downloadArtifactBlob(
+    projectId: string,
+    runId: string,
+    path: string,
+  ): Promise<{ blob: Blob; filename: string }> {
+    const url = this.url(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/artifacts/runs/${encodeURIComponent(runId)}/blob?path=${encodeURIComponent(path)}&download=1`,
+    );
+    const headers = new Headers();
+    const token = readStoredToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const resp = await fetch(url, { method: "GET", headers, cache: "no-store" });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      if (resp.status === 401 && token) {
+        _notifySessionRevoked();
+      }
+      throw new ApiError(resp.status, url, body);
+    }
+    const blob = await resp.blob();
+    const fallback = path.split("/").pop() ?? "artifact";
+    const cd = resp.headers.get("Content-Disposition") ?? "";
+    const match = cd.match(/filename="?([^"]+)"?/i);
+    return { blob, filename: match ? match[1] : fallback };
   }
 
   /** GET /api/v1/validation/findings/{finding_id}. */

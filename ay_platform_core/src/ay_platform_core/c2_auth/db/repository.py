@@ -36,6 +36,10 @@ COLL_PROJECTS = "c2_projects"
 COLL_ROLE_ASSIGNMENTS = "c2_role_assignments"
 COLL_SESSIONS = "c2_sessions"
 COLL_USER_PREFERENCES = "c2_user_preferences"
+# Per-project secrets (Gitea service-account creds, future mirror
+# tokens, …). Keyed by project_id. v1 stores plaintext ; Q-100-020
+# tracks the prod upgrade to a KMS / vault.
+COLL_PROJECT_SECRETS = "c2_project_secrets"
 
 
 class AuthRepository:
@@ -66,7 +70,7 @@ class AuthRepository:
     def _ensure_collections_sync(self) -> None:
         for name in (COLL_USERS, COLL_TENANTS, COLL_PROJECTS,
                      COLL_ROLE_ASSIGNMENTS, COLL_SESSIONS,
-                     COLL_USER_PREFERENCES):
+                     COLL_USER_PREFERENCES, COLL_PROJECT_SECRETS):
             if not self._db.has_collection(name):
                 self._db.create_collection(name)
 
@@ -308,20 +312,25 @@ class AuthRepository:
         created_at: datetime,
         created_by: str,
         profile: str,
+        git_repo_url: str | None,
     ) -> None:
         # `system_prompt` is intentionally omitted on insert — the absence
         # of the field is the unambiguous signal that no per-project
         # override has been set yet. PATCH /api/v1/projects/{pid} adds it.
-        self._db.collection(COLL_PROJECTS).insert(
-            {
-                "_key": project_id,
-                "tenant_id": tenant_id,
-                "name": name,
-                "profile": profile,
-                "created_at": created_at.isoformat(),
-                "created_by": created_by,
-            }
-        )
+        # `git_repo_url` (R-200-142) is set by the Gitea-provisioning
+        # flow ; legacy creations (pre-Gitea) pass None and the field
+        # is absent from the doc until a later provisioning pass.
+        doc: dict[str, Any] = {
+            "_key": project_id,
+            "tenant_id": tenant_id,
+            "name": name,
+            "profile": profile,
+            "created_at": created_at.isoformat(),
+            "created_by": created_by,
+        }
+        if git_repo_url:
+            doc["git_repo_url"] = git_repo_url
+        self._db.collection(COLL_PROJECTS).insert(doc)
 
     async def insert_project(
         self,
@@ -331,10 +340,12 @@ class AuthRepository:
         created_at: datetime,
         created_by: str,
         profile: str = "code",
+        git_repo_url: str | None = None,
     ) -> None:
         await asyncio.to_thread(
             self._insert_project_sync,
             project_id, tenant_id, name, created_at, created_by, profile,
+            git_repo_url,
         )
 
     def _update_project_sync(self, project_id: str, patch: dict[str, Any]) -> None:
@@ -440,3 +451,43 @@ class AuthRepository:
         return await asyncio.to_thread(
             self._upsert_user_preferences_sync, user_id, patch,
         )
+
+    # ---- Project secrets (Gitea creds, future mirror tokens) ---------------
+
+    def _upsert_project_secret_sync(
+        self, project_id: str, payload: dict[str, Any],
+    ) -> None:
+        coll = self._db.collection(COLL_PROJECT_SECRETS)
+        doc = {"_key": project_id, **payload}
+        if coll.has(project_id):
+            coll.replace(doc)
+        else:
+            coll.insert(doc)
+
+    async def upsert_project_secret(
+        self, project_id: str, payload: dict[str, Any],
+    ) -> None:
+        await asyncio.to_thread(
+            self._upsert_project_secret_sync, project_id, payload,
+        )
+
+    def _get_project_secret_sync(self, project_id: str) -> dict[str, Any] | None:
+        doc: dict[str, Any] | None = self._db.collection(  # type: ignore[assignment]
+            COLL_PROJECT_SECRETS,
+        ).get(project_id)
+        return doc
+
+    async def get_project_secret(
+        self, project_id: str,
+    ) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._get_project_secret_sync, project_id)
+
+    def _delete_project_secret_sync(self, project_id: str) -> bool:
+        coll = self._db.collection(COLL_PROJECT_SECRETS)
+        if not coll.has(project_id):
+            return False
+        coll.delete(project_id)
+        return True
+
+    async def delete_project_secret(self, project_id: str) -> bool:
+        return await asyncio.to_thread(self._delete_project_secret_sync, project_id)

@@ -71,3 +71,27 @@ class OrchestratorConfig(BaseSettings):
     # in-process dispatcher without real pods (Q-200-001 / R-200-030
     # reserve the real dispatcher for infra-ready deployments).
     dispatcher_backend: str = Field(default="in-process")
+
+    # ---- Gitea backend (R-200-146..147) ----------------------------------
+    # C4 talks to the bundled Gitea instance with the root admin
+    # credentials so it can push artifacts to ANY project's repo
+    # without a cross-component read of `c2_project_secrets`. The
+    # per-project service account stays usable for operator-side
+    # `git clone` from outside the cluster. Q-100-020 tracks the
+    # prod migration to per-deployment vault tokens.
+    gitea_base_url: str = Field(
+        default="http://gitea:3000",
+        validation_alias="C4_GITEA_BASE_URL",
+        description="Base URL of the bundled Gitea instance. Empty "
+        "disables artifact pushes (artifacts stay in MinIO only).",
+    )
+    gitea_admin_username: str = Field(
+        default="aywizz",
+        validation_alias="GITEA_ROOT_USERNAME",
+        description="Root admin username for the bundled Gitea.",
+    )
+    gitea_admin_password: str = Field(
+        default="change-me-gitea-root-password",
+        validation_alias="GITEA_ROOT_PASSWORD",
+        description="Root admin password for the bundled Gitea.",
+    )

@@ -1,6 +1,6 @@
 # =============================================================================
 # File: routers.yml
-# Version: 4
+# Version: 6
 # Path: infra/c1_gateway/dynamic/routers.yml
 # Description: Traefik HTTP router definitions. v3 adds the UI catch-all
 #              (priority 1) so the Next.js standalone server receives
@@ -92,6 +92,46 @@ http:
         - forward-auth-c2
         - secure-headers
       priority: 50
+
+    # C4 — Project artifacts (transparent MinIO surface). Pinned with
+    # priority 100 so it WINS over `c2-projects` (also under
+    # `/api/v1/projects/*`, priority 50) for the artifacts subpath.
+    # R-200-131. Per-tenant member ; tenant_manager rejected in-app.
+    c4-artifacts:
+      rule: "PathRegexp(`^/api/v1/projects/[^/]+/artifacts(/.*)?$`)"
+      service: c4
+      entryPoints:
+        - web
+      middlewares:
+        - forward-auth-c2
+        - secure-headers
+      priority: 100
+
+    # C4 — Project versioning proxy (R-200-147). Pinned with priority
+    # 100 same as the artifacts surface for the same precedence
+    # reason against c2-projects.
+    c4-git:
+      rule: "PathRegexp(`^/api/v1/projects/[^/]+/git(/.*)?$`)"
+      service: c4
+      entryPoints:
+        - web
+      middlewares:
+        - forward-auth-c2
+        - secure-headers
+      priority: 100
+
+    # C4 — Admin seed endpoint (dev-only). Different path prefix
+    # `/api/v1/admin/projects/*` so it doesn't collide with
+    # c4-artifacts above. Gated to admin/tenant_admin in-app.
+    c4-artifacts-admin:
+      rule: "PathPrefix(`/api/v1/admin/projects`)"
+      service: c4
+      entryPoints:
+        - web
+      middlewares:
+        - forward-auth-c2
+        - secure-headers
+      priority: 100
 
     # -------------------------------------------------------------------------
     # C2 — Admin (tenants lifecycle, tenant_manager only)

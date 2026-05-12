@@ -341,6 +341,89 @@ register_contract(
     )
 )
 
+# C4 — Project artifacts surface (R-200-131..133). Separate from
+# RunPublic — runs of the orchestrator state machine and artifact
+# runs of the file-tree surface are different bookkeeping concepts.
+from ay_platform_core.c4_orchestrator.artifacts_models import (  # noqa: E402
+    ArtifactCommit,
+    ArtifactCommitList,
+    ArtifactNode,
+    ArtifactRunList,
+    ArtifactRunPublic,
+    ArtifactTree,
+)
+
+register_contract(
+    ExposedContract(
+        producer="C4_orchestrator",
+        name="ArtifactRunPublic",
+        schema=ArtifactRunPublic,
+        consumers=("C1_gateway", "ay_platform_ui"),
+        transport="rest",
+        description=(
+            "One row from `GET /api/v1/projects/{pid}/artifacts/runs` "
+            "(R-200-131). Run-level metadata only — file-level "
+            "details land in ArtifactNode."
+        ),
+    )
+)
+register_contract(
+    ExposedContract(
+        producer="C4_orchestrator",
+        name="ArtifactRunList",
+        schema=ArtifactRunList,
+        consumers=("C1_gateway", "ay_platform_ui"),
+        transport="rest",
+        description="Wrapper for the artifact-runs listing response.",
+    )
+)
+register_contract(
+    ExposedContract(
+        producer="C4_orchestrator",
+        name="ArtifactNode",
+        schema=ArtifactNode,
+        consumers=("C1_gateway", "ay_platform_ui"),
+        transport="rest",
+        description=(
+            "One node of the per-run flat tree returned by "
+            "`GET .../artifacts/runs/{rid}/tree` (R-200-131)."
+        ),
+    )
+)
+register_contract(
+    ExposedContract(
+        producer="C4_orchestrator",
+        name="ArtifactTree",
+        schema=ArtifactTree,
+        consumers=("C1_gateway", "ay_platform_ui"),
+        transport="rest",
+        description="Wrapper for the artifact-tree response.",
+    )
+)
+register_contract(
+    ExposedContract(
+        producer="C4_orchestrator",
+        name="ArtifactCommit",
+        schema=ArtifactCommit,
+        consumers=("C1_gateway", "ay_platform_ui"),
+        transport="rest",
+        description=(
+            "One commit returned by "
+            "`GET /api/v1/projects/{pid}/git/commits` (R-200-147)."
+        ),
+    )
+)
+register_contract(
+    ExposedContract(
+        producer="C4_orchestrator",
+        name="ArtifactCommitList",
+        schema=ArtifactCommitList,
+        consumers=("C1_gateway", "ay_platform_ui"),
+        transport="rest",
+        description="Wrapper for the artifact-commits response.",
+    )
+)
+
 # ---------------------------------------------------------------------------
 # C7 Memory Service contracts
 # ---------------------------------------------------------------------------

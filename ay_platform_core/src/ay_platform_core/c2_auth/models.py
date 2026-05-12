@@ -358,7 +358,13 @@ class ProjectPublic(BaseModel):
     `default_project_prompt` (may be empty when both are empty).
     `system_prompt_is_default` is True when no project-level override
     is stored, so the UI can render a "Using default" badge and offer
-    a "Reset to default" affordance only when meaningful."""
+    a "Reset to default" affordance only when meaningful.
+
+    `git_repo_url` is the HTTPS clone URL of the project's Gitea repo
+    (R-200-142). Set when Gitea provisioning succeeded at project
+    creation ; absent (`None`) for projects created before Gitea
+    landed (backwards-compat). Read-only — the UX displays it as a
+    copyable string ; updates happen only via re-provisioning."""
 
     project_id: str
     tenant_id: str
@@ -375,6 +381,12 @@ class ProjectPublic(BaseModel):
         default=True,
         description="True when no per-project override is stored "
         "(`system_prompt` came from the C2 default).",
+    )
+    git_repo_url: str | None = Field(
+        default=None,
+        description="HTTPS clone URL of the project's Gitea repo "
+        "(R-200-142). None on legacy projects created before the "
+        "Gitea integration shipped.",
     )
 
 

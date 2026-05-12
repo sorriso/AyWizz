@@ -1,12 +1,17 @@
 // =============================================================================
 // File: code.ts
-// Version: 1
+// Version: 2
 // Path: ay_platform_ui/lib/profiles/code.ts
 // Description: The `code` production profile — the only one shipped
 //              in v1. Drives the project sidebar : Overview, Sources,
-//              Conversations, Requirements, Validation, Settings.
-//              Future code-domain features (orchestrator runs, code
-//              artefacts, etc.) will be additional sections here.
+//              Conversations, Requirements, Validation, Code source
+//              (artifacts), Settings.
+//
+//              v2 (2026-05-12) : new `artifacts` section labelled
+//              "Code source" for the `code` profile (R-200-131). The
+//              endpoint is profile-agnostic ; the future `docgen`
+//              profile reuses the same section with a different label
+//              ("Documents générés").
 // =============================================================================
 
 import type { ProfileDefinition } from "./types";
@@ -50,6 +55,13 @@ export const CODE_PROFILE: ProfileDefinition = {
       path: "validation",
       iconName: "shield-check",
       description: "Run validation pipelines and inspect their findings.",
+    },
+    {
+      id: "artifacts",
+      label: "Code source",
+      path: "artifacts",
+      iconName: "folder",
+      description: "Browse generated source files run by run.",
     },
     {
       id: "settings",

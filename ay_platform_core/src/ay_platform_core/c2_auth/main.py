@@ -35,6 +35,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -44,6 +45,7 @@ from fastapi import FastAPI
 from ay_platform_core.c2_auth.admin_router import router as admin_router
 from ay_platform_core.c2_auth.config import AuthConfig
 from ay_platform_core.c2_auth.db.repository import AuthRepository
+from ay_platform_core.c2_auth.gitea_client import GiteaClient
 from ay_platform_core.c2_auth.models import (
     RBACGlobalRole,
     RBACProjectRole,
@@ -141,7 +143,11 @@ async def _ensure_local_tenant_manager(
     )
 
 
-async def _ensure_demo_seed(repo: AuthRepository, cfg: AuthConfig) -> None:
+async def _ensure_demo_seed(
+    repo: AuthRepository,
+    cfg: AuthConfig,
+    gitea: GiteaClient | None = None,
+) -> None:
     """Pre-provision a complete manual-test scenario : 1 tenant +
     4 users (super-root / tenant-admin / project-editor /
     project-viewer) + 1 project + 2 project grants. Idempotent ;
@@ -228,6 +234,41 @@ async def _ensure_demo_seed(repo: AuthRepository, cfg: AuthConfig) -> None:
     # in v1 (C4 orchestrator). Future profiles (data / doc / etc.) will
     # be selectable via a new env var or a per-tenant default.
     if await repo.get_project(project_id) is None:
+        # Provision Gitea backing repo BEFORE inserting the Arango
+        # row — mirrors the regular `AuthService.create_project`
+        # invariant (R-200-141) so the demo project has the same
+        # shape as user-created projects.
+        git_repo_url: str | None = None
+        if gitea is not None:
+            svc_user = f"svc-{tenant_id}-{project_id}"
+            svc_pwd = uuid.uuid4().hex
+            try:
+                await gitea.create_user(
+                    username=svc_user,
+                    password=svc_pwd,
+                    email=f"{svc_user}@aywizz.local",
+                )
+                repo_obj = await gitea.create_repo(
+                    owner=svc_user,
+                    name=project_id,
+                    description=f"Backing repo for demo project {project_id!r}.",
+                )
+                await repo.upsert_project_secret(
+                    project_id,
+                    {
+                        "gitea_username": svc_user,
+                        "gitea_password": svc_pwd,
+                        "gitea_repo_full_name": repo_obj.full_name,
+                    },
+                )
+                git_repo_url = repo_obj.clone_url
+                _log.info("demo seed: gitea repo %s ready", repo_obj.full_name)
+            except Exception as exc:
+                _log.warning(
+                    "demo seed: gitea provisioning failed (%s) — "
+                    "project created without a backing repo",
+                    exc,
+                )
         await repo.insert_project(
             project_id,
             tenant_id,
@@ -235,11 +276,55 @@ async def _ensure_demo_seed(repo: AuthRepository, cfg: AuthConfig) -> None:
             now,
             "demo-tenant-admin",
             profile="code",
+            git_repo_url=git_repo_url,
         )
         _log.info(
             "demo seed: created project %r in tenant %r (profile=code)",
             project_id, tenant_id,
         )
+    elif gitea is not None:
+        # Backfill : the project pre-dates the Gitea pass (was created
+        # by a previous C2 image without provisioning). Catch up so
+        # the demo project has the same shape as fresh user-created
+        # projects. Idempotent : if `git_repo_url` is already set, no
+        # work happens.
+        existing = await repo.get_project(project_id)
+        if existing is not None and not existing.get("git_repo_url"):
+            svc_user = f"svc-{tenant_id}-{project_id}"
+            svc_pwd = uuid.uuid4().hex
+            try:
+                await gitea.create_user(
+                    username=svc_user,
+                    password=svc_pwd,
+                    email=f"{svc_user}@aywizz.local",
+                )
+                repo_obj = await gitea.create_repo(
+                    owner=svc_user,
+                    name=project_id,
+                    description=f"Backing repo for demo project {project_id!r}.",
+                )
+                await repo.upsert_project_secret(
+                    project_id,
+                    {
+                        "gitea_username": svc_user,
+                        "gitea_password": svc_pwd,
+                        "gitea_repo_full_name": repo_obj.full_name,
+                    },
+                )
+                # Patch the project row with the freshly-known URL.
+                await repo.update_project(
+                    project_id, {"git_repo_url": repo_obj.clone_url},
+                )
+                _log.info(
+                    "demo seed: backfilled gitea repo %s for existing project %r",
+                    repo_obj.full_name, project_id,
+                )
+            except Exception as exc:
+                _log.warning(
+                    "demo seed: gitea backfill failed (%s) — project keeps "
+                    "no git_repo_url",
+                    exc,
+                )
 
     # 4. Project grants — `grant_project_role` uses `overwrite=True`
     # so re-running is safe (the role assignment doc is keyed
@@ -266,14 +351,28 @@ def create_app(config: AuthConfig | None = None) -> FastAPI:
         cfg.arango_username,
         cfg.arango_password,
     )
+    # Gitea client : present when `C2_GITEA_BASE_URL` is non-empty.
+    # Skipping it for fixture-style tests that don't have a Gitea
+    # container is supported (the service falls back to legacy
+    # "no git repo" project creation — R-200-142 says `git_repo_url`
+    # MAY be None for backwards compat).
+    gitea: GiteaClient | None = None
+    if cfg.gitea_base_url:
+        gitea = GiteaClient(
+            base_url=cfg.gitea_base_url,
+            admin_username=cfg.gitea_admin_username,
+            admin_password=cfg.gitea_admin_password,
+        )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await repo.ensure_collections()
         await _ensure_local_admin(repo, cfg)
         await _ensure_local_tenant_manager(repo, cfg)
-        await _ensure_demo_seed(repo, cfg)
+        await _ensure_demo_seed(repo, cfg, gitea=gitea)
         yield
+        if gitea is not None:
+            await gitea.aclose()
 
     app = FastAPI(title="C2 Auth Service", lifespan=lifespan)
     # AuthGuardMiddleware (innermost, runs after TraceContext) — C2's
@@ -298,7 +397,7 @@ def create_app(config: AuthConfig | None = None) -> FastAPI:
     app.include_router(projects_router, prefix="/api/v1/projects")
     app.include_router(preferences_router, prefix="/api/v1/users/me/preferences")
     app.include_router(ux_router, prefix="/ux")
-    service = AuthService(cfg, repo)
+    service = AuthService(cfg, repo, gitea=gitea)
     app.dependency_overrides[c2_get_service] = lambda: service
 
     @app.get("/health")

@@ -57,6 +57,14 @@ class TestContractRegistration:
         "RunPublic",
         "AgentCompletion",
         "DomainDescriptor",
+        # Project artifacts surface — R-200-131..133
+        "ArtifactRunPublic",
+        "ArtifactRunList",
+        "ArtifactNode",
+        "ArtifactTree",
+        # Project versioning proxy — R-200-147
+        "ArtifactCommit",
+        "ArtifactCommitList",
     }
 
     def test_all_expected_contracts_registered(self) -> None:

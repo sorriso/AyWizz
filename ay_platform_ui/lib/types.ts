@@ -118,6 +118,9 @@ export interface Project {
   created_by: string;
   system_prompt: string;
   system_prompt_is_default: boolean;
+  /** HTTPS clone URL of the project's Gitea repo (R-200-142).
+   *  Null on legacy projects created before the Gitea pass landed. */
+  git_repo_url?: string | null;
 }
 
 /** Response body of `GET /api/v1/projects`. */
@@ -344,6 +347,60 @@ export interface ValidationPlugin {
   domain: string;
   version: string;
   description: string;
+}
+
+// ===========================================================================
+// C4 — Project artifacts surface (R-200-131)
+// ===========================================================================
+
+export type ArtifactRunStatus = "pending" | "running" | "completed" | "failed";
+
+/** One row from `GET /api/v1/projects/{pid}/artifacts/runs`. */
+export interface ArtifactRun {
+  run_id: string;
+  project_id: string;
+  tenant_id: string;
+  started_at: string;
+  completed_at: string | null;
+  status: ArtifactRunStatus;
+  file_count: number;
+  total_bytes: number;
+  label: string | null;
+}
+
+export interface ArtifactRunList {
+  runs: ArtifactRun[];
+}
+
+/** One entry of the per-run flat tree (`kind` = file always in v1 ;
+ *  the UX synthesises directory rows from path segments). */
+export interface ArtifactNode {
+  path: string;
+  kind: "file" | "dir";
+  size_bytes: number;
+  mime_type: string | null;
+}
+
+export interface ArtifactTree {
+  run_id: string;
+  nodes: ArtifactNode[];
+}
+
+/** One commit returned by `GET /api/v1/projects/{pid}/git/commits`
+ *  (R-200-147). Transparent backend : the UX renders these without
+ *  knowing they came from Gitea ; the storage backend can be swapped
+ *  later without an UX change. */
+export interface ArtifactCommit {
+  sha: string;
+  message: string;
+  author_name: string;
+  author_email: string;
+  committed_at: string;
+}
+
+export interface ArtifactCommitList {
+  commits: ArtifactCommit[];
+  page: number;
 }
 
 /** MIME types accepted by C7's upload endpoint (R-400-024). Anything

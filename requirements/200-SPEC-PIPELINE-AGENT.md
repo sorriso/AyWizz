@@ -503,6 +503,184 @@ Every phase transition, agent completion, gate evaluation, and sub-agent dispatc
 
 ---
 
+### 5.13 Project artifacts surface
+
+#### R-200-130
+
+```yaml
+id: R-200-130
+version: 1
+status: draft
+category: functional
+```
+
+The orchestrator SHALL persist every artifact produced by a pipeline run under a deterministic MinIO path following the convention `orchestrator/c4-artifacts/{tenant_id}/{project_id}/{run_id}/{relative_path}`. `relative_path` SHALL be a POSIX-style forward-slash path relative to the run root, with no leading slash, no `..` segments, and no Windows-style backslashes.
+
+**Rationale.** A stable, tenant- and project-scoped path lets the UX browse run outputs without knowing run internals, and lets the future Gitea mirror (R-200-140) replay each run as a commit using the same relative tree.
+
+#### R-200-131
+
+```yaml
+id: R-200-131
+version: 1
+status: draft
+category: functional
+```
+
+The orchestrator SHALL expose a read-only artifacts REST surface mounted under `/api/v1/projects/{project_id}/artifacts/*` :
+
+```
+GET /api/v1/projects/{pid}/artifacts/runs                  → list runs (id, started_at, completed_at, status, file_count, total_bytes)
+GET /api/v1/projects/{pid}/artifacts/runs/{rid}/tree       → flat list of `ArtifactNode` (path, kind=file|dir, size_bytes, mime_type)
+GET /api/v1/projects/{pid}/artifacts/runs/{rid}/blob?path  → file content (Content-Type detected, Content-Disposition: inline)
+```
+
+Authentication SHALL follow the platform forward-auth pattern (X-User-Id / X-Tenant-Id / X-User-Roles). RBAC SHALL accept any tenant member for reads ; `tenant_manager` SHALL be REJECTED (per E-100-002 v2, content-blind). The blob endpoint SHALL accept an optional `download=1` query parameter that flips the `Content-Disposition` to `attachment`.
+
+**Rationale.** Three minimal endpoints cover both the in-app preview path (tree + inline blob) and the download path, without exposing MinIO directly to the operator. Profile-agnostic : the same surface serves `codegen` (source code) and `docgen` (rendered documents) projects.
+
+#### R-200-132
+
+```yaml
+id: R-200-132
+version: 1
+status: draft
+category: functional
+```
+
+The orchestrator SHALL maintain a per-run metadata document in ArangoDB collection `c4_artifact_runs`, keyed by `run_id`, containing at minimum : `project_id`, `tenant_id`, `started_at`, `completed_at`, `status` (`pending` | `running` | `completed` | `failed`), `file_count`, `total_bytes`. The `tree` and `blob` endpoints SHALL refuse a request when the run's `project_id` does not match the X-Tenant-Id-resolved project (404, no detail leak).
+
+**Rationale.** Listing all blobs under a MinIO prefix is too slow for the UX (≥ hundreds of ms even on tens of files) ; the Arango index gives sub-10-ms list queries and isolates run lifecycle bookkeeping from blob storage.
+
+#### R-200-133
+
+```yaml
+id: R-200-133
+version: 1
+status: draft
+category: non-functional
+```
+
+The artifacts surface SHALL be transparent : the UX SHALL NOT expose any direct link to the MinIO console, the bucket name, or the storage backend identity. Every artifact access SHALL transit through the C4 REST surface so storage migration (e.g. to S3, GCS, the future Gitea pass) can happen without UX changes.
+
+**Rationale.** Operators interact with artifacts through "Code source" / "Documents générés" sections — they SHALL never see "MinIO", "bucket", or any backend implementation detail. This decouples storage migration from UX delivery and protects against accidental credential leak.
+
+---
+
+### 5.14 Project versioning (Gitea integration)
+
+#### R-200-140
+
+```yaml
+id: R-200-140
+version: 1
+status: draft
+category: functional
+```
+
+The platform SHALL bundle a Gitea instance as the canonical Git backend for every project. The dev / system / production overlays SHALL ship a `gitea` container alongside the rest of the stack. Gitea SHALL NOT be exposed directly to operators — every interaction (commit list, file diff, mirror config) SHALL transit through platform-owned endpoints so the storage backend stays interchangeable (cf. R-200-133 transparency invariant).
+
+**Rationale.** Bundling Gitea makes the platform self-sufficient — no external Git account required to onboard a new tenant. Hiding it behind our endpoints lets us swap Gitea for another Git backend (or migrate hosting) without UX rebuilds.
+
+#### R-200-141
+
+```yaml
+id: R-200-141
+version: 1
+status: draft
+category: functional
+```
+
+For each project, the platform SHALL provision in Gitea :
+  - **One dedicated service-account user** named `svc-{tenant_id}-{project_id}`, with a non-revealing password and an OAuth2 access token scoped to that user.
+  - **One private repository** owned by that service account, named `{tenant_id}/{project_id}` (path : `{owner}/{repo_name}`).
+
+Provisioning SHALL happen synchronously during `POST /api/v1/projects` (C2). Failure SHALL roll back the project creation (no orphan project without a repo). The service-account credentials SHALL be stored in a NEW Arango collection `c2_project_secrets` keyed by `project_id`.
+
+**Rationale.** One service account per project gives least-privilege isolation between tenants AND between projects within a tenant. Synchronous provisioning keeps the platform invariant simple : every project has a repo.
+
+#### R-200-142
+
+```yaml
+id: R-200-142
+version: 1
+status: draft
+category: functional
+```
+
+`ProjectPublic` SHALL expose a read-only field `git_repo_url` containing the HTTPS clone URL of the Gitea repository (e.g. `http://gitea:3000/{tenant}/{project}.git` in dev, the K8s Service URL in prod). The field SHALL be present once provisioning succeeded and absent (`null`) for projects created before this feature shipped (backwards compat).
+
+**Rationale.** Operators may want to clone the repo from their own machine for offline review. Exposing the URL through `ProjectPublic` (not via a separate endpoint) keeps the UX simple — the project settings page just displays it as a copyable string.
+
+#### R-200-143
+
+```yaml
+id: R-200-143
+version: 1
+status: draft
+category: functional
+```
+
+On each artifact run completion (C4 pipeline OR the dev seeder), the platform SHALL push every file under the run's MinIO prefix to the project's Gitea repo as a single commit. Commit message SHALL follow the pattern `"run {run_id} — {label or 'untitled'}"`. The push SHALL use the per-project service-account credentials persisted in `c2_project_secrets`. The push is best-effort : a failure SHALL log a warning but SHALL NOT block the artifact persistence to MinIO (MinIO remains the immediate source of truth ; Gitea is the versioned mirror).
+
+**Rationale.** MinIO stays the hot-path (microsecond reads for the UX tree). Gitea adds versioning + cloneability without slowing the pipeline. Decoupling avoids a Gitea outage breaking artifact production.
+
+#### R-200-144
+
+```yaml
+id: R-200-144
+version: 1
+status: draft
+category: functional
+```
+
+A project MAY declare an optional external Git mirror via two NEW fields on the project record : `git_mirror_url` (HTTPS clone URL of the remote, e.g. a GitHub repo) and `git_mirror_token` (deploy token with push scope). When set, the platform SHALL push every Gitea commit to the mirror as a best-effort follow-up (failure logged, no retry on the request hot-path ; out-of-band retry is allowed). The mirror SHALL be considered a downstream copy — Gitea remains the source of truth.
+
+**Rationale.** Tenants who already host code in GitHub/GitLab can keep their workflow while benefiting from the platform's automated push. The bundled Gitea remains in place (R-200-140) so no setup is required for new tenants.
+
+#### R-200-145
+
+```yaml
+id: R-200-145
+version: 1
+status: draft
+category: non-functional
+```
+
+The Gitea integration SHALL remain transparent to operators : the UX SHALL NOT link to Gitea's own web UI. Commit history, file diff and any other Git-level view SHALL be served through platform endpoints proxying the Gitea API. The `git_repo_url` from R-200-142 is an exception — it is a Git clone URL the operator may use from their own machine via `git clone`, which is necessary by definition (the protocol).
+
+**Rationale.** Same reasoning as R-200-133 : decouples backend migration from UX delivery, and keeps the operator inside one consistent UI. Q-100-020 tracks the credential-storage threat model for the per-project service-account tokens.
+
+#### R-200-146
+
+```yaml
+id: R-200-146
+version: 1
+status: draft
+category: functional
+```
+
+On `ArtifactRunStatus` flipping to `completed` (C4 pipeline real run OR dev seeder admin endpoint), the platform SHALL push every file under the run's MinIO prefix to the project's Gitea repo via the Gitea Contents API. Each file SHALL produce its own commit message of the shape `"run {run_id} — {relative_path}"`. The push uses the **Gitea root admin credentials** (NOT the per-project service account) so the operation does not depend on cross-component read of `c2_project_secrets` — the per-project service account remains usable for operator-side `git clone` from outside the cluster.
+
+The push SHALL be best-effort : a Gitea failure SHALL log a WARNING (with run_id + path) but SHALL NOT roll back the MinIO write (MinIO remains the source of truth ; Gitea is the versioned mirror).
+
+**Rationale.** Using the root admin keeps C4 free of cross-component database coupling. Per-file commits avoid the complexity of git-tree plumbing while still giving the operator a granular history. Best-effort ensures a Gitea outage never breaks artifact production.
+
+#### R-200-147
+
+```yaml
+id: R-200-147
+version: 1
+status: draft
+category: functional
+```
+
+The platform SHALL expose `GET /api/v1/projects/{project_id}/git/commits` as a read-only proxy over the project's Gitea repo, returning a list of `ArtifactCommit` (`sha`, `message`, `author_name`, `author_email`, `committed_at`). Pagination is page-based (`?page=N`, default 1, server-side cap at 50 per page). The endpoint SHALL be tenant-scoped (X-Tenant-Id guard ; mismatched tenant → 404). RBAC follows the artifacts surface : any tenant member ; `tenant_manager` rejected per E-100-002 v2.
+
+**Rationale.** A simple paginated list covers the v1 UX need (browse commits in chronological order). Diff inspection and per-commit file content are deferred to future passes — not required for the initial "Versions" section UX.
+
+---
+
 ## 6. Interfaces & Contracts
 
 ### 6.1 REST API (overview)

@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import uuid
 from datetime import UTC, datetime
@@ -32,6 +33,7 @@ from fastapi import HTTPException, status
 
 from ay_platform_core.c2_auth.config import AuthConfig
 from ay_platform_core.c2_auth.db.repository import AuthRepository
+from ay_platform_core.c2_auth.gitea_client import GiteaClient, GiteaError
 from ay_platform_core.c2_auth.models import (
     AuthConfigResponse,
     BrandConfig,
@@ -79,6 +81,7 @@ class AuthService:
         self,
         config: AuthConfig,
         repo: AuthRepository | None = None,
+        gitea: GiteaClient | None = None,
     ) -> None:
         # R-100-032: fail fast if none mode is used in prod/staging.
         if (
@@ -92,6 +95,7 @@ class AuthService:
             )
         self._config = config
         self._repo = repo
+        self._gitea = gitea
         self._mode: AuthMode = self._build_mode()
 
     # ---- Internal helpers ---------------------------------------------------
@@ -397,7 +401,8 @@ class AuthService:
         """Render an Arango project document into a `ProjectPublic`
         response, resolving the `system_prompt` field against the
         C2-wide default. Absence of the key in the stored doc → use
-        default + flag `is_default=True`."""
+        default + flag `is_default=True`. `git_repo_url` propagates
+        as-is (None when Gitea provisioning hadn't run yet)."""
         override = doc.get("system_prompt")
         if override is None:
             effective = self._config.default_project_prompt
@@ -414,6 +419,7 @@ class AuthService:
             created_by=doc["created_by"],
             system_prompt=effective,
             system_prompt_is_default=is_default,
+            git_repo_url=doc.get("git_repo_url"),
         )
 
     async def create_project(
@@ -431,14 +437,121 @@ class AuthService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"project {payload.project_id!r} already exists",
             )
+
+        # Provision the Gitea backing repo BEFORE inserting the Arango
+        # project record (R-200-141). If provisioning fails, the
+        # Arango row never lands → no orphan project. On success the
+        # repo URL is persisted with the project so the UX can surface
+        # it without a second round-trip.
+        git_repo_url: str | None = None
+        if self._gitea is not None:
+            git_repo_url = await self._provision_gitea_for_project(
+                project_id=payload.project_id,
+                tenant_id=tenant_id,
+                project_name=payload.name,
+            )
+
         now = datetime.now(UTC)
-        await repo.insert_project(
-            payload.project_id, tenant_id, payload.name, now, actor_id,
-            profile=payload.profile,
-        )
+        try:
+            await repo.insert_project(
+                payload.project_id, tenant_id, payload.name, now, actor_id,
+                profile=payload.profile,
+                git_repo_url=git_repo_url,
+            )
+        except Exception:
+            # Best-effort rollback : if the Arango insert fails after
+            # Gitea succeeded, tear down the Gitea repo so the next
+            # retry doesn't 409 on the user-account creation.
+            if self._gitea is not None:
+                await self._rollback_gitea_for_project(
+                    project_id=payload.project_id, tenant_id=tenant_id,
+                )
+            raise
         doc = await repo.get_project(payload.project_id)
         assert doc is not None  # just inserted
         return self._project_doc_to_public(doc)
+
+    # ---- Gitea provisioning (R-200-141..142) -------------------------------
+
+    @staticmethod
+    def _gitea_service_account(tenant_id: str, project_id: str) -> str:
+        """Compute the Gitea service-account username from
+        (tenant, project). Gitea allows letters, digits, dot, dash,
+        underscore — our tenant_id / project_id already conform to a
+        compatible subset (validated at C2 model layer). Format :
+        `svc-{tenant}-{project}` keeps the user list human-scannable."""
+        return f"svc-{tenant_id}-{project_id}"
+
+    async def _provision_gitea_for_project(
+        self, *, project_id: str, tenant_id: str, project_name: str,
+    ) -> str | None:
+        """Create the service-account user + private repo for one
+        project. Persist the credentials in `c2_project_secrets`.
+        Returns the HTTPS clone URL on success ; on Gitea failure we
+        raise an HTTPException so the FastAPI handler returns 502 to
+        the caller (the project creation aborts). The Gitea outage
+        scenario is preferable to a half-provisioned project."""
+        assert self._gitea is not None  # narrowed in caller
+        repo = self._require_repo()
+        username = self._gitea_service_account(tenant_id, project_id)
+        # Random password for the service-account. v1 keeps a single
+        # password ; Pass 2.2 will derive a per-project OAuth token
+        # from this credential and rotate it. uuid4 gives 122 bits of
+        # entropy — comfortably above the brute-force horizon for the
+        # internal Gitea instance.
+        password = uuid.uuid4().hex
+        email = f"{username}@aywizz.local"
+        try:
+            await self._gitea.create_user(
+                username=username, password=password, email=email,
+            )
+            gitea_repo = await self._gitea.create_repo(
+                owner=username,
+                name=project_id,
+                description=(
+                    f"Backing repo for AyWizz project {project_name!r} "
+                    f"(tenant {tenant_id!r})."
+                ),
+                private=True,
+            )
+        except GiteaError as exc:
+            # Failed mid-way ; tear down anything that did get
+            # created so a retry starts from a clean slate.
+            await self._rollback_gitea_for_project(
+                project_id=project_id, tenant_id=tenant_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"git backend provisioning failed: {exc}",
+            ) from exc
+        # Persist the credential. v1 stores plaintext ; Q-100-020
+        # tracks the prod migration to a vault.
+        await repo.upsert_project_secret(
+            project_id,
+            {
+                "gitea_username": username,
+                "gitea_password": password,
+                "gitea_repo_full_name": gitea_repo.full_name,
+            },
+        )
+        return gitea_repo.clone_url
+
+    async def _rollback_gitea_for_project(
+        self, *, project_id: str, tenant_id: str,
+    ) -> None:
+        """Best-effort cleanup after a half-completed provisioning.
+        Deletes the user (with `purge=true` so any repo created under
+        it goes with it). Never raises — any error here is logged via
+        the GiteaError chain and the original failure propagates."""
+        if self._gitea is None:
+            return
+        username = self._gitea_service_account(tenant_id, project_id)
+        # Swallow GiteaError — the original creation error is what we
+        # want to surface to the caller, not a cleanup secondary.
+        with contextlib.suppress(GiteaError):
+            await self._gitea.delete_user(username)
+        repo = self._require_repo()
+        await repo.delete_project_secret(project_id)
 
     async def get_project(self, project_id: str, tenant_id: str) -> ProjectPublic:
         repo = self._require_repo()

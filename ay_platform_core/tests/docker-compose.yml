@@ -326,6 +326,101 @@ services:
           memory: 128M
 
   # ---------------------------------------------------------------------------
+  # Gitea — bundled Git backend used by the platform-versioning surface
+  # (R-200-140). One service-account user + one private repo per project
+  # are provisioned by C2 on `POST /api/v1/projects`. Never exposed
+  # directly to operators (R-200-145) — every interaction transits
+  # through C2 endpoints proxying the Gitea API.
+  # ---------------------------------------------------------------------------
+
+  gitea:
+    image: gitea/gitea:1.22.6
+    container_name: ay-gitea
+    environment:
+      USER_UID: "1000"
+      USER_GID: "1000"
+      # Install mode `none` skips Gitea's own first-run install wizard ;
+      # we provision via API from `gitea_init`. Database stays SQLite
+      # for v1 — moved to Arango/Postgres only if scale demands it.
+      GITEA__database__DB_TYPE: sqlite3
+      GITEA__server__ROOT_URL: http://gitea:3000/
+      GITEA__server__DISABLE_SSH: "true"
+      # Public sign-up stays ENABLED so the init container can create
+      # the first admin via `POST /user/sign_up` (Gitea doesn't provide
+      # an alternative bootstrap path without docker-exec'ing into
+      # the container). Gitea is never exposed outside the platform
+      # network so this isn't an externally-reachable vector.
+      # Production overlays SHALL flip both flags to `true` once the
+      # admin token is provisioned via vault (Q-100-020).
+      GITEA__service__DISABLE_REGISTRATION: "false"
+      GITEA__security__INSTALL_LOCK: "true"
+      # Required when INSTALL_LOCK=true so Gitea uses a known admin.
+      GITEA__security__SECRET_KEY: gitea-dev-secret-change-me-in-prod
+    volumes:
+      - gitea_data:/data
+    networks:
+      - platform
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/api/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.05"
+          memory: 64M
+
+  gitea_init:
+    image: alpine:3.20
+    container_name: ay-gitea-init
+    depends_on:
+      gitea:
+        condition: service_healthy
+    env_file:
+      - .env.test
+    # Bootstrap the root admin user. After this, C2 reaches Gitea via
+    # HTTP Basic auth using GITEA_ROOT_USERNAME + GITEA_ROOT_PASSWORD
+    # (R-200-141). Production overlays SHALL switch to per-deployment
+    # tokens stored in a vault — Q-100-020 tracks that.
+    entrypoint:
+      - "/bin/sh"
+      - "-c"
+      - |
+        set -e
+        apk add --no-cache curl >/dev/null
+        ROOT_USER="$$GITEA_ROOT_USERNAME"
+        ROOT_PASS="$$GITEA_ROOT_PASSWORD"
+        echo "Ensuring root user $$ROOT_USER exists"
+        if curl -sf -u "$$ROOT_USER:$$ROOT_PASS" http://gitea:3000/api/v1/version > /dev/null; then
+          echo "Root user already present"
+        else
+          # First sign-up is allowed even with DISABLE_REGISTRATION=true
+          # because Gitea has a "create first admin" carve-out when no
+          # user exists yet. After this, the user is implicitly admin.
+          curl -fsS -X POST http://gitea:3000/user/sign_up \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "user_name=$$ROOT_USER" \
+            --data-urlencode "email=$$ROOT_USER@local" \
+            --data-urlencode "password=$$ROOT_PASS" \
+            --data-urlencode "retype=$$ROOT_PASS" \
+            > /dev/null || true
+          # Re-check : the first signed-up user is implicitly admin.
+          curl -sf -u "$$ROOT_USER:$$ROOT_PASS" http://gitea:3000/api/v1/version > /dev/null
+          echo "Root user created"
+        fi
+        echo "Gitea bootstrap done."
+    networks:
+      - platform
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
   # Ollama — real embedding provider used by C7. Chat completions stay on
   # the mock LLM below; only embeddings go through Ollama so C7's vectors
   # are semantically meaningful end-to-end without spending on hosted APIs.
@@ -454,6 +549,11 @@ services:
       arangodb:
         condition: service_healthy
       arangodb_init:
+        condition: service_completed_successfully
+      # C2 provisions per-project Gitea repos on `POST /api/v1/projects`
+      # (R-200-141) ; wait for the root admin to be bootstrapped before
+      # accepting traffic so the very first project creation succeeds.
+      gitea_init:
         condition: service_completed_successfully
 
   c3:
@@ -709,3 +809,4 @@ volumes:
   minio_data:
   c12_data:
   ollama_data:
+  gitea_data:
