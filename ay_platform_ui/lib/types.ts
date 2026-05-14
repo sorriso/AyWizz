@@ -1,6 +1,6 @@
 // =============================================================================
 // File: types.ts
-// Version: 7
+// Version: 9
 // Path: ay_platform_ui/lib/types.ts
 // Description: Wire-format type definitions for the platform's public
 //              bootstrap surface — `/runtime-config.json` (static, served
@@ -401,6 +401,62 @@ export interface ArtifactCommit {
 export interface ArtifactCommitList {
   commits: ArtifactCommit[];
   page: number;
+}
+
+// ===========================================================================
+// C4 — Orchestrator runs (pipeline trigger + plan approval)
+// ===========================================================================
+
+/** Five-phase pipeline. Mirrors `c4_orchestrator.models.Phase` verbatim. */
+export type OrchestratorPhase = "brainstorm" | "spec" | "plan" | "generate" | "review";
+
+export type OrchestratorRunStatus = "running" | "completed" | "blocked";
+
+/** One non-blocking concern surfaced by an agent — surfaced in the
+ *  pipeline panel as a coloured badge. */
+export interface OrchestratorConcern {
+  severity: string;
+  message: string;
+}
+
+/** Run state exposed by `GET /api/v1/orchestrator/runs/{run_id}` and the
+ *  POST/feedback responses. snake_case mirrors the Python wire format. */
+export interface OrchestratorRun {
+  run_id: string;
+  project_id: string;
+  session_id: string;
+  tenant_id: string;
+  user_id: string;
+  domain: string;
+  current_phase: OrchestratorPhase;
+  status: OrchestratorRunStatus;
+  started_at: string;
+  completed_at: string | null;
+  concerns: OrchestratorConcern[];
+  minio_root: string;
+  /** Operator-readable explanation when `status === "blocked"`. Set by
+   *  C4 (`OrchestratorService._block_run`) and surfaced in the
+   *  Pipeline page so the operator sees why automatic retries gave up.
+   *  Null for running/completed runs. */
+  block_reason?: string | null;
+}
+
+/** Body of `POST /api/v1/orchestrator/runs`. `domain` defaults to
+ *  `code` ; the UX pipeline panel uses the project's profile id. */
+export interface OrchestratorRunCreate {
+  project_id: string;
+  session_id: string;
+  initial_prompt: string;
+  domain?: string;
+}
+
+/** Body of `POST /api/v1/orchestrator/runs/{run_id}/feedback`. The
+ *  pipeline panel sends `{phase: "plan", approved: true}` to clear
+ *  Gate A and resume into generate. */
+export interface OrchestratorRunFeedback {
+  phase: OrchestratorPhase;
+  approved?: boolean | null;
+  user_feedback?: string | null;
 }
 
 /** MIME types accepted by C7's upload endpoint (R-400-024). Anything

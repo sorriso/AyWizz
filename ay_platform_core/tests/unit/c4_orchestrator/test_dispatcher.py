@@ -1,10 +1,17 @@
 # =============================================================================
 # File: test_dispatcher.py
-# Version: 1
+# Version: 3
 # Path: ay_platform_core/tests/unit/c4_orchestrator/test_dispatcher.py
 # Description: Unit tests for the in-process agent dispatcher. Mocks the
 #              C8 gateway client (AsyncMock) to exercise response parsing
 #              and the error-to-BLOCKED collapse paths.
+#
+#              v2 (2026-05-13) : adds `TestTolerantEnvelopeExtraction`
+#              covering the dispatcher's v3 tolerant parser (markdown
+#              fences, surrounding prose, balanced-brace scan). These
+#              cases mirror real qwen2.5:3b outputs observed during
+#              the 2026-05-13 demo work — a strict json.loads would
+#              BLOCK every one of them, which the v2 dispatcher did.
 # =============================================================================
 
 from __future__ import annotations
@@ -175,3 +182,204 @@ class TestDispatcherErrorPaths:
         assert completion.status == EscalationStatus.BLOCKED
         assert completion.blocker is not None
         assert "parseable JSON" in completion.blocker.reason
+
+
+def _raw_response(content_text: str) -> Any:
+    """Build a duck-typed ChatCompletionResponse with RAW text content
+    (no `json.dumps` wrapper). Used to exercise the tolerant parser
+    against strings that include markdown fences or prose."""
+
+    class _Msg:
+        def __init__(self, c: str) -> None:
+            self.content = c
+
+    class _Choice:
+        def __init__(self, c: str) -> None:
+            self.message = _Msg(c)
+
+    class _Resp:
+        def __init__(self, c: str) -> None:
+            self.id = "call-raw"
+            self.choices = [_Choice(c)]
+
+    return _Resp(content_text)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestTolerantEnvelopeExtraction:
+    """Verify the v3 dispatcher tolerates the typical output shapes
+    of small open models (qwen2.5:3b et al.) instead of blocking the
+    pipeline on the first phase."""
+
+    async def test_markdown_fence_with_json_tag(self) -> None:
+        client = AsyncMock()
+        client.chat_completion.return_value = _raw_response(
+            'Sure, here is the JSON:\n\n```json\n'
+            '{"status": "DONE", "output": {"proposal": "tiny module"}}\n'
+            '```',
+        )
+        dispatcher = InProcessDispatcher(client)
+        completion = await dispatcher.dispatch(_request())
+        assert completion.status == EscalationStatus.DONE
+        assert completion.output == {"proposal": "tiny module"}
+
+    async def test_markdown_fence_without_tag(self) -> None:
+        client = AsyncMock()
+        client.chat_completion.return_value = _raw_response(
+            '```\n{"status": "DONE", "output": {"k": "v"}}\n```',
+        )
+        dispatcher = InProcessDispatcher(client)
+        completion = await dispatcher.dispatch(_request())
+        assert completion.status == EscalationStatus.DONE
+
+    async def test_prose_before_and_after_json(self) -> None:
+        client = AsyncMock()
+        client.chat_completion.return_value = _raw_response(
+            "Of course! Here you go. "
+            '{"status": "DONE", "output": {"plan": ["s1", "s2"]}} '
+            "Hope this helps.",
+        )
+        dispatcher = InProcessDispatcher(client)
+        completion = await dispatcher.dispatch(_request())
+        assert completion.status == EscalationStatus.DONE
+        assert completion.output == {"plan": ["s1", "s2"]}
+
+    async def test_nested_braces_in_string_values_preserved(self) -> None:
+        """The brace-balanced scan SHALL respect string literals — a
+        `{` or `}` inside a JSON string MUST NOT perturb the depth."""
+        client = AsyncMock()
+        client.chat_completion.return_value = _raw_response(
+            'preface text\n'
+            '{"status": "DONE", "output": {"snippet": "f(x) = {{x*2}}"}}\n'
+            'tail text',
+        )
+        dispatcher = InProcessDispatcher(client)
+        completion = await dispatcher.dispatch(_request())
+        assert completion.status == EscalationStatus.DONE
+        assert completion.output["snippet"] == "f(x) = {{x*2}}"
+
+    async def test_generate_phase_files_envelope_inside_fence(self) -> None:
+        """R-200-150 envelope inside a ```json fence — typical qwen
+        output for the generate phase. Must surface `output.files`
+        intact so OrchestratorService can materialise it."""
+        client = AsyncMock()
+        client.chat_completion.return_value = _raw_response(
+            '```json\n'
+            '{\n'
+            '  "status": "DONE",\n'
+            '  "output": {\n'
+            '    "files": [{"path": "a.py", "content": "x = 1\\n"}]\n'
+            '  }\n'
+            '}\n'
+            '```',
+        )
+        dispatcher = InProcessDispatcher(client)
+        completion = await dispatcher.dispatch(_request(Phase.GENERATE))
+        assert completion.status == EscalationStatus.DONE
+        files = completion.output.get("files")
+        assert isinstance(files, list) and len(files) == 1
+        assert files[0]["path"] == "a.py"
+        assert files[0]["content"] == "x = 1\n"
+
+    async def test_no_json_at_all_still_blocks(self) -> None:
+        """The tolerant parser SHALL NOT invent envelopes when the
+        content has no JSON at all — that case MUST still BLOCK so
+        the three-fix rule + operator escalation kicks in."""
+        client = AsyncMock()
+        client.chat_completion.return_value = _raw_response(
+            "I am sorry but I cannot help with that.",
+        )
+        dispatcher = InProcessDispatcher(client)
+        completion = await dispatcher.dispatch(_request())
+        assert completion.status == EscalationStatus.BLOCKED
+        assert completion.blocker is not None
+        assert "parseable JSON" in completion.blocker.reason
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestTolerantStatusInference:
+    """Verify the v4 dispatcher tolerates status synonyms (`completed`,
+    `success`, `error`, ...) AND assumes DONE when an unknown status
+    is paired with a non-empty `output`. Required to make qwen2.5:3b
+    viable as the dev LLM."""
+
+    async def test_completed_synonym_maps_to_done(self) -> None:
+        client = AsyncMock()
+        client.chat_completion.return_value = _mock_response({
+            "status": "completed",
+            "output": {"text": "ok"},
+        })
+        completion = await InProcessDispatcher(client).dispatch(_request())
+        assert completion.status == EscalationStatus.DONE
+        assert completion.output == {"text": "ok"}
+
+    async def test_success_synonym_maps_to_done(self) -> None:
+        client = AsyncMock()
+        client.chat_completion.return_value = _mock_response({
+            "status": "Success",  # case-insensitive
+            "output": {"plan": []},
+        })
+        completion = await InProcessDispatcher(client).dispatch(_request())
+        assert completion.status == EscalationStatus.DONE
+
+    async def test_error_synonym_maps_to_blocked(self) -> None:
+        client = AsyncMock()
+        client.chat_completion.return_value = _mock_response({
+            "status": "error",
+            "output": {},
+            "blocker": {"reason": "model refused"},
+        })
+        completion = await InProcessDispatcher(client).dispatch(_request())
+        assert completion.status == EscalationStatus.BLOCKED
+        assert completion.blocker is not None
+        assert completion.blocker.reason == "model refused"
+
+    async def test_missing_status_with_output_assumes_done(self) -> None:
+        """The 2026-05-14 incident exactly : qwen2.5:3b returns an
+        envelope with `output` but no `status`. The v3 parser used to
+        BLOCK ; v4 SHALL assume DONE since the agent produced content."""
+        client = AsyncMock()
+        client.chat_completion.return_value = _mock_response({
+            "output": {"proposal": "small Python module"},
+        })
+        completion = await InProcessDispatcher(client).dispatch(_request())
+        assert completion.status == EscalationStatus.DONE
+        assert completion.output == {"proposal": "small Python module"}
+
+    async def test_missing_status_with_string_output_assumes_done(self) -> None:
+        """Same as above but `output` is a string (the actual shape
+        qwen2.5:3b emitted in 2026-05-14). String outputs get wrapped
+        in `{"raw": <value>}` per existing _parse_completion logic."""
+        client = AsyncMock()
+        client.chat_completion.return_value = _mock_response({
+            "output": "hello_world_module.py contents go here",
+        })
+        completion = await InProcessDispatcher(client).dispatch(_request())
+        assert completion.status == EscalationStatus.DONE
+        assert completion.output["raw"] == "hello_world_module.py contents go here"
+
+    async def test_missing_status_with_empty_output_still_blocks(self) -> None:
+        """Without anything to advance with, BLOCK with a clearer
+        reason than v3's terse 'unknown status'."""
+        client = AsyncMock()
+        client.chat_completion.return_value = _mock_response({
+            "output": {},
+        })
+        completion = await InProcessDispatcher(client).dispatch(_request())
+        assert completion.status == EscalationStatus.BLOCKED
+        assert completion.blocker is not None
+        assert "empty output" in completion.blocker.reason
+
+    async def test_truly_unknown_status_without_synonym_still_blocks(self) -> None:
+        """Unrecognised status with empty output also BLOCKS — the
+        existing TestDispatcherErrorPaths.test_unknown_status case
+        still applies for empty-output edge."""
+        client = AsyncMock()
+        client.chat_completion.return_value = _mock_response({
+            "status": "MAYBE_OK",
+            "output": {},
+        })
+        completion = await InProcessDispatcher(client).dispatch(_request())
+        assert completion.status == EscalationStatus.BLOCKED

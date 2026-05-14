@@ -174,8 +174,7 @@ export default function ArtifactsPage() {
         if (cancelled) return;
         setCommitsLoad({
           status: "error",
-          error:
-            err instanceof ApiError ? `Failed to load commits (${err.status})` : String(err),
+          error: err instanceof ApiError ? `Failed to load commits (${err.status})` : String(err),
         });
       });
     return () => {
@@ -303,9 +302,7 @@ function CommitsPanel({ load }: { load: CommitsLoad }) {
       data-testid="artifacts-commits-panel"
     >
       <header className="border-b border-neutral-200 px-4 py-3">
-        <h3 className="text-sm font-medium uppercase tracking-wide text-neutral-500">
-          Versions
-        </h3>
+        <h3 className="text-sm font-medium uppercase tracking-wide text-neutral-500">Versions</h3>
         <p className="mt-0.5 text-xs text-neutral-500">
           Commit history of the project, most recent first. One commit per file pushed at run
           completion.

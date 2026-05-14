@@ -679,6 +679,47 @@ The platform SHALL expose `GET /api/v1/projects/{project_id}/git/commits` as a r
 
 **Rationale.** A simple paginated list covers the v1 UX need (browse commits in chronological order). Diff inspection and per-commit file content are deferred to future passes — not required for the initial "Versions" section UX.
 
+### 5.15 Generate-phase artifact materialisation
+
+#### R-200-150
+
+```yaml
+id: R-200-150
+version: 1
+status: draft
+category: functional
+```
+
+The `generate` phase's agent completion envelope SHALL declare a `output.files` list when `status ∈ {DONE, DONE_WITH_CONCERNS}`. Each entry SHALL be a JSON object `{path: string, content: string}` where `path` follows the R-200-130 path convention (POSIX forward slashes, no `..`, no leading `/`, no backslashes) and `content` is the file's UTF-8 text body. Binary files are NOT supported by v1 of this surface — agents producing binary artifacts SHALL embed them via a deterministic conversion (e.g. base64) under a future requirement, not this one.
+
+**Rationale.** The C4 orchestrator does not invent file shape — it relies on the agent's structured output. A flat `files[]` list is the simplest contract that materialises onto the existing artifacts surface (`ArtifactStorage.put_blob` + `ArtifactsService.create_run / put_file`) without intermediate transformation.
+
+#### R-200-151
+
+```yaml
+id: R-200-151
+version: 1
+status: draft
+category: functional
+```
+
+On the orchestrator's first successful `generate` completion within a run (Gate B passed per R-200-011), the orchestrator SHALL materialise every entry of `output.files` into the artifacts surface, reusing the orchestrator's `run_id` as the artifact-run id (same id ↔ same run, no second identifier to track) and `tenant_id` / `project_id` from the `c4_runs` row. Materialisation order is `ArtifactsService.create_run(status=RUNNING)` → one `put_file(...)` per entry → `mark_completed(status=COMPLETED)`. The `mark_completed` call SHALL fire the existing best-effort Gitea push (R-200-146) so every generated run lands in the project's Gitea repo without additional wiring.
+
+**Rationale.** Reusing the orchestrator's `run_id` removes an entire class of cross-reference bugs (UX has one id, backend has one id, MinIO + Gitea both use that one id). Triggering materialisation only on the first successful generate avoids duplicating files when the pipeline retries gate failures (which would otherwise materialise N times under the three-fix rule).
+
+#### R-200-152
+
+```yaml
+id: R-200-152
+version: 1
+status: draft
+category: functional
+```
+
+When the orchestrator is wired without an `ArtifactsService` (legacy/test setups where the artifacts surface is not mounted) materialisation SHALL be silently skipped — the pipeline state machine MUST NOT depend on materialisation success. Failures inside `ArtifactsService.put_file` SHALL be logged as WARNINGs scoped to the run_id + path, and the orchestrator SHALL continue with the remaining files (best-effort, mirroring the Gitea push semantics of R-200-146). A subsequent `mark_completed` failure SHALL log a WARNING and SHALL NOT mark the run BLOCKED — MinIO partial state remains preferable to a phantom-blocked run.
+
+**Rationale.** Decouples the pipeline's correctness from the storage backend's availability. Backbone components (state machine, gate evaluators, three-fix rule) keep their semantics regardless of artifact-surface health.
+
 ---
 
 ## 6. Interfaces & Contracts

@@ -1,6 +1,6 @@
 # =============================================================================
 # File: in_process.py
-# Version: 1
+# Version: 4
 # Path: ay_platform_core/src/ay_platform_core/c4_orchestrator/dispatcher/in_process.py
 # Description: In-process agent dispatcher. Invokes the C8 LLM gateway
 #              client with the agent-appropriate headers, interprets the
@@ -8,13 +8,36 @@
 #              Replaces the real Kubernetes pod dispatcher until infra is
 #              ready (R-200-030 / Q-200-001 baseline).
 #
+#              v4 (2026-05-14) : tolerant status inference. Adds a
+#              synonym map (`completed` → DONE, `error` → BLOCKED, ...)
+#              and a graceful fallback that assumes DONE when the
+#              status is unknown but the envelope carries a non-empty
+#              `output`. Surfaced after observing qwen2.5:3b
+#              repeatedly omit the `status` key entirely.
+#              v3 (2026-05-13) : tolerant JSON extraction. Small open
+#              models (qwen2.5:3b et al.) frequently wrap their JSON in
+#              markdown fences ```json ... ``` or prepend a line of
+#              prose like "Sure, here is the JSON:\n{...}". The strict
+#              `json.loads(content)` of v1/v2 would BLOCK on every such
+#              call and trigger the three-fix rule on phase 1 — useless
+#              in practice. v3 falls back to extracting the first valid
+#              JSON object found in the content (fence-stripped or
+#              brace-balanced scan) before declaring BLOCKED.
+#              v2: GENERATE-phase system prompt extended to require
+#              `output.files: [{path, content}]` per R-200-150 so the
+#              orchestrator can materialise the agent's output into the
+#              artifacts surface without intermediate transformation.
+#
 # @relation implements:R-200-021
 # @relation implements:R-200-030
+# @relation implements:R-200-150
 # =============================================================================
 
 from __future__ import annotations
 
 import json
+import logging
+import re
 import time
 from typing import Any
 
@@ -36,6 +59,8 @@ from ay_platform_core.c8_llm.models import (
     ChatMessage,
     ChatRole,
 )
+
+_log = logging.getLogger("c4_orchestrator.dispatcher")
 
 # Per-phase system prompts. Intentionally minimal — v1 uses generic
 # prompts per D-011 caveat. Production-grade prompt libraries live in
@@ -60,7 +85,24 @@ _SYSTEM_PROMPTS: dict[Phase, str] = {
     Phase.GENERATE: (
         "You are the Implementer agent. Produce the artifacts per the plan, "
         "honouring Gate B (validation artifact must exist and run red first). "
-        "Return JSON with keys `output` (artifact set) and `status`."
+        "Return STRICT JSON with this shape (no prose outside the JSON):\n"
+        "{\n"
+        '  "status": "DONE" | "DONE_WITH_CONCERNS" | "NEEDS_CONTEXT" | "BLOCKED",\n'
+        '  "output": {\n'
+        '    "files": [ {"path": "src/main.py", "content": "<full file body>"}, ... ],\n'
+        '    "gate_b_evidence": {\n'
+        '      "artifact_id": "<one of the file paths used as the validation target>",\n'
+        '      "validation_artifact_exists": true,\n'
+        '      "validation_runs_red": true,\n'
+        '      "evidence_timestamp": "<ISO-8601 UTC>"\n'
+        "    }\n"
+        "  }\n"
+        "}\n"
+        "Rules: paths SHALL be POSIX relative (no leading `/`, no `..`, no `\\\\`); "
+        "`content` SHALL be the full UTF-8 text of the file (no diff fragments); "
+        "produce at least one validation artifact (test/spec) that initially fails "
+        "(`validation_runs_red=true`) per Gate B. Include between 1 and 12 files. "
+        "Do NOT wrap the JSON in markdown code fences."
     ),
     Phase.REVIEW: (
         "You are a reviewer agent (spec compliance + quality). Evaluate "
@@ -76,6 +118,23 @@ _AGENT_FOR_PHASE: dict[Phase, AgentRole] = {
     Phase.PLAN: AgentRole.PLANNER,
     Phase.GENERATE: AgentRole.IMPLEMENTER,
     Phase.REVIEW: AgentRole.SPEC_REVIEWER,
+}
+
+
+# Common one-to-one synonyms emitted by small open models. Keep
+# narrow — only unambiguous mappings. Looked up after the strict
+# EscalationStatus enum check fails ; `_parse_completion` falls
+# back to assume-DONE-when-output-present if even this map misses.
+_STATUS_SYNONYMS: dict[str, EscalationStatus] = {
+    "COMPLETED": EscalationStatus.DONE,
+    "COMPLETE": EscalationStatus.DONE,
+    "SUCCESS": EscalationStatus.DONE,
+    "SUCCEEDED": EscalationStatus.DONE,
+    "OK": EscalationStatus.DONE,
+    "FINISHED": EscalationStatus.DONE,
+    "ERROR": EscalationStatus.BLOCKED,
+    "FAILED": EscalationStatus.BLOCKED,
+    "FAILURE": EscalationStatus.BLOCKED,
 }
 
 
@@ -135,24 +194,40 @@ class InProcessDispatcher:
         call_id = response.id or ""
 
         # Extract the assistant message content and interpret it as the
-        # structured envelope the system prompt asked for.
+        # structured envelope the system prompt asked for. Tolerant
+        # parsing (R-200-021 + 2026-05-13 dispatcher v3) : small open
+        # models often wrap their JSON in markdown fences or prepend
+        # prose ; `_extract_envelope` strips both before json.loads.
         try:
             content = _extract_assistant_text(response.choices[0].message.content)
-            parsed = json.loads(content) if content else {}
-        except (json.JSONDecodeError, IndexError, AttributeError) as exc:
-            return AgentCompletion(
-                agent=request.agent,
-                run_id=request.run_id,
-                phase=request.phase,
-                status=EscalationStatus.BLOCKED,
-                blocker=AgentBlocker(
-                    reason=f"agent response not parseable JSON: {exc}",
-                ),
-                duration_ms=duration_ms,
-                llm_call_ids=[call_id] if call_id else [],
+        except (IndexError, AttributeError) as exc:
+            return _blocked_completion(
+                request, duration_ms, call_id,
+                f"agent response shape invalid: {exc}",
+            )
+        parsed = _extract_envelope(content)
+        if parsed is None:
+            _log.warning(
+                "dispatcher parse failed (run=%s phase=%s) content[:500]=%r",
+                request.run_id, request.phase.value, content[:500],
+            )
+            return _blocked_completion(
+                request, duration_ms, call_id,
+                "agent response did not contain a parseable JSON envelope",
             )
 
-        return _parse_completion(parsed, request, duration_ms, call_id)
+        completion = _parse_completion(parsed, request, duration_ms, call_id)
+        if completion.status is EscalationStatus.BLOCKED and completion.blocker is not None:
+            # Surface the raw envelope when an unknown / missing status
+            # collapses us to BLOCKED — without this the operator only
+            # sees "BLOCKED" with no hint that the LLM returned e.g.
+            # `{"status": "completed", ...}` and tripped the enum check.
+            _log.warning(
+                "dispatcher BLOCKED (run=%s phase=%s reason=%s envelope=%r)",
+                request.run_id, request.phase.value,
+                completion.blocker.reason, parsed,
+            )
+        return completion
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +242,109 @@ def _build_user_prompt(request: DispatchRequest) -> str:
         f"Agent: {request.agent.value}\n\n"
         f"User prompt:\n{request.prompt}\n\n"
         f"Context bundle (JSON):\n{bundle}"
+    )
+
+
+_FENCE_RE = re.compile(
+    r"```(?:json|JSON)?\s*\n?(?P<body>[\s\S]*?)\n?```",
+    re.MULTILINE,
+)
+
+
+def _extract_envelope(content: str) -> dict[str, Any] | None:
+    """Tolerant extraction of the agent's JSON envelope from `content`.
+
+    Tries, in order:
+      1. Strict `json.loads(content.strip())` — succeeds when the model
+         emits clean JSON (Anthropic / OpenAI structured outputs / well-
+         behaved 7B+ models).
+      2. Markdown fence : strip ```...``` (with or without `json` tag),
+         then `json.loads` on the body. Covers qwen2.5:3b's typical
+         "Here is the JSON: ```json\n{...}\n```" pattern.
+      3. Brace-balanced scan : find the first `{` in the content, walk
+         forward tracking balanced braces while respecting string
+         literals, slice the substring, try `json.loads`. Covers prose-
+         wrapped JSON like "Sure! {...} hope this helps".
+
+    Returns the parsed dict on success or None when every strategy
+    fails — the caller surfaces that as a BLOCKED completion."""
+    if not isinstance(content, str) or not content:
+        return None
+    trimmed = content.strip()
+    # Strategy 1 — strict.
+    try:
+        parsed = json.loads(trimmed)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    # Strategy 2 — markdown fence.
+    for match in _FENCE_RE.finditer(trimmed):
+        body = match.group("body").strip()
+        if not body:
+            continue
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    # Strategy 3 — brace-balanced scan.
+    for start in (i for i, ch in enumerate(trimmed) if ch == "{"):
+        candidate = _scan_balanced_object(trimmed, start)
+        if candidate is None:
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _scan_balanced_object(text: str, start: int) -> str | None:
+    """Return the slice of `text` starting at `start` that contains the
+    first balanced JSON object, respecting string literals (so braces
+    inside `"..."` don't perturb the depth counter). Returns None when
+    the scan reaches the end of `text` without closing all braces."""
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
+def _blocked_completion(
+    request: DispatchRequest, duration_ms: int, call_id: str, reason: str,
+) -> AgentCompletion:
+    """Helper : build a BLOCKED `AgentCompletion` for parse-time failures.
+    Keeps the dispatcher's `dispatch()` body free of repeated boilerplate."""
+    return AgentCompletion(
+        agent=request.agent,
+        run_id=request.run_id,
+        phase=request.phase,
+        status=EscalationStatus.BLOCKED,
+        blocker=AgentBlocker(reason=reason[:500]),
+        duration_ms=duration_ms,
+        llm_call_ids=[call_id] if call_id else [],
     )
 
 
@@ -195,26 +373,54 @@ def _parse_completion(
 ) -> AgentCompletion:
     """Map the agent's JSON envelope onto AgentCompletion.
 
-    Tolerates partial payloads — missing `status` defaults to BLOCKED so
-    a malformed agent response cannot silently advance the pipeline.
+    Tolerant on `status` (R-200-021 v3) :
+      - Strict match on the EscalationStatus enum first.
+      - If unknown, try the synonyms map (e.g. small open models often
+        emit `completed` instead of `DONE`, `error` instead of `BLOCKED`).
+      - If still unknown AND the envelope carries a non-empty `output`
+        (object or non-empty string), assume `DONE` — the agent
+        produced something, just didn't tag it correctly. This
+        graceful fallback is the difference between a usable demo on
+        qwen2.5:3b and a permanent BLOCKED on phase 1.
+      - Only an unknown status with an empty/missing `output` collapses
+        to BLOCKED.
     """
     status_raw = str(parsed.get("status", "")).upper().strip()
+    output = parsed.get("output")
+    output_is_present = (
+        isinstance(output, dict) and bool(output)
+    ) or (isinstance(output, str) and bool(output.strip()))
+    status: EscalationStatus | None = None
     try:
         status = EscalationStatus(status_raw)
     except ValueError:
-        return AgentCompletion(
-            agent=request.agent,
-            run_id=request.run_id,
-            phase=request.phase,
-            status=EscalationStatus.BLOCKED,
-            blocker=AgentBlocker(
-                reason=f"agent returned unknown status: {status_raw!r}",
-            ),
-            duration_ms=duration_ms,
-            llm_call_ids=[call_id] if call_id else [],
-        )
+        # Synonyms commonly emitted by small open models. Mapping is
+        # intentionally narrow — only unambiguous one-to-one cases.
+        mapped = _STATUS_SYNONYMS.get(status_raw)
+        if mapped is not None:
+            status = mapped
+    if status is None:
+        # Last-resort graceful fallback : envelope produced content,
+        # tag it DONE. Without content we have nothing to advance with
+        # → BLOCKED with a clear reason for the operator.
+        if output_is_present:
+            status = EscalationStatus.DONE
+        else:
+            return AgentCompletion(
+                agent=request.agent,
+                run_id=request.run_id,
+                phase=request.phase,
+                status=EscalationStatus.BLOCKED,
+                blocker=AgentBlocker(
+                    reason=(
+                        f"agent envelope has unknown status "
+                        f"{status_raw!r} and empty output"
+                    ),
+                ),
+                duration_ms=duration_ms,
+                llm_call_ids=[call_id] if call_id else [],
+            )
 
-    output = parsed.get("output")
     output_dict: dict[str, Any] = output if isinstance(output, dict) else {"raw": output}
 
     concerns = [

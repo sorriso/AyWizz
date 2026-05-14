@@ -1,11 +1,15 @@
 # =============================================================================
 # File: main.py
-# Version: 2
+# Version: 3
 # Path: ay_platform_core/src/ay_platform_core/c4_orchestrator/main.py
 # Description: FastAPI app factory for C4 Orchestrator. Wires the in-process
 #              dispatcher backed by a real C8 LLM client (the C8 URL is read
 #              from C4_LLM_GATEWAY_URL).
 #
+#              v3: passes the `ArtifactsService` instance into the
+#              `OrchestratorService` so the generate phase materialises
+#              its `output.files` into the artifacts surface and triggers
+#              the Gitea push on completion (R-200-150..152).
 #              v2: mounts the project-artifacts surface
 #              (`artifacts_router`) under
 #              `/api/v1/projects/{pid}/artifacts/*` + instantiates
@@ -17,6 +21,7 @@
 #
 # @relation implements:R-100-114
 # @relation implements:R-200-131
+# @relation implements:R-200-151
 # =============================================================================
 
 from __future__ import annotations
@@ -64,14 +69,6 @@ def create_app(config: OrchestratorConfig | None = None) -> FastAPI:
     llm_settings = ClientSettings()
     llm_client = LLMGatewayClient(llm_settings, bearer_token="c4-orchestrator")
 
-    service = OrchestratorService(
-        config=cfg,
-        repo=repo,
-        dispatcher=InProcessDispatcher(llm_client),
-        domain_plugin=CodeDomainPlugin(),
-        publisher=NullPublisher(),
-    )
-
     # MinIO client + artifacts service. Same bucket (`orchestrator`)
     # as the existing run state ; artifacts live under the
     # `c4-artifacts/` prefix (R-200-130) — clear separation from the
@@ -95,6 +92,15 @@ def create_app(config: OrchestratorConfig | None = None) -> FastAPI:
         )
     artifacts_service = ArtifactsService(
         repo=repo, storage=artifact_storage, gitea=gitea,
+    )
+
+    service = OrchestratorService(
+        config=cfg,
+        repo=repo,
+        dispatcher=InProcessDispatcher(llm_client),
+        domain_plugin=CodeDomainPlugin(),
+        publisher=NullPublisher(),
+        artifacts_service=artifacts_service,
     )
 
     @asynccontextmanager

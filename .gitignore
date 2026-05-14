@@ -14,6 +14,7 @@ __pycache__/
 build/
 dist/
 .Python
+sample-code-main
 
 # Virtual environments
 .venv/

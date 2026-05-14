@@ -1,6 +1,6 @@
 <!-- =============================================================================
 File: SESSION-STATE.md
-Version: 36
+Version: 39
 Path: .claude/SESSION-STATE.md
 Description: Current project state. Single source of truth for "where are we".
              Updated in place at the end of each significant session.
@@ -18,7 +18,7 @@ Autonomous write policy: per CLAUDE.md v15 §9.1, Claude MAY write this
 
 # Project State — ay_monorepo
 
-**Last updated:** 2026-05-12 (**Artifacts Pass 2.2 backend + tests: DONE**. Manual UI rebuild + verification remain — see §5).
+**Last updated:** 2026-05-14 (**Tranche A done : tolerant parser + tolerant status (synonyms + assume-DONE-when-output-present) + `block_reason` surfaced in UI. 1291 backend tests green.**).
 
 ---
 
@@ -28,7 +28,7 @@ Autonomous write policy: per CLAUDE.md v15 §9.1, Claude MAY write this
 
 **Étape 2a — UX chat polish: DONE.** (Per-user prefs + per-project system prompt + SSE stage events + persisted timeline + one-click new conversation + auto-rename + user-color bubble + build-stamp footer. Full record in `sessions/2026-05-12-ux-chat-finalisation.md`.)
 
-**Étape 2b — Project artifacts surface : IN PROGRESS.** Pass 1 = DONE (read-only MinIO surface). Pass 2.1 = DONE (Gitea bundled + per-project provisioning). **Pass 2.2 = DONE backend (push at completion + GET /git/commits proxy + 3 new integration tests green) ; manual UI verification pending.** Pass 2.3 = optional external mirror (future). Pass 3 = codegen/docgen profile split (future).
+**Étape 2b — Project artifacts surface : IN PROGRESS.** Pass 1 = DONE (read-only MinIO surface). Pass 2.1 = DONE (Gitea bundled + per-project provisioning). Pass 2.2 = DONE (push at completion + GET /git/commits proxy). **Pass Generate-E2E = DONE backend (1268 tests green) + UI (Pipeline page wired to POST /orchestrator/runs + Gate A approval + auto-redirect to Code source) ; stack rebuild blocked on docker overlay 100% — needs host-side `docker system prune -af`.** Pass 2.3 = optional external mirror (future). Pass 3 = codegen/docgen profile split (future).
 
 ---
 
@@ -80,22 +80,36 @@ Autonomous write policy: per CLAUDE.md v15 §9.1, Claude MAY write this
 
 ## 5. Next planned action
 
-**ACTIVE WORK : Artifacts Pass 2.2 — manual UI verification pending.**
+**ACTIVE WORK : Generate-phase end-to-end + structural fixes (DONE backend ; awaiting browser retest).**
 
-Backend code + tests complete this session :
-- GiteaClient extended with `create_or_update_file` + `list_commits` + `GiteaCommit`.
-- `ArtifactsService.mark_completed` pushes every MinIO file to `svc-{tenant}-{project}/{project}.git` (best-effort ; Gitea failure logs WARN, MinIO stays source-of-truth).
-- New endpoint `GET /api/v1/projects/{pid}/git/commits` (Traefik `c4-git` route + auth-matrix catalog entry).
-- UI : `ArtifactCommit` types + `apiClient.listProjectCommits` + "Versions" tab on the artifacts page.
-- Tests : `_FakeGiteaClient` extended with `files`/`commits`/`fail_on_create_file` ; 3 new integration tests in `c4_orchestrator/test_artifacts_api.py` (push-on-seed, tenant_manager-403, push-failure-tolerance). 7 c4-artifacts tests + 2 c2-gitea-provisioning tests green.
+Generate-phase plumbing (R-200-150..152) :
+- Spec §5.15 in 200-SPEC-PIPELINE-AGENT.md + `OrchestratorService` v2 wiring + dispatcher GENERATE prompt v2 + `main.py` v3 + UI Pipeline page + lib/types.ts v8 + apiClient v7. All landed in the earlier slice of this session.
 
-**Remaining (next session if you stop here)** :
-1. `e2e_stack.sh dev` rebuild (UI + api).
-2. Browser check : demo seed runs the push, "Versions" tab on `/projects/project-test/artifacts` shows 2 commits.
-3. (optional) Pass 2.3 — external mirror per project.
-4. Pass 3 — split `code` profile into `codegen`/`docgen`.
+Structural fixes added today after the 2026-05-13 browser test surfaced BLOCKED-at-brainstorm :
+- **Root cause #1** : `c4` was reading only `.env.test` so its `C8_GATEWAY_URL` pointed at `mock_llm:8000` even in the dev stack. Fix : add `c4` to `docker-compose.dev.override.yml` v4 with `.env.dev` appended (routes to real Ollama).
+- **Root cause #2** : qwen2.5:3b wraps its JSON in ```json fences and adds prose — the strict `json.loads(content)` in dispatcher v2 collapsed every call to BLOCKED. Fix : `in_process.py` v3 tolerant parser. Three fallback strategies (strict / markdown-fence-stripped / brace-balanced scan respecting string literals) before declaring the envelope unparseable.
+- **Root cause #3** : mock_llm was implicitly part of the dev stack — masking the routing bug above. Fix : `docker-compose.yml` puts mock_llm under `profiles: [test]` ; dev stack no longer starts it ; c4's `depends_on: mock_llm` removed.
+- **Structural test surface (the user's explicit ask "why no test caught this?")** :
+  - `tests/unit/c4_orchestrator/test_dispatcher.py` v2 : `TestTolerantEnvelopeExtraction` (6 cases — fence with/without tag, prose around JSON, nested braces in string literals, generate-phase fenced files envelope, no-JSON-at-all still BLOCKS).
+  - `tests/integration/c4_orchestrator/test_generate_materialisation.py` : new `test_pipeline_completes_with_fenced_llm_output` driving the full pipeline against a mock that emits ```json fences — would have caught the qwen2.5:3b output shape in CI.
+  - `tests/coherence/test_compose_dev_profile.py` v1 (new file, 3 tests) : (a) mock_llm SHALL be in profile `test` ; (b) no service depends_on mock_llm ; (c) every C8-calling service (c2/c3/c4) has `.env.dev` in dev override. Test (c) FAILED on first run, pinning exactly the routing bug — now green.
 
-Pre-existing red : 3 elasticsearch testcontainer tests fail with httpx ReadTimeout (unrelated to this work — flaky ES container start-up).
+**Backend CI : 1284 passed, 0 failure** (was 1268 + 6 ES/Loki testcontainer crashes due to disk-full ; now 16 new tests added + ES/Loki recovered).
+
+**Tranche A complete (2026-05-14)** :
+- A.1 diagnostic logging in dispatcher v3 surfaced the actual qwen2.5:3b output (envelope WITHOUT `status` key + `output` carrying malformed code string).
+- A.2 `block_reason: str | None` added to `RunPublic` (models v2 + service `_public` projection + service `_run_blocked` enriched with `completion.blocker.reason`). UI lib/types v9 + Pipeline page renders the reason in a `<pre>` block instead of the misleading three-fix-rule message.
+- A.3 dispatcher v4 : (i) synonyms map (`completed/success/ok/...` → DONE ; `error/failed/...` → BLOCKED) ; (ii) graceful fallback — when status unknown AND `output` non-empty, assume DONE. Strict BLOCK kept only when status unknown AND output empty/missing. 7 new unit tests (`TestTolerantStatusInference`).
+- Backend CI : 1291 passed, 0 failure.
+
+**Plan agreed with user (un par un, ordered)** :
+- Tranche A : 1, 2, 3 → **DONE**.
+- Tranche B : 4 (project creation UI), 5 (members), 6 (admin tenant/users), 7 (resume/retry), 8 (Monaco + diff), 9 (SSE phase events).
+- Tranche C : 10 (LiteLLM proxy + cost), 11 (K8s sub-agent dispatcher), 12 (HTTPS + K8s prod manifests), 14 (Arango migrations), 16 (CI GitHub Actions).
+- Tranche D : polish (empty states, skeletons, toasts, i18n, mobile).
+- Skipped : ~~#13 SSO~~ (pas d'infra), ~~#15 specs~~ (à traiter avec `aywiz-architecture-synthesis-v4.md`).
+
+**Next action** : user retests Pipeline in browser ; if it COMPLETES we move to B.4 (project creation UI).
 
 ---
 

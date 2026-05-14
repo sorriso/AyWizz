@@ -14,7 +14,9 @@
 #              The service is stateful in-process and single-replica. It is
 #              NOT a platform component; it exists purely to drive C4 / C9
 #              through realistic flows during system tests without a real
-#              LLM provider or cost.
+#              LLM provider or cost. The dev stack (e2e_stack.sh dev) SHALL
+#              NOT depend on mock_llm — it routes C8 calls to real Ollama
+#              via .env.dev (cf. docker-compose.dev.override.yml).
 #
 # @relation implements:R-100-116
 # =============================================================================

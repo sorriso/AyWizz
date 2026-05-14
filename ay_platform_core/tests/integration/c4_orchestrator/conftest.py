@@ -1,6 +1,6 @@
 # =============================================================================
 # File: conftest.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/tests/integration/c4_orchestrator/conftest.py
 # Description: Fixtures for C4 integration tests. Uses REAL ArangoDB and
 #              REAL C8 client, but the LiteLLM proxy is impersonated by a
@@ -8,6 +8,13 @@
 #              gives us reproducibility without a real LLM provider key.
 #              Per session directive: integration tests use real
 #              components wherever possible.
+#
+#              v2: adds optional MinIO + ArtifactsService wiring (opt-in
+#              via the `c4_app_with_artifacts` fixture) so the generate
+#              materialisation path (R-200-150..152) is exercised
+#              end-to-end. Legacy tests using `c4_app` are unchanged —
+#              artifacts_service defaults to None and the pipeline runs
+#              unaffected.
 # =============================================================================
 
 from __future__ import annotations
@@ -23,6 +30,11 @@ import pytest_asyncio
 from arango import ArangoClient  # type: ignore[attr-defined]
 from fastapi import FastAPI, Header, HTTPException, Request
 
+from ay_platform_core.c4_orchestrator.artifacts_router import (
+    router as artifacts_router,
+)
+from ay_platform_core.c4_orchestrator.artifacts_service import ArtifactsService
+from ay_platform_core.c4_orchestrator.artifacts_storage import ArtifactStorage
 from ay_platform_core.c4_orchestrator.config import OrchestratorConfig
 from ay_platform_core.c4_orchestrator.db.repository import OrchestratorRepository
 from ay_platform_core.c4_orchestrator.dispatcher.in_process import InProcessDispatcher
@@ -32,7 +44,12 @@ from ay_platform_core.c4_orchestrator.router import router
 from ay_platform_core.c4_orchestrator.service import OrchestratorService
 from ay_platform_core.c8_llm.client import LLMGatewayClient
 from ay_platform_core.c8_llm.config import ClientSettings
-from tests.fixtures.containers import ArangoEndpoint, cleanup_arango_database
+from tests.fixtures.containers import (
+    ArangoEndpoint,
+    MinioEndpoint,
+    cleanup_arango_database,
+)
+from tests.integration.c2_auth.test_gitea_provisioning import _FakeGiteaClient
 
 # ---------------------------------------------------------------------------
 # Scripted LiteLLM mock
@@ -73,7 +90,12 @@ def scripted_llm() -> ScriptedLLM:
 @pytest.fixture(scope="function")
 def mock_llm_app(scripted_llm: ScriptedLLM) -> FastAPI:
     """Minimal ASGI app shaped like the C8 proxy. Accepts any path,
-    returns the next scripted envelope as the assistant content."""
+    returns the next scripted envelope as the assistant content.
+    The envelope content shape is controlled by `scripted_llm.style`
+    (default "clean" = `json.dumps(envelope)` ; "fenced" = wrapped in
+    a ```json fence ; "prose" = JSON between a prefix and a suffix).
+    Used by the integration test that validates the dispatcher's
+    tolerant parser against realistic noisy small-model outputs."""
     app = FastAPI()
 
     @app.post("/v1/chat/completions", response_model=None)
@@ -90,6 +112,9 @@ def mock_llm_app(scripted_llm: ScriptedLLM) -> FastAPI:
         body = await request.json()
         scripted_llm.calls_seen.append(body)
         envelope = scripted_llm.next_response()
+        content = _render_envelope_with_style(
+            envelope, getattr(scripted_llm, "style", "clean"),
+        )
         return {
             "id": f"mock-{len(scripted_llm.calls_seen)}",
             "object": "chat.completion",
@@ -100,7 +125,7 @@ def mock_llm_app(scripted_llm: ScriptedLLM) -> FastAPI:
                     "index": 0,
                     "message": {
                         "role": "assistant",
-                        "content": json.dumps(envelope),
+                        "content": content,
                     },
                     "finish_reason": "stop",
                 },
@@ -113,6 +138,18 @@ def mock_llm_app(scripted_llm: ScriptedLLM) -> FastAPI:
         }
 
     return app
+
+
+def _render_envelope_with_style(envelope: dict[str, Any], style: str) -> str:
+    """Format the envelope as a JSON string, optionally wrapped to
+    mimic small-model output patterns. Used by the integration test
+    that exercises the dispatcher's tolerant parser (R-200-021 v3)."""
+    raw = json.dumps(envelope)
+    if style == "fenced":
+        return f"Here is the JSON envelope:\n\n```json\n{raw}\n```"
+    if style == "prose":
+        return f"Sure! {raw} Hope this helps."
+    return raw
 
 
 # ---------------------------------------------------------------------------
@@ -176,3 +213,47 @@ def c4_app(c4_service: OrchestratorService) -> FastAPI:
     app.include_router(router)
     app.state.orchestrator_service = c4_service
     return app
+
+
+# ---------------------------------------------------------------------------
+# Opt-in fixture : full app with ArtifactsService (MinIO) + FakeGitea
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture(scope="function")
+async def c4_app_with_artifacts(
+    c4_repo: OrchestratorRepository,
+    c4_llm_client: LLMGatewayClient,
+    c4_publisher: NullPublisher,
+    minio_container: MinioEndpoint,
+) -> AsyncIterator[tuple[FastAPI, ArtifactsService, _FakeGiteaClient]]:
+    """C4 app wired with a real MinIO artifacts surface + a FakeGitea
+    stub for the push side-effects. Used by R-200-150..152 tests."""
+    from minio import Minio  # noqa: PLC0415 — heavy import scoped to fixture
+    bucket = f"artbucket-{uuid.uuid4().hex[:8]}"
+    minio_client = Minio(
+        minio_container.endpoint,
+        access_key=minio_container.access_key,
+        secret_key=minio_container.secret_key,
+        secure=False,
+    )
+    storage = ArtifactStorage(minio_client, bucket)
+    await storage.ensure_bucket()
+    fake_gitea = _FakeGiteaClient()
+    artifacts_service = ArtifactsService(
+        repo=c4_repo, storage=storage, gitea=fake_gitea,  # type: ignore[arg-type]
+    )
+    service = OrchestratorService(
+        config=OrchestratorConfig(),
+        repo=c4_repo,
+        dispatcher=InProcessDispatcher(c4_llm_client),
+        domain_plugin=CodeDomainPlugin(),
+        publisher=c4_publisher,
+        artifacts_service=artifacts_service,
+    )
+    app = FastAPI()
+    app.include_router(router)
+    app.include_router(artifacts_router)
+    app.state.orchestrator_service = service
+    app.state.artifacts_service = artifacts_service
+    yield app, artifacts_service, fake_gitea

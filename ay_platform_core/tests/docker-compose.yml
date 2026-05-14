@@ -477,12 +477,20 @@ services:
       - platform
     restart: "no"
 
-  # Mock LLM (default profile) — stand-in for C8 in tests without real keys.
-  # Lives in `ay_platform_core/_mock_llm/`; same image as the rest of the
-  # API tier, distinguished only by COMPONENT_MODULE=_mock_llm.
+  # Mock LLM — stand-in for C8 in tests without real keys. Lives in
+  # `ay_platform_core/_mock_llm/`; same image as the rest of the API
+  # tier, distinguished only by COMPONENT_MODULE=_mock_llm.
+  #
+  # PROFILES — only runs under the `test` profile (pytest e2e via
+  # compose). The dev stack (`e2e_stack.sh dev`) SHALL NOT start
+  # this service ; the dev overlay routes every C8 call to real
+  # Ollama via .env.dev. Keeping mock_llm in the dev stack would
+  # mask routing bugs (the symptom we hit in 2026-05-13 when c4
+  # silently fell back to mock_llm and BLOCKED at brainstorm).
   mock_llm:
     <<: *api-service
     container_name: ay-mock-llm
+    profiles: ["test"]
     # Mock LLM reads no Pydantic settings — env_file omitted intentionally.
     environment:
       <<: *common-env
@@ -578,6 +586,13 @@ services:
     environment:
       <<: *common-env
       COMPONENT_MODULE: c4_orchestrator
+    # NOTE: c4 does NOT depend on `mock_llm` here — mock_llm is in the
+    # `test` profile and not started in the dev stack. The C8 client
+    # gracefully retries on first call, so the LLM-target service
+    # (ollama in dev, mock_llm in test) being startup-coordinated is
+    # not required for correctness. Add ollama / mock_llm to depends_on
+    # in the relevant profile-specific override file when stricter
+    # ordering is wanted.
     depends_on:
       arangodb:
         condition: service_healthy
@@ -587,8 +602,6 @@ services:
         condition: service_healthy
       minio_init:
         condition: service_completed_successfully
-      mock_llm:
-        condition: service_healthy
 
   c5:
     <<: *api-service

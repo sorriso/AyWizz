@@ -1,12 +1,16 @@
 // =============================================================================
 // File: code.ts
-// Version: 2
+// Version: 3
 // Path: ay_platform_ui/lib/profiles/code.ts
 // Description: The `code` production profile — the only one shipped
 //              in v1. Drives the project sidebar : Overview, Sources,
-//              Conversations, Requirements, Validation, Code source
-//              (artifacts), Settings.
+//              Conversations, Requirements, Pipeline, Validation,
+//              Code source (artifacts), Settings.
 //
+//              v3 (2026-05-12) : new `pipeline` section that triggers
+//              an orchestrator run (R-200-150..152) — goal input,
+//              live phase tracking, Gate A approval, redirect to
+//              Code source on completion.
 //              v2 (2026-05-12) : new `artifacts` section labelled
 //              "Code source" for the `code` profile (R-200-131). The
 //              endpoint is profile-agnostic ; the future `docgen`
@@ -48,6 +52,13 @@ export const CODE_PROFILE: ProfileDefinition = {
       path: "requirements",
       iconName: "document",
       description: "Browse and edit the project's specification corpus.",
+    },
+    {
+      id: "pipeline",
+      label: "Pipeline",
+      path: "pipeline",
+      iconName: "lightning",
+      description: "Trigger a generation run and review the plan before approval.",
     },
     {
       id: "validation",

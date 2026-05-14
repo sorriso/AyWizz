@@ -1,6 +1,6 @@
 # =============================================================================
 # File: docker-compose.dev.override.yml
-# Version: 2
+# Version: 3
 # Path: ay_platform_core/tests/docker-compose.dev.override.yml
 # Description: Compose override layered on `docker-compose.yml` by
 #              `e2e_stack.sh dev` to flip C2 into demo-mode AND wire
@@ -19,6 +19,10 @@
 #              other services don't read those vars, so we leave them
 #              untouched.
 #
+#              v3 (2026-05-13) : add c4 to the override so the
+#              generate-phase pipeline (R-200-150..152) hits real
+#              Ollama in dev instead of the canned mock_llm response
+#              that returns no envelope and triggers three-fix BLOCKED.
 #              v2 (2026-05-11) : adds the `ui` service built from
 #              `infra/docker/Dockerfile.ui` (next.js standalone) and
 #              adds it to c1's depends_on so Traefik routes resolve.
@@ -35,6 +39,18 @@ services:
   # Pytest e2e leaves .env.test's empty value in place to keep the
   # auth-matrix deterministic.
   c3:
+    env_file:
+      - .env.test
+      - ../../.env.dev
+
+  # c4 needs `.env.dev` so the orchestrator's in-process dispatcher
+  # routes its LLM calls to real Ollama rather than the (now
+  # profile-gated) mock_llm. Without this override the C8 client
+  # default `mock_llm:8000` from `.env.test` would resolve to an
+  # absent host in dev (mock_llm sits under profile `test`). The
+  # coherence test `test_compose_dev_profile.test_dev_override_
+  # routes_c8_calling_services_to_env_dev` pins this invariant.
+  c4:
     env_file:
       - .env.test
       - ../../.env.dev

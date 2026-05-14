@@ -164,6 +164,12 @@ class RunPublic(BaseModel):
     completed_at: datetime | None = None
     concerns: list[AgentConcern] = Field(default_factory=list)
     minio_root: str
+    # Operator-readable explanation when `status == "blocked"`. Set by
+    # `OrchestratorService._block_run` ; surfaced in the UX Pipeline
+    # page so the operator can see why automatic retries gave up
+    # (parse failure / unknown status / three-fix-rule / gate guard /
+    # admin abort). None on running and completed runs.
+    block_reason: str | None = None
 
 
 # ---------------------------------------------------------------------------

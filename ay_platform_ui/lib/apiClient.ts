@@ -43,6 +43,9 @@ import type {
   Finding,
   FindingPage,
   MessageList,
+  OrchestratorRun,
+  OrchestratorRunCreate,
+  OrchestratorRunFeedback,
   PlatformConfig,
   Project,
   ProjectList,
@@ -595,10 +598,7 @@ export class ApiClient {
   /** GET /api/v1/projects/{pid}/git/commits — paginated commit list
    *  proxied from the project's Gitea repo (R-200-147). Returns
    *  empty when Gitea is not wired or the repo has no commits yet. */
-  async listProjectCommits(
-    projectId: string,
-    page = 1,
-  ): Promise<ArtifactCommitList> {
+  async listProjectCommits(projectId: string, page = 1): Promise<ArtifactCommitList> {
     return this.request<ArtifactCommitList>(
       `/api/v1/projects/${encodeURIComponent(projectId)}/git/commits?page=${page}`,
       { method: "GET" },
@@ -639,5 +639,44 @@ export class ApiClient {
     return this.request<Finding>(`/api/v1/validation/findings/${encodeURIComponent(findingId)}`, {
       method: "GET",
     });
+  }
+
+  // -------------------------------------------------------------------------
+  // C4 — Orchestrator pipeline runs (trigger + plan approval).
+  // The Pipeline page POSTs a goal, polls the run, then surfaces the
+  // generated files in the Code-source section. Same run_id is reused
+  // as the artifact-run id (R-200-151).
+  // -------------------------------------------------------------------------
+
+  /** POST /api/v1/orchestrator/runs — start a pipeline run. The
+   *  brainstorm phase fires inline ; spec + plan auto-advance ;
+   *  the run pauses at PLAN waiting for the operator's Gate A. */
+  async createOrchestratorRun(payload: OrchestratorRunCreate): Promise<OrchestratorRun> {
+    return this.request<OrchestratorRun>("/api/v1/orchestrator/runs", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  /** GET /api/v1/orchestrator/runs/{run_id} — poll the run state.
+   *  The Pipeline page polls this every 2 s while RUNNING ; stops on
+   *  COMPLETED / BLOCKED. */
+  async getOrchestratorRun(runId: string): Promise<OrchestratorRun> {
+    return this.request<OrchestratorRun>(`/api/v1/orchestrator/runs/${encodeURIComponent(runId)}`, {
+      method: "GET",
+    });
+  }
+
+  /** POST /api/v1/orchestrator/runs/{run_id}/feedback — pass Gate A
+   *  with `{phase: "plan", approved: true}` ; or append user feedback
+   *  to re-run the current phase. */
+  async submitOrchestratorFeedback(
+    runId: string,
+    payload: OrchestratorRunFeedback,
+  ): Promise<OrchestratorRun> {
+    return this.request<OrchestratorRun>(
+      `/api/v1/orchestrator/runs/${encodeURIComponent(runId)}/feedback`,
+      { method: "POST", body: JSON.stringify(payload) },
+    );
   }
 }
