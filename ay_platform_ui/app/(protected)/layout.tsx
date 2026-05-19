@@ -1,7 +1,12 @@
 // =============================================================================
 // File: layout.tsx
-// Version: 4
+// Version: 5
 // Path: ay_platform_ui/app/(protected)/layout.tsx
+//
+// v5 (2026-05-19): wraps the authenticated outlet in
+// <WorkspaceProvider> (Increment 3 phase 3a) so per-project UI
+// state survives tab navigation + refresh (sessionStorage).
+//
 // Description: Auth gate for the route group `(protected)`. Every page
 //              under this folder is rendered ONLY when the auth state
 //              is "authenticated" AND the config bootstrap is "ready" ;
@@ -47,6 +52,7 @@ import { Navbar } from "@/components/navbar";
 
 import { useAuth } from "../auth-provider";
 import { useConfigState } from "../providers";
+import { WorkspaceProvider } from "./workspace-store";
 
 function LoadingPlaceholder() {
   return (
@@ -110,7 +116,10 @@ function ProtectedGate({ children }: { children: ReactNode }) {
   return (
     <>
       <Navbar />
-      {children}
+      {/* WorkspaceProvider sits ABOVE the router outlet so per-project
+          UI state (selected run/doc, active conversation, composer
+          draft) survives tab navigation (Increment 3, phase 3a). */}
+      <WorkspaceProvider>{children}</WorkspaceProvider>
     </>
   );
 }

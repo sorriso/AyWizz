@@ -509,6 +509,60 @@ impacts: [R-100-100, R-100-117, R-100-123]
 - Production deployment to AKS is **out of scope** for this decision — it requires Azure credentials and is deferred until a deployment push.
 - Coverage badge on the README depends on a one-time operator setup (gist + PAT in `secrets.GIST_SECRET` + gist id in `vars.COVERAGE_GIST_ID`). Until configured, the workflow status badges (native, zero-setup) are sufficient.
 
+### D-015 — DocGen tool-use in v1 via chat-direct (hybrid path, with v2 migration)
+
+```yaml
+id: D-015
+version: 1
+status: approved
+category: architecture
+impacts: [R-200-130, R-200-131, R-200-150, R-200-151, D-007, D-011]
+references: [analyses/aywiz-architecture-synthesis-v4.md]
+```
+
+**Decision.** The v1 documentation-generation flow SHALL be implemented as **chat-direct tool-use** : the conversation in C3 invokes a small catalogue of MCP-style tools (`create_document`, `update_document`, `read_document`, `list_documents`, `delete_document`) that mutate the project's MinIO tree directly through new C4 endpoints, **bypassing the 5-phase pipeline** (brainstorm → spec → plan → generate → review). The CodeGen flow continues to use the pipeline.
+
+The platform commits to **migrate DocGen to the pipeline path in v2**, per the design recorded in `references/aywiz-architecture-synthesis-v4.md` (OpenHands SDK embedded in C15, routed through C8/LiteLLM, with C6 `docs` domain plugin), once the POC criteria of that document's Q13 are validated.
+
+**Rationale.**
+
+1. **Time-to-demo for DocGen** : the synthesis-v4 path requires standing up OpenHands, a C15 sub-agent pod template, an in-pod `aywiz_working` MCP server, a `docs` C6 plugin (link-check + markdown-lint), and the LiteLLM/Databricks egress wiring. Cumulative effort ~6-10 weeks before the first usable DocGen demo. The chat-direct path delivers a working DocGen flow in ~1-2 weeks.
+
+2. **The user-facing experience the operator asked for** is conversational : *"l'IA via des tools décide/propose de créer un document directement dans MinIO, tout se fait via une conversation et des questions posées à l'utilisateur"*. The pipeline path (brainstorm → ... → review gates) introduces structural friction that's appropriate for code (where Gate B "tests must fail first" makes sense) but ill-fitting for iterative document drafting (where there's no "validation artifact" in the TDD sense).
+
+3. **The synthesis-v4 path is not yet validated** : it explicitly requires a 2-week POC (Q13) before architecture amendment. v1 cannot block on that POC.
+
+4. **The two paths are structurally separable** : the tools `create_document` / `update_document` / `read_document` / `list_documents` / `delete_document` are CRUD operations on the same MinIO + Gitea artifact surface that already exists (R-200-130..147). They can be invoked from chat-direct in v1 and from OpenHands in C15 in v2 — the underlying mutation API is the same. The migration is a re-wiring of the *caller*, not a rewrite of the surface.
+
+**Scope of the chat-direct v1 path.**
+
+- New C4 endpoint set `/api/v1/projects/{pid}/documents/{path}` (POST=create, PUT=update, GET=read, DELETE=delete) backed by `ArtifactsService.put_file` / `get_blob` / a new `delete_file`.
+- A deterministic per-project artifact run id (`live-docs`) that holds the document corpus, status=RUNNING, file-count grows on each mutation. No `mark_completed` ; the run is never closed.
+- **Per-mutation Gitea push** : each `put_file` triggers an immediate Gitea `create_or_update_file` (and a per-file commit). Replaces the batch-on-complete push of R-200-146.
+- C3 chat receives tool definitions in its system prompt (OpenAI tool-call format) for projects with `profile=docgen`. The C3 server detects `tool_calls` in the LLM response, executes them by calling the new C4 endpoints, returns tool results, and loops until the LLM produces a final message.
+- The UX ChatSidebar (already shipping) is extended to render tool-call invocations inline (e.g. `Editor: created docs/proposal.md`).
+
+**Migration conditions to D-015 → synthesis-v4 (v2 path).**
+
+The platform SHALL migrate DocGen to the pipeline path when ALL of the following hold :
+1. POC Q13 of `aywiz-architecture-synthesis-v4.md` passes (OpenHands+LiteLLM+Databricks task completion ≥70%, latency p95 <500ms overhead, cost reporting unified).
+2. The C6 `docs` domain plugin is specified (verifier = link-check + markdown-lint per §11.2 of synthesis-v4).
+3. The C15 pod image with `openhands-ai` + tree-sitter is built and signed.
+4. The `aywiz_working` in-pod MCP server (§6.3.6 of synthesis-v4) exposes at minimum `list_documents`, `read_document`, `create_document`, `update_document`, `delete_document` — same shapes as the chat-direct v1 tools, so the prompt + UX stay stable across the migration.
+
+When all four are true, a new ADR (D-NNN) records the migration ; D-015 is marked `superseded`.
+
+**Tech debt explicitly accepted.**
+
+- Two paradigms coexist (pipeline for CodeGen, chat-direct for DocGen) until v2. Operators and reviewers must understand the split.
+- Cost tracking for DocGen runs through C3 → C8 LLM calls (single egress preserved per R-100-011), but the per-run aggregation surface that exists for C4 pipeline runs (`c4_runs.cost`) has no analogue for chat-direct ; cost is queried at the C3 / C8 level.
+- No Gate B / Gate C semantics for DocGen v1 ; quality validation will land with the C6 `docs` plugin in v2.
+- The "live-docs" run model concentrates all docs in one artifact run per project. Historical snapshots (per-conversation, per-commit) are recoverable via Gitea history but not via the artifacts surface itself.
+
+**Validation of the migration path.**
+
+The synthesis-v4 design explicitly notes that the migration target (OpenHands + LiteLLM + Databricks) is "encapsulated behind a `pipeline/generate_engine.py` abstraction in C4 ; if OpenHands stops matching aywiz' needs ... the harness can be swapped". D-015 inherits this property : the DocGen v1 path is similarly encapsulated (the new `/documents` endpoints are stable across both paths), so v2 migration is a controller swap, not a surface rewrite.
+
 ---
 
 ## 6. Document Mapping

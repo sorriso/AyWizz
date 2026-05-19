@@ -1,6 +1,6 @@
 # =============================================================================
 # File: artifacts_storage.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/src/ay_platform_core/c4_orchestrator/artifacts_storage.py
 # Description: MinIO read-only adapter for the project-artifacts surface.
 #              Reads blobs under the convention
@@ -232,4 +232,36 @@ class ArtifactStorage:
         await asyncio.to_thread(
             self._put_blob_sync,
             tenant_id, project_id, run_id, relative_path, data, content_type,
+        )
+
+    def _delete_blob_sync(
+        self,
+        tenant_id: str,
+        project_id: str,
+        run_id: str,
+        relative_path: str,
+    ) -> None:
+        """Remove one object. MinIO's `remove_object` is idempotent —
+        deleting a missing key is a no-op, not an error. We mirror that
+        here (the documents DELETE endpoint maps a genuinely-missing
+        path to 404 by pre-checking with a list, not by relying on a
+        delete error)."""
+        key = self._object_name(tenant_id, project_id, run_id, relative_path)
+        try:
+            self._client.remove_object(self._bucket, key)
+        except S3Error as exc:
+            raise ArtifactStorageError(
+                f"MinIO remove_object failed for {key!r}: {exc}",
+            ) from exc
+
+    async def delete_blob(
+        self,
+        tenant_id: str,
+        project_id: str,
+        run_id: str,
+        relative_path: str,
+    ) -> None:
+        await asyncio.to_thread(
+            self._delete_blob_sync,
+            tenant_id, project_id, run_id, relative_path,
         )

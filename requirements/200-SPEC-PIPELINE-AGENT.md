@@ -720,6 +720,62 @@ When the orchestrator is wired without an `ArtifactsService` (legacy/test setups
 
 **Rationale.** Decouples the pipeline's correctness from the storage backend's availability. Backbone components (state machine, gate evaluators, three-fix rule) keep their semantics regardless of artifact-surface health.
 
+### 5.16 Chat-direct document API (DocGen v1 — D-015)
+
+> These requirements implement the v1 DocGen path recorded in **D-015** (`999-SYNTHESIS.md`). The conversation's tool calls (Phase 2.C.2) mutate the project document corpus directly, bypassing the 5-phase pipeline. Migration to the synthesis-v4 pipeline path (OpenHands in C15) is a v2 concern with conditions stated in D-015.
+
+#### R-200-153
+
+```yaml
+id: R-200-153
+version: 1
+status: draft
+category: functional
+```
+
+The platform SHALL expose a document CRUD surface under `/api/v1/projects/{project_id}/documents` : `POST` (create/overwrite, 201), `PUT /{path}` (overwrite, 200), `GET` (list, 200), `GET /{path}` (read, 200), `DELETE /{path}` (delete, 204). The surface is tenant-scoped (X-Tenant-Id guard) and project-scoped ; RBAC follows the artifacts surface — any tenant member, `tenant_manager` rejected (E-100-002 v2). Paths follow the R-200-130 convention (POSIX relative, no `..`, no leading `/`, no backslashes) ; violations map to 400.
+
+**Rationale.** A minimal REST surface the conversation tool layer drives. Reuses the existing MinIO + Gitea artifact backend (R-200-130..147) so v1 chat-direct and v2 pipeline paths share one mutation surface.
+
+#### R-200-154
+
+```yaml
+id: R-200-154
+version: 1
+status: draft
+category: functional
+```
+
+All documents for a project SHALL live under one perpetual artifact run with the deterministic id `live-docs`, created lazily on the first write with `status=running` and **never** transitioned to `completed`. The run's `file_count` / `total_bytes` SHALL be recomputed from the MinIO listing on every write and delete so the UX run summary stays accurate. The `live-docs` id SHALL be bound to exactly one `(tenant_id, project_id)` ; an attempt to bind it to a second project SHALL return 409.
+
+**Rationale.** A single growing run models a living document corpus better than one-run-per-edit (which would fragment the tree across hundreds of runs). The perpetual-RUNNING status distinguishes it from pipeline runs that complete.
+
+#### R-200-155
+
+```yaml
+id: R-200-155
+version: 1
+status: draft
+category: functional
+```
+
+Each successful document write (`POST` / `PUT`) SHALL trigger an immediate best-effort single-file push to the project's Gitea repo (one commit per write, message `"docgen — {path}"`, root-admin owner per R-200-146). A Gitea failure SHALL log a WARNING and SHALL NOT fail the write — MinIO remains the source of truth. `DELETE` SHALL remove the object from MinIO but SHALL NOT rewrite Gitea history — the deleted document survives in the git log (audit trail ; the deletion is recorded by the absence of subsequent commits, not by a history rewrite).
+
+**Rationale.** Incremental push gives the operator a per-edit Gitea history (vs the batch-on-complete push of R-200-146 for pipeline runs). Retaining deleted docs in git history is a deliberate audit choice consistent with R-200-145 transparency.
+
+#### R-200-156
+
+```yaml
+id: R-200-156
+version: 1
+status: draft
+category: functional
+```
+
+The document CRUD surface SHALL be profile-agnostic in code. The DocGen profile uses it via the C3 conversation tool layer (Phase 2.C.2) ; the v2 migration (D-015) reuses the same surface from the OpenHands runtime in C15. No profile-specific branching SHALL exist in the router or the service document methods.
+
+**Rationale.** Keeps the v1→v2 migration a caller swap, not a surface rewrite (D-015 encapsulation property).
+
 ---
 
 ## 6. Interfaces & Contracts

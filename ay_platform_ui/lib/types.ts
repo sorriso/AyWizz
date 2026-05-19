@@ -1,12 +1,20 @@
 // =============================================================================
 // File: types.ts
-// Version: 9
+// Version: 11
 // Path: ay_platform_ui/lib/types.ts
 // Description: Wire-format type definitions for the platform's public
 //              bootstrap surface — `/runtime-config.json` (static, served
 //              from this app's origin) and `/ux/config` (dynamic, served
 //              by C2). snake_case fields match the Python wire format
 //              verbatim so there's no mapping layer to keep in sync.
+//
+//              v11 (2026-05-19) : UNIFIED inline-event model.
+//              `StageEvent` + `ToolCallEvent` collapse into one
+//              `InlineEvent` (discriminated by `kind`) and
+//              `Message.stages` becomes `Message.events` — mirrors
+//              the C3 v10 single `event: inline` channel + persisted
+//              `MessagePublic.events` audit ledger. Rendered through
+//              one `<InlineLog>` formatter registry.
 //
 //              v7 : adds `user_color` to `UserPreferences*` and
 //              `StageEvent` for the C3 SSE pipeline-progress
@@ -172,21 +180,40 @@ export interface UserPreferencesUpdate {
 // C3 — Chat SSE pipeline progress events
 // ===========================================================================
 
-/** One named `event: stage` payload emitted by C3's RAG stream. The
- *  UX accumulates these next to the assistant avatar as a live
- *  timeline ; once `[DONE]` arrives the timeline collapses behind a
- *  `+` toggle. `running` events arrive first ; the matching `done`
- *  event arrives with `duration_ms` (and optional `stats`).
- *
- *  Known `name` values today : `retrieve`, `generate`, `done` ;
- *  the UI treats unknown names by falling back to `label` so the
- *  protocol can grow without an UX rev. */
-export interface StageEvent {
-  name: string;
-  status: "running" | "done";
+/** One `event: inline` payload — the UNIFIED inline-activity event
+ *  (C3 v10, 2026-05-19). Every kind of in-turn activity travels this
+ *  single channel, discriminated by `kind` :
+ *    - `kind:"stage"`    pipeline progress (retrieve/generate/done) ;
+ *                        carries `name`, `duration_ms`, `stats`.
+ *    - `kind:"tool_call"` DocGen tool (D-015) ; carries `name` (tool),
+ *                        `ok`, `round`, `summary`, `path`.
+ *    - future kinds      add a formatter in `<InlineLog>`, nothing
+ *                        else changes.
+ *  `running` events stream live ; the matching `done` event is the
+ *  one persisted on `Message.events` (the audit ledger) so the log
+ *  re-renders identically on navigation / reload. The UX renders
+ *  every kind through ONE formatter registry (`components/
+ *  inline-log.tsx`) — adding a kind never touches plumbing. */
+export interface InlineEvent {
+  kind: string;
   label: string;
-  duration_ms?: number;
-  stats?: Record<string, unknown>;
+  status: "running" | "done";
+  /** Machine id : stage name (`retrieve`…) or tool name. */
+  name?: string | null;
+  /** Outcome flag for `tool_call` events ; null for stages. */
+  ok?: boolean | null;
+  /** Tool-loop round index for `tool_call` events. */
+  round?: number | null;
+  /** Elapsed time for `stage` events. */
+  duration_ms?: number | null;
+  /** Free-form metrics for `stage` events. */
+  stats?: Record<string, unknown> | null;
+  /** Result summary for `tool_call` events. */
+  summary?: string | null;
+  /** Affected document path for mutating DocGen tools
+   *  (create / update / delete_document). Drives the inline log's
+   *  "Open in Working area" deep-link (Phase 2.C.3). */
+  path?: string | null;
 }
 
 /** Parse status of a C7 source — mirrors `ParseStatus` server-side
@@ -249,12 +276,14 @@ export interface Message {
   role: MessageRole;
   content: string;
   timestamp: string;
-  /** Pipeline timeline persisted alongside the message (assistant
-   *  messages only ; null on user messages and on legacy messages
-   *  saved before the server gained this field). Same shape as the
-   *  live `StageEvent` so the chat page can render them through the
-   *  same components on navigation / reload. */
-  stages?: StageEvent[] | null;
+  /** Unified inline-activity ledger persisted with the message
+   *  (assistant messages only ; null on user messages). Pipeline
+   *  stages + DocGen tool calls + future kinds, one audit list.
+   *  Legacy messages saved with the pre-unification `stages` field
+   *  are projected server-side into this list (kind="stage"), so the
+   *  client only ever sees `events`. Rendered through `<InlineLog>`
+   *  identically live and on reload. */
+  events?: InlineEvent[] | null;
 }
 
 export interface MessageList {

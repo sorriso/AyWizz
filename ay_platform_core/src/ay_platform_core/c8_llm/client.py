@@ -1,12 +1,20 @@
 # =============================================================================
 # File: client.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/src/ay_platform_core/c8_llm/client.py
 # Description: Python client for the C8 LLM gateway. All internal components
 #              (C3, C4, C6, C7, …) use this class rather than importing
 #              LiteLLM directly (R-800-011 policy). Enforces the mandatory
 #              agent/session headers (R-800-013) at the call site so no
 #              component can accidentally bypass cost attribution.
+#
+#              v2 (2026-05-19): `chat_completion` now retries HTTP 429
+#              (provider rate-limit) up to 3 attempts, honouring the
+#              `Retry-After` header / OpenRouter `retry_after_seconds`
+#              (clamped 20 s). Free hosted tiers throttle intermittently
+#              mid tool-loop ; a bounded honoured retry smooths it over
+#              instead of failing the whole DocGen turn. Non-429
+#              non-200 still raises immediately (unchanged).
 #
 # @relation implements:R-800-010
 # @relation implements:R-800-011
@@ -17,6 +25,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -41,6 +50,45 @@ class LLMGatewayError(RuntimeError):
         super().__init__(f"LLM gateway returned {status_code}: {body}")
         self.status_code = status_code
         self.body = body
+
+
+# Bounded retry for HTTP 429 (provider rate-limit). Free hosted tiers
+# (OpenRouter `:free`, etc.) throttle intermittently and return a
+# Retry-After ; honouring it for a couple of attempts smooths over
+# the transient throttle instead of failing the whole DocGen turn.
+# Capped so a hostile/huge delay can't wedge the request.
+_RETRY_429_MAX_ATTEMPTS = 3
+_RETRY_429_CAP_SECONDS = 20.0
+_RETRY_429_DEFAULT_SECONDS = 5.0
+
+
+def _retry_after_seconds(resp: httpx.Response) -> float:
+    """Best-effort extraction of the provider's requested retry delay
+    from a 429 — `Retry-After` header first, then the body's
+    `error.metadata.retry_after_seconds[_raw]` (OpenRouter shape).
+    Falls back to a small constant. Always clamped to the cap."""
+    raw = resp.headers.get("retry-after")
+    delay: float | None = None
+    if raw:
+        try:
+            delay = float(raw)
+        except ValueError:
+            delay = None
+    if delay is None:
+        try:
+            body = resp.json()
+            err = body.get("error", {}) if isinstance(body, dict) else {}
+            meta = err.get("metadata", {}) if isinstance(err, dict) else {}
+            for key in ("retry_after_seconds_raw", "retry_after_seconds"):
+                val = meta.get(key)
+                if isinstance(val, (int, float)):
+                    delay = float(val)
+                    break
+        except (ValueError, AttributeError):
+            delay = None
+    if delay is None or delay <= 0:
+        delay = _RETRY_429_DEFAULT_SECONDS
+    return min(delay, _RETRY_429_CAP_SECONDS)
 
 
 class LLMGatewayClient:
@@ -119,14 +167,22 @@ class LLMGatewayClient:
             cache_hint=cache_hint,
             bearer_token=bearer_token,
         )
-        resp = await self._client.post(
-            "/chat/completions",
-            json=payload.model_dump(exclude_none=True),
-            headers=headers,
-        )
-        if resp.status_code != 200:
-            raise LLMGatewayError(resp.status_code, resp.text)
-        return ChatCompletionResponse.model_validate(resp.json())
+        body = payload.model_dump(exclude_none=True)
+        last_resp: httpx.Response | None = None
+        for attempt in range(_RETRY_429_MAX_ATTEMPTS):
+            resp = await self._client.post(
+                "/chat/completions", json=body, headers=headers,
+            )
+            if resp.status_code == 200:
+                return ChatCompletionResponse.model_validate(resp.json())
+            last_resp = resp
+            # Only 429 (provider rate-limit) is retryable ; every
+            # other non-200 is a hard error surfaced immediately.
+            if resp.status_code != 429 or attempt == _RETRY_429_MAX_ATTEMPTS - 1:
+                break
+            await asyncio.sleep(_retry_after_seconds(resp))
+        assert last_resp is not None
+        raise LLMGatewayError(last_resp.status_code, last_resp.text)
 
     @asynccontextmanager
     async def chat_completion_stream(

@@ -1,6 +1,6 @@
 # =============================================================================
 # File: docker-compose.dev.override.yml
-# Version: 3
+# Version: 7
 # Path: ay_platform_core/tests/docker-compose.dev.override.yml
 # Description: Compose override layered on `docker-compose.yml` by
 #              `e2e_stack.sh dev` to flip C2 into demo-mode AND wire
@@ -19,6 +19,31 @@
 #              other services don't read those vars, so we leave them
 #              untouched.
 #
+#              v7 (2026-05-19) : route C8 to hosted Gemini (free)
+#              after 4 local models failed the agentic tool loop.
+#              c3 + c4 load an optional Tier-2 `../../.env.secret`
+#              LAST so `C3_C8_BEARER_TOKEN` (the Gemini API key,
+#              operator-authored) overrides the empty placeholder ;
+#              `required: false` keeps Ollama-offline + pytest e2e
+#              working when the file is absent. ollama_model_seed
+#              still pulls hermes3:8b so Ollama remains a valid
+#              offline fallback (revert the two .env.dev lines).
+#              v6 (2026-05-19) : pull hermes3:8b. llama3.1:8b emitted
+#              the tool call inline with the Llama `parameters` key +
+#              a corrupted `]"`-wrapped content (not structured
+#              tool_calls). hermes3 (Nous Hermes 3, Llama-3.1 base)
+#              is the dedicated agentic / function-calling pick.
+#              v5 (2026-05-19) : pull llama3.1:8b instead of
+#              qwen2.5-coder:7b. The coder model would not chain to
+#              update_document after read_document (modify requests
+#              never persisted) ; llama3.1:8b is Ollama's reference
+#              for multi-step function calling.
+#              v4 (2026-05-19) : raise the `ollama` resource envelope
+#              for the dev stack (12 GB / 4 CPU vs the base 2 GB / 2
+#              CPU ; 4 = all CPUs the VM exposes). The 2 GB container
+#              cap — not the Docker VM —
+#              OOM-killed the qwen2.5-coder:7b llama runner on load
+#              (root cause of the recurring `signal: killed`).
 #              v3 (2026-05-13) : add c4 to the override so the
 #              generate-phase pipeline (R-200-150..152) hits real
 #              Ollama in dev instead of the canned mock_llm response
@@ -38,10 +63,20 @@ services:
   # (C3 → C7 retrieval → C8 LLM) is wired in the manual-test stack.
   # Pytest e2e leaves .env.test's empty value in place to keep the
   # auth-matrix deterministic.
+  #
+  # `.env.secret` (Tier-2, git-ignored, operator-authored — NEVER
+  # committed) is loaded LAST so its `C3_C8_BEARER_TOKEN` (the hosted
+  # provider API key, e.g. the Gemini key) overrides the empty
+  # placeholder from .env.test. `required: false` → absent file is
+  # ignored, so the Ollama-offline fallback and pytest e2e still run
+  # without it. Only the secret lives there ; the non-secret
+  # C8_GATEWAY_URL / C8_DEFAULT_MODEL stay in Tier-1 .env.dev.
   c3:
     env_file:
       - .env.test
       - ../../.env.dev
+      - path: ../../.env.secret
+        required: false
 
   # c4 needs `.env.dev` so the orchestrator's in-process dispatcher
   # routes its LLM calls to real Ollama rather than the (now
@@ -54,6 +89,34 @@ services:
     env_file:
       - .env.test
       - ../../.env.dev
+      # Same Tier-2 secret chain as c3 : the orchestrator's in-process
+      # dispatcher also calls C8, so it needs the hosted-provider key
+      # when C8 is routed off-Ollama. Optional → Ollama fallback OK.
+      - path: ../../.env.secret
+        required: false
+
+  # Raise the Ollama resource envelope for the dev stack ONLY. The
+  # base docker-compose.yml caps ollama at 2 GB / 2 CPU — sized for
+  # the embedding model (all-minilm, ~100 MB) and kept lean so the
+  # pytest e2e tier stays light. The DocGen dev flow runs a real
+  # chat model (qwen2.5-coder:7b, ~5-6 GB resident); under the 2 GB
+  # cap the container cgroup OOM-killed the llama runner on load
+  # (`signal: killed`, ExitCode OOMKilled) regardless of the Docker
+  # Desktop VM size — that 2 GB ceiling, not the VM, was the blocker
+  # (diagnosed 2026-05-19). Compose deep-merges deploy.resources by
+  # key, so this overrides only memory/cpus for the dev stack.
+  ollama:
+    deploy:
+      resources:
+        limits:
+          # VM exposes 4 CPUs ; take them all for 7B CPU inference
+          # (the latency bottleneck). Memory well above the ~5-6 GB
+          # resident footprint + KV/compute headroom.
+          cpus: "4.0"
+          memory: 12288M
+        reservations:
+          cpus: "2.0"
+          memory: 6144M
 
   # Pull a chat model into Ollama in addition to the embedding model
   # already seeded by docker-compose.yml. The dev stack routes C8
@@ -71,8 +134,8 @@ services:
         set -e
         echo "[dev] Pulling embedding model all-minilm"
         ollama pull all-minilm
-        echo "[dev] Pulling chat model qwen2.5:3b (this is a ~2 GB download on first run)"
-        ollama pull qwen2.5:3b
+        echo "[dev] Pulling chat model hermes3:8b (~4.7 GB download on first run)"
+        ollama pull hermes3:8b
         echo "[dev] Seed done."
 
   # Next.js UI — built from the monorepo root via Dockerfile.ui

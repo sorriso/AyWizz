@@ -229,15 +229,68 @@ async def _ensure_demo_seed(
             username, user_id, role.value,
         )
 
-    # 3. Project — created by the tenant-admin user. Pre-check by id.
-    # `profile=code` matches the only production-domain plugin shipped
-    # in v1 (C4 orchestrator). Future profiles (data / doc / etc.) will
-    # be selectable via a new env var or a per-tenant default.
-    if await repo.get_project(project_id) is None:
-        # Provision Gitea backing repo BEFORE inserting the Arango
-        # row — mirrors the regular `AuthService.create_project`
-        # invariant (R-200-141) so the demo project has the same
-        # shape as user-created projects.
+    # 3. Projects (2) — one CodeGen project (`project-test`, profile=code,
+    # full pipeline UX with Pipeline / Validation / Requirements) and one
+    # DocGen project (`project-docgen`, profile=docgen, simplified UX
+    # with Conversations + Documents only). Both seeded under the same
+    # tenant with identical grants. Per-project provisioning logic is
+    # factored into `_seed_demo_project` so the two flows share the
+    # idempotent Gitea + backfill scaffolding.
+    await _seed_demo_project(
+        repo,
+        gitea=gitea,
+        tenant_id=tenant_id,
+        project_id=project_id,
+        project_name=cfg.demo_seed_project_name,
+        profile="code",
+        now=now,
+    )
+    await _seed_demo_project(
+        repo,
+        gitea=gitea,
+        tenant_id=tenant_id,
+        project_id=cfg.demo_seed_docgen_project_id,
+        project_name=cfg.demo_seed_docgen_project_name,
+        profile="docgen",
+        now=now,
+    )
+
+    # 4. Project grants on BOTH demo projects so the demo editor /
+    # viewer credentials work on each one. `grant_project_role` uses
+    # `overwrite=True` so re-running is safe.
+    grants_to_seed: list[tuple[str, RBACProjectRole]] = [
+        ("demo-project-editor", RBACProjectRole.EDITOR),
+        ("demo-project-viewer", RBACProjectRole.VIEWER),
+    ]
+    for target_project in (project_id, cfg.demo_seed_docgen_project_id):
+        for grantee_id, project_role in grants_to_seed:
+            await repo.grant_project_role(
+                grantee_id, target_project, project_role.value,
+            )
+            _log.info(
+                "demo seed: granted %s on project %r to user %s",
+                project_role.value, target_project, grantee_id,
+            )
+
+
+async def _seed_demo_project(
+    repo: AuthRepository,
+    *,
+    gitea: GiteaClient | None,
+    tenant_id: str,
+    project_id: str,
+    project_name: str,
+    profile: str,
+    now: datetime,
+) -> None:
+    """Idempotent provisioning of a single demo project. Handles three
+    cases : (a) project missing → create + provision Gitea ; (b) project
+    exists without git_repo_url → backfill Gitea ; (c) project fully
+    provisioned → no-op. Shared between project-test (profile=code) and
+    project-docgen (profile=docgen) so the two demo projects have the
+    same shape (R-200-141 + R-200-142)."""
+    existing = await repo.get_project(project_id)
+    if existing is None:
         git_repo_url: str | None = None
         if gitea is not None:
             svc_user = f"svc-{tenant_id}-{project_id}"
@@ -265,80 +318,61 @@ async def _ensure_demo_seed(
                 _log.info("demo seed: gitea repo %s ready", repo_obj.full_name)
             except Exception as exc:
                 _log.warning(
-                    "demo seed: gitea provisioning failed (%s) — "
+                    "demo seed: gitea provisioning failed for %r (%s) — "
                     "project created without a backing repo",
-                    exc,
+                    project_id, exc,
                 )
         await repo.insert_project(
             project_id,
             tenant_id,
-            cfg.demo_seed_project_name,
+            project_name,
             now,
             "demo-tenant-admin",
-            profile="code",
+            profile=profile,
             git_repo_url=git_repo_url,
         )
         _log.info(
-            "demo seed: created project %r in tenant %r (profile=code)",
-            project_id, tenant_id,
+            "demo seed: created project %r in tenant %r (profile=%s)",
+            project_id, tenant_id, profile,
         )
-    elif gitea is not None:
-        # Backfill : the project pre-dates the Gitea pass (was created
-        # by a previous C2 image without provisioning). Catch up so
-        # the demo project has the same shape as fresh user-created
-        # projects. Idempotent : if `git_repo_url` is already set, no
-        # work happens.
-        existing = await repo.get_project(project_id)
-        if existing is not None and not existing.get("git_repo_url"):
-            svc_user = f"svc-{tenant_id}-{project_id}"
-            svc_pwd = uuid.uuid4().hex
-            try:
-                await gitea.create_user(
-                    username=svc_user,
-                    password=svc_pwd,
-                    email=f"{svc_user}@aywizz.local",
-                )
-                repo_obj = await gitea.create_repo(
-                    owner=svc_user,
-                    name=project_id,
-                    description=f"Backing repo for demo project {project_id!r}.",
-                )
-                await repo.upsert_project_secret(
-                    project_id,
-                    {
-                        "gitea_username": svc_user,
-                        "gitea_password": svc_pwd,
-                        "gitea_repo_full_name": repo_obj.full_name,
-                    },
-                )
-                # Patch the project row with the freshly-known URL.
-                await repo.update_project(
-                    project_id, {"git_repo_url": repo_obj.clone_url},
-                )
-                _log.info(
-                    "demo seed: backfilled gitea repo %s for existing project %r",
-                    repo_obj.full_name, project_id,
-                )
-            except Exception as exc:
-                _log.warning(
-                    "demo seed: gitea backfill failed (%s) — project keeps "
-                    "no git_repo_url",
-                    exc,
-                )
-
-    # 4. Project grants — `grant_project_role` uses `overwrite=True`
-    # so re-running is safe (the role assignment doc is keyed
-    # `{user_id}:{project_id}`).
-    grants_to_seed: list[tuple[str, RBACProjectRole]] = [
-        ("demo-project-editor", RBACProjectRole.EDITOR),
-        ("demo-project-viewer", RBACProjectRole.VIEWER),
-    ]
-    for grantee_id, project_role in grants_to_seed:
-        await repo.grant_project_role(grantee_id, project_id, project_role.value)
-        _log.info(
-            "demo seed: granted %s on project %r to user %s",
-            project_role.value, project_id, grantee_id,
-        )
+        return
+    if gitea is not None and not existing.get("git_repo_url"):
+        # Backfill : project pre-dates Gitea provisioning. Idempotent —
+        # if `git_repo_url` is already set we don't reach this branch.
+        svc_user = f"svc-{tenant_id}-{project_id}"
+        svc_pwd = uuid.uuid4().hex
+        try:
+            await gitea.create_user(
+                username=svc_user,
+                password=svc_pwd,
+                email=f"{svc_user}@aywizz.local",
+            )
+            repo_obj = await gitea.create_repo(
+                owner=svc_user,
+                name=project_id,
+                description=f"Backing repo for demo project {project_id!r}.",
+            )
+            await repo.upsert_project_secret(
+                project_id,
+                {
+                    "gitea_username": svc_user,
+                    "gitea_password": svc_pwd,
+                    "gitea_repo_full_name": repo_obj.full_name,
+                },
+            )
+            await repo.update_project(
+                project_id, {"git_repo_url": repo_obj.clone_url},
+            )
+            _log.info(
+                "demo seed: backfilled gitea repo %s for existing project %r",
+                repo_obj.full_name, project_id,
+            )
+        except Exception as exc:
+            _log.warning(
+                "demo seed: gitea backfill failed for %r (%s) — project "
+                "keeps no git_repo_url",
+                project_id, exc,
+            )
 
 
 def create_app(config: AuthConfig | None = None) -> FastAPI:

@@ -1,14 +1,59 @@
 // =============================================================================
 // File: page.tsx
-// Version: 7
+// Version: 14
 // Path: ay_platform_ui/app/(protected)/projects/[pid]/conversations/[cid]/page.tsx
+//
+// v14 (2026-05-19): Increment 3a — marks this conversation active
+// in the cross-nav store (so re-entering the Conversations tab
+// resumes it via the list page) + persists/restores the composer
+// draft. Both breadcrumbs clear `activeConversationId` so the list
+// is still reachable on purpose.
+//
+// v13 (2026-05-19): messages pane is now CONTENT-HEIGHT (capped +
+// scroll), not viewport-filling. v12's justify-end only moved the
+// empty void from below the last message to above the first ; the
+// fix is to not stretch the pane at all — composer sits right under
+// the content, no void either side, scrolls only when long.
+//
+// v12 (2026-05-19): two UX asks — (1) [superseded by v13] ;
+// (2) explicit "Génération terminée — à vous" cue + composer
+// auto-refocus on turn end (the spinner just vanishing was
+// ambiguous about regaining control).
 // Description: Chat view — message history + SSE-streamed assistant
 //              replies. The composer at the bottom POSTs to C3's
 //              `/messages` endpoint ; chunks land via the streaming
 //              ApiClient method and are appended to a transient
+//
+//              v11 (2026-05-19): unified inline pipeline. The bespoke
+//              StageEvent/ToolCallEvent state, the PipelineChip /
+//              StageTimelineFull widgets and the separate amber strip
+//              are all replaced by ONE <InlineLog> fed by the single
+//              `onInlineEvent` stream (live turn, accumulated) AND by
+//              each message's persisted `events` audit ledger
+//              (re-rendered identically on reload).
 //              "live" message. When the stream terminates ([DONE]),
 //              the message is persisted and the conversation refetched
 //              so the server-side id/timestamp take over.
+//
+//              v10 : explicit "Génération en cours…" indicator while
+//              streaming (the in-flight dots alone read as frozen
+//              during a long non-streaming DocGen tool loop).
+//
+//              v9 : the tool-call strip accumulates across the
+//              conversation's turns (no per-send reset) so the full
+//              document-tool trail stays visible — was previously
+//              wiped on every new message, hiding earlier rounds.
+//
+//              v8 : DocGen tool-call inline strip. The dedicated
+//              Conversations view now mirrors the ChatSidebar amber
+//              "Document tools" panel — `event: tool_call` SSE events
+//              for the in-flight turn render with ⏳/✅/❌ glyphs so
+//              create/update/delete_document activity is visible here
+//              too (previously only in the Working area sidebar).
+//              create / update events additionally render an "Open
+//              in Working area →" deep-link (`?conv=&path=`) so the
+//              operator jumps straight to the affected document with
+//              the originating conversation pre-selected.
 //
 //              v7 : the pipeline timeline now persists server-side
 //              and is read back from `Message.stages` on navigation /
@@ -71,10 +116,12 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { useProjectUi } from "@/app/(protected)/workspace-store";
 import { Avatar, ThinkingDots } from "@/components/avatar";
+import { InlineLog } from "@/components/inline-log";
 import { ApiClient, ApiError } from "@/lib/apiClient";
 import { fullNameForTooltip, getEffectiveTrigram } from "@/lib/preferences";
-import type { Conversation, Message, MessageRole, StageEvent } from "@/lib/types";
+import type { Conversation, InlineEvent, Message, MessageRole } from "@/lib/types";
 
 import { useAuth } from "../../../../../auth-provider";
 import { useConfigState } from "../../../../../providers";
@@ -98,11 +145,11 @@ interface DisplayMessage {
   /** Stable key for React. Server messages use their id ; the live
    *  streamed one uses "live". */
   key: string;
-  /** Stage timeline attached to a live assistant message. Reset on
-   *  each new send ; server-restored messages don't carry stages. */
-  stages?: StageEvent[];
-  /** True while the SSE is open ; used to keep the timeline pinned
-   *  on the message and not collapsed prematurely. */
+  /** Unified inline-activity ledger for this message — live events
+   *  for the in-flight turn, or the persisted `events` audit ledger
+   *  for server-restored messages. Rendered via <InlineLog>. */
+  events?: InlineEvent[];
+  /** True while the SSE is open. */
   inFlight?: boolean;
 }
 
@@ -112,11 +159,20 @@ export default function ChatPage() {
   const conversationId = decodeURIComponent(params.cid);
   const configState = useConfigState();
   const { state: authState } = useAuth();
+  // Cross-nav store (Increment 3a). Mark THIS conversation active so
+  // returning to the Conversations tab resumes it (the list page
+  // reads `activeConversationId`). Composer draft persisted too.
+  const { ui, setUi } = useProjectUi(projectId);
+  const composerRestoredRef = useRef(false);
   const [state, setState] = useState<LoadState>({ status: "loading" });
   const [composer, setComposer] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [liveAssistant, setLiveAssistant] = useState<string | null>(null);
-  const [liveStages, setLiveStages] = useState<StageEvent[]>([]);
+  // Unified inline-activity for the in-flight turn (stages + tool
+  // calls + future kinds), accumulated across this conversation's
+  // turns and rendered via <InlineLog>. The persisted copy lands in
+  // each assistant message's `events` (audit ledger) on reload.
+  const [liveEvents, setLiveEvents] = useState<InlineEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
   // Behavioural prompts resolved by C2 — fetched once on mount and
   // forwarded on every chat message. `null` means "not yet loaded" ;
@@ -124,7 +180,13 @@ export default function ChatPage() {
   const [userPrompt, setUserPrompt] = useState<string | null>(null);
   const [projectPrompt, setProjectPrompt] = useState<string | null>(null);
   const [userColor, setUserColor] = useState<string | null>(null);
+  // Brief "turn finished — control is back to you" cue. Set when a
+  // send completes, auto-cleared after a few seconds. Complements
+  // the in-flight spinner so the operator gets an explicit end
+  // signal (the spinner just vanishing read as ambiguous).
+  const [justFinished, setJustFinished] = useState(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   // Snapshot of `state.messages.length` taken just BEFORE the
   // optimistic user row is pushed. We use it to suppress the live
   // assistant row in the brief window between `loadAll()` returning
@@ -234,10 +296,37 @@ export default function ChatPage() {
   // live-streamed chunk advances. Biome can't see the deps are read
   // (we rely on them only as triggers) ; the suppression is on
   // purpose.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: state + liveAssistant + liveStages are scroll triggers
+  // biome-ignore lint/correctness/useExhaustiveDependencies: state + liveAssistant + liveEvents are scroll triggers
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [state, liveAssistant, liveStages]);
+  }, [state, liveAssistant, liveEvents]);
+
+  // Auto-dismiss the "turn finished" cue after a few seconds so it
+  // doesn't linger ; cleared early on the next send.
+  useEffect(() => {
+    if (!justFinished) return;
+    const t = setTimeout(() => setJustFinished(false), 4000);
+    return () => clearTimeout(t);
+  }, [justFinished]);
+
+  // Mark this conversation active for the cross-nav store so the
+  // Conversations tab resumes it (the list page auto-redirects).
+  useEffect(() => {
+    setUi({ activeConversationId: conversationId });
+  }, [conversationId, setUi]);
+
+  // RESTORE composer draft once the store hydrates (only if the
+  // operator hasn't started typing this mount). PERSIST on change.
+  useEffect(() => {
+    if (composerRestoredRef.current) return;
+    if (ui.composerDraft && composer === "") {
+      composerRestoredRef.current = true;
+      setComposer(ui.composerDraft);
+    }
+  }, [ui.composerDraft, composer]);
+  useEffect(() => {
+    setUi({ composerDraft: composer });
+  }, [composer, setUi]);
 
   async function onSend(e: FormEvent<HTMLFormElement>): Promise<void> {
     e.preventDefault();
@@ -291,8 +380,12 @@ export default function ChatPage() {
     });
 
     setStreaming(true);
+    setJustFinished(false);
     setLiveAssistant("");
-    setLiveStages([]);
+    // Inline-activity accumulates across this conversation's turns
+    // (the operator wants the full trail). It resets naturally when
+    // the route changes to another conversation — this page is
+    // per-`[cid]` so a different conversation remounts the component.
     try {
       await apiClient.sendMessageStream(
         conversationId,
@@ -303,18 +396,22 @@ export default function ChatPage() {
         {
           userPrompt,
           projectPrompt,
-          onStage: (stage) => {
-            // Merge same-name running/done events into a single row :
-            // when a `done` event arrives for a phase already shown
-            // as `running`, replace that entry rather than appending.
-            // Net visual effect : one row per phase that updates in
-            // place with the final duration + stats.
-            setLiveStages((prev) => {
-              const idx = prev.findIndex((s) => s.name === stage.name && s.status === "running");
-              if (idx === -1) return [...prev, stage];
-              const next = prev.slice();
-              next[idx] = stage;
-              return next;
+          onInlineEvent: (evt) => {
+            // Append every kind ; <InlineLog> groups + formats. For
+            // stages, collapse a `done` onto its matching `running`
+            // (same kind+name) so a phase shows one in-place row.
+            setLiveEvents((prev) => {
+              if (evt.kind === "stage" && evt.status === "done") {
+                const idx = prev.findIndex(
+                  (e) => e.kind === "stage" && e.name === evt.name && e.status === "running",
+                );
+                if (idx !== -1) {
+                  const next = prev.slice();
+                  next[idx] = evt;
+                  return next;
+                }
+              }
+              return [...prev, evt];
             });
           },
         },
@@ -324,17 +421,19 @@ export default function ChatPage() {
       setError(`Send failed: ${message}`);
     } finally {
       setStreaming(false);
-      // Keep liveAssistant + liveStages visible briefly so the
-      // collapsible timeline survives the re-fetch ; loadAll will
-      // overwrite the optimistic messages, then we clear the live
-      // state.
+      // Keep liveAssistant + liveEvents visible briefly so the inline
+      // log survives the re-fetch ; loadAll overwrites the optimistic
+      // messages, then we clear the transient assistant text. The
+      // persisted `events` ledger then drives the render. We DO NOT
+      // clear `liveEvents` here so the user can still inspect the
+      // turn ; navigating away resets the component naturally.
       await loadAll();
       setLiveAssistant(null);
-      // Stages stay on screen but the `inFlight=false` flag flips
-      // so the bubble renders with the `+` collapser instead of the
-      // live timeline. We DO NOT clear `liveStages` here so the
-      // user can inspect what happened ; navigating away resets
-      // the component and clears them naturally.
+      // Explicit end-of-turn signal + hand control back : flash the
+      // "terminé — à vous" cue and refocus the composer so the
+      // cursor is tangibly back with the operator.
+      setJustFinished(true);
+      composerRef.current?.focus();
     }
   }
 
@@ -352,6 +451,7 @@ export default function ChatPage() {
         <h2 className="text-2xl font-semibold">Conversation not found</h2>
         <Link
           href={`/projects/${encodeURIComponent(projectId)}/conversations`}
+          onClick={() => setUi({ activeConversationId: null })}
           className="mt-6 inline-block rounded-md border border-neutral-300 px-3 py-1.5 text-sm text-neutral-700 hover:bg-neutral-50"
         >
           ← Back to conversations
@@ -385,18 +485,18 @@ export default function ChatPage() {
   })();
 
   const display: DisplayMessage[] = state.messages.map((m, idx) => {
-    // Stages source precedence : live SSE timeline for the latest
-    // assistant row WHEN this is the freshly-streamed turn (not yet
-    // refetched from server) ; server-persisted stages otherwise.
-    // Server stages survive navigation / refresh ; the live array
-    // covers the brief window between [DONE] and `loadAll()` resolving.
+    // Events source precedence : the live-accumulated inline log for
+    // the latest assistant row WHEN this is the freshly-streamed turn
+    // (not yet refetched) ; the server-persisted `events` audit
+    // ledger otherwise. The persisted copy survives navigation /
+    // reload ; the live array covers the [DONE]→loadAll() window.
     const liveCandidate =
-      idx === lastAssistantIdx && liveStages.length > 0 && !streaming ? liveStages : undefined;
+      idx === lastAssistantIdx && liveEvents.length > 0 && !streaming ? liveEvents : undefined;
     return {
       role: m.role,
       content: m.content,
       key: m.id,
-      stages: liveCandidate ?? m.stages ?? undefined,
+      events: liveCandidate ?? m.events ?? undefined,
     };
   });
   // Live (in-flight) assistant row : show ONLY while the server's
@@ -410,21 +510,19 @@ export default function ChatPage() {
       role: "assistant",
       content: liveAssistant,
       key: "live",
-      stages: liveStages.length > 0 ? liveStages : undefined,
+      events: liveEvents.length > 0 ? liveEvents : undefined,
       inFlight: streaming,
     });
   }
 
   return (
-    <main
-      className="flex h-[calc(100vh-3.5rem-4rem)] w-full flex-col px-6 py-6"
-      data-testid="chat-view"
-    >
+    <main className="flex w-full flex-col px-6 py-6" data-testid="chat-view">
       <header className="flex items-baseline justify-between gap-3">
         <div>
           <nav className="text-xs text-neutral-500" aria-label="Breadcrumb">
             <Link
               href={`/projects/${encodeURIComponent(projectId)}/conversations`}
+              onClick={() => setUi({ activeConversationId: null })}
               className="hover:underline"
             >
               ← Conversations
@@ -438,33 +536,67 @@ export default function ChatPage() {
         </span>
       </header>
 
+      {/* Content-height (not viewport-filling) so there is NO empty
+          void — neither below the last message nor above the first.
+          The pane grows with the conversation and only starts to
+          scroll internally once it would exceed the cap ; the
+          composer always sits directly under the content. */}
       <section
-        className="mt-4 flex-1 overflow-y-auto rounded-lg border border-neutral-200 bg-neutral-50 p-4"
+        className="mt-4 max-h-[calc(100vh-16rem)] overflow-y-auto rounded-lg border border-neutral-200 bg-neutral-50 p-4"
         data-testid="messages-pane"
       >
-        {display.length === 0 ? (
-          <p className="text-sm text-neutral-500">
-            No messages yet. Ask anything below — replies are augmented with this project's RAG
-            sources.
-          </p>
-        ) : (
-          <ul className="space-y-3">
-            {display.map((m) => (
-              <li key={m.key}>
-                <MessageBubble
-                  role={m.role}
-                  content={m.content}
-                  user={userIdentity}
-                  assistant={assistantIdentity}
-                  userColor={userColor}
-                  stages={m.stages}
-                  inFlight={m.inFlight}
-                />
-              </li>
-            ))}
-          </ul>
-        )}
-        <div ref={bottomRef} />
+        <div className="flex flex-col gap-3">
+          {display.length === 0 ? (
+            <p className="text-sm text-neutral-500">
+              No messages yet. Ask anything below — replies are augmented with this project's RAG
+              sources.
+            </p>
+          ) : (
+            <ul className="space-y-3">
+              {display.map((m) => (
+                <li key={m.key}>
+                  <MessageBubble
+                    role={m.role}
+                    content={m.content}
+                    user={userIdentity}
+                    assistant={assistantIdentity}
+                    userColor={userColor}
+                    events={m.events}
+                    inFlight={m.inFlight}
+                    projectId={projectId}
+                    conversationId={conversationId}
+                  />
+                </li>
+              ))}
+            </ul>
+          )}
+          {streaming ? (
+            // Explicit "working" indicator. In DocGen mode the tool
+            // loop is non-streaming until the end, so the in-flight
+            // bubble's dots alone read as "frozen" for a long turn.
+            <div
+              className="flex items-center gap-2 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-700"
+              data-testid="chat-generating"
+            >
+              <span
+                className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-blue-300 border-t-blue-700"
+                aria-hidden="true"
+              />
+              <span>Génération en cours… (l'assistant réfléchit et utilise ses outils)</span>
+            </div>
+          ) : justFinished ? (
+            // Explicit end-of-turn signal : the spinner just vanishing
+            // was ambiguous ("is it done? do I have control back?").
+            <div
+              className="flex items-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700"
+              data-testid="chat-finished"
+            >
+              <span aria-hidden="true">✓</span>
+              <span>Génération terminée — à vous (le champ est de nouveau actif).</span>
+            </div>
+          ) : null}
+          <div ref={bottomRef} />
+        </div>
       </section>
 
       {error ? (
@@ -475,6 +607,7 @@ export default function ChatPage() {
 
       <form onSubmit={onSend} className="mt-3 flex items-end gap-2" data-testid="composer">
         <textarea
+          ref={composerRef}
           value={composer}
           onChange={(e) => {
             setComposer(e.target.value);
@@ -518,42 +651,24 @@ function MessageBubble({
   user,
   assistant,
   userColor,
-  stages,
+  events,
   inFlight,
+  projectId,
+  conversationId,
 }: {
   role: MessageRole;
   content: string;
   user: Identity;
   assistant: Identity;
   userColor: string | null;
-  stages?: StageEvent[];
+  events?: InlineEvent[];
   inFlight?: boolean;
+  projectId?: string;
+  conversationId?: string;
 }) {
   const isUser = role === "user";
   const id = isUser ? user : assistant;
-  // Narrow the optional `stages` prop to a concrete array — TypeScript
-  // can't carry the narrowing through JSX, so capturing it in a local
-  // typed `const` keeps the chip + full-panel components type-safe
-  // without the `stages!` non-null assertion biome flags as forbidden.
-  const stageList: StageEvent[] = !isUser && stages ? stages : [];
-  const hasStages = stageList.length > 0;
-
-  // Pipeline open/closed state lives at the message-row level so we
-  // can swap between two layouts based on it :
-  //   - `pipelineOpen=false` (or no stages) : trigram + chip + bubble
-  //     all on a SINGLE LINE, minimising vertical real estate once
-  //     the reply is on screen.
-  //   - `pipelineOpen=true` : the full timeline panel renders ABOVE
-  //     the bubble (avatar still on its own column to the left), like
-  //     the v3 layout, so the operator can read each phase + stats.
-  // Streaming forces `open=true` so the operator sees live progress
-  // without an extra click ; once the stream ends, the panel auto-
-  // collapses but stays one click away via the chip.
-  const [pipelineOpen, setPipelineOpen] = useState(inFlight === true);
-  useEffect(() => {
-    if (inFlight === true) setPipelineOpen(true);
-    else if (inFlight === false) setPipelineOpen(false);
-  }, [inFlight]);
+  const inlineEvents = !isUser && events ? events : [];
 
   // Per-user bubble tint — inline RGB string built from the hex so
   // Tailwind's JIT doesn't need to know about user-supplied colours.
@@ -573,42 +688,10 @@ function MessageBubble({
         : "border-blue-200 bg-blue-50 text-blue-900"
       : "border-neutral-200 bg-white text-neutral-900",
   ].join(" ");
-  // Empty assistant bubble while inFlight → render the animated
-  // ThinkingDots (used to be a standalone bubble — folded in here
-  // so a streaming turn shows ONE row instead of two duplicates).
+  // Empty assistant bubble while inFlight → animated ThinkingDots.
   const showThinkingDots = !isUser && inFlight === true && (content === "" || content == null);
   const bubbleContent = content ? content : isUser ? "" : showThinkingDots ? <ThinkingDots /> : "…";
 
-  // Inline layout (one line) — used when the pipeline is collapsed
-  // OR when there are no stages at all (most of the time on the user
-  // side or on legacy assistant rows fetched from the server). The
-  // chip sits between the avatar and the bubble ; clicking it expands
-  // to the stacked layout below.
-  if (!pipelineOpen) {
-    return (
-      <div
-        className={["flex items-center gap-3", isUser ? "flex-row-reverse" : "flex-row"].join(" ")}
-        data-testid={`message-${role}`}
-      >
-        <Avatar
-          trigram={id.trigram}
-          fullName={id.fullName}
-          variant={isUser ? "user" : "assistant"}
-          color={isUser ? userColor : null}
-        />
-        {hasStages ? (
-          <PipelineChip stages={stageList} onExpand={() => setPipelineOpen(true)} />
-        ) : null}
-        <div className={`min-w-0 flex-1 ${bubbleClasses}`} style={userBubbleStyle}>
-          {bubbleContent}
-        </div>
-      </div>
-    );
-  }
-
-  // Stacked layout (two lines) — used when the pipeline panel is
-  // expanded (manually, or automatically while streaming). The full
-  // timeline takes the row's vertical space ; bubble follows below.
   return (
     <div
       className={["flex items-start gap-3", isUser ? "flex-row-reverse" : "flex-row"].join(" ")}
@@ -621,115 +704,18 @@ function MessageBubble({
         color={isUser ? userColor : null}
       />
       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-        {hasStages ? (
-          <StageTimelineFull stages={stageList} onCollapse={() => setPipelineOpen(false)} />
-        ) : null}
         <div className={bubbleClasses} style={userBubbleStyle}>
           {bubbleContent}
         </div>
+        {/* Unified inline-activity log (stages + tool calls + future
+            kinds) — live for the in-flight turn, persisted audit
+            ledger on reload. One formatter registry. */}
+        {inlineEvents.length > 0 ? (
+          <InlineLog events={inlineEvents} projectId={projectId} conversationId={conversationId} />
+        ) : null}
       </div>
     </div>
   );
-}
-
-/** Compact inline pill — collapsed pipeline state. Click to expand
- *  via the parent's `onExpand` callback (open/closed state lives in
- *  MessageBubble so we can switch the entire row layout between
- *  single-line and stacked, not just the panel widget itself). */
-function PipelineChip({ stages, onExpand }: { stages: StageEvent[]; onExpand: () => void }) {
-  const totalMs = stages.reduce((acc, s) => acc + (s.duration_ms ?? 0), 0);
-  const summary = totalMs > 0 ? `${formatDuration(totalMs)} total` : "in progress";
-  return (
-    <button
-      type="button"
-      onClick={onExpand}
-      className="inline-flex shrink-0 items-center gap-1 rounded-full border border-neutral-200 bg-neutral-100 px-2 py-0.5 font-mono text-[10px] text-neutral-600 hover:bg-neutral-200"
-      aria-expanded={false}
-      data-testid="stage-chip"
-      title={`Pipeline · ${summary}`}
-    >
-      <StageDot status={totalMs > 0 ? "done" : "running"} />
-      <span>+ {totalMs > 0 ? formatDuration(totalMs) : "…"}</span>
-    </button>
-  );
-}
-
-/** Full expanded panel — header with collapse button + one row per
- *  pipeline phase with duration and optional stats. Same look as the
- *  v3 panel ; the open/closed state is owned by the parent now. */
-function StageTimelineFull({
-  stages,
-  onCollapse,
-}: {
-  stages: StageEvent[];
-  onCollapse: () => void;
-}) {
-  const totalMs = stages.reduce((acc, s) => acc + (s.duration_ms ?? 0), 0);
-  const summary = totalMs > 0 ? `${formatDuration(totalMs)} total` : "in progress";
-  return (
-    <div
-      className="w-full rounded-md border border-neutral-200 bg-neutral-100/60 text-xs"
-      data-testid="stage-timeline"
-    >
-      <button
-        type="button"
-        onClick={onCollapse}
-        className="flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-left text-neutral-700 hover:bg-neutral-200/60"
-        aria-expanded={true}
-        data-testid="stage-toggle"
-      >
-        <span className="font-mono text-[11px] uppercase tracking-wide text-neutral-500">
-          − pipeline
-        </span>
-        <span className="truncate text-[11px] text-neutral-500">{summary}</span>
-      </button>
-      <ul className="divide-y divide-neutral-200/60 px-2.5 pb-1.5 pt-0.5">
-        {stages.map((s, i) => (
-          <li
-            // biome-ignore lint/suspicious/noArrayIndexKey: stage list is append-or-replace and order is stable
-            key={`${s.name}-${i}`}
-            className="flex items-center justify-between gap-2 py-1"
-            data-testid={`stage-${s.name}`}
-          >
-            <span className="flex items-center gap-2">
-              <StageDot status={s.status} />
-              <span className="text-neutral-800">{s.label}</span>
-            </span>
-            <span className="font-mono text-[10px] text-neutral-500">
-              {s.duration_ms != null ? formatDuration(s.duration_ms) : "…"}
-              {s.stats ? ` · ${formatStats(s.stats)}` : ""}
-            </span>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-function StageDot({ status }: { status: "running" | "done" }) {
-  return (
-    <span
-      className={[
-        "inline-block h-1.5 w-1.5 rounded-full",
-        status === "running" ? "bg-blue-500 animate-pulse" : "bg-emerald-500",
-      ].join(" ")}
-      aria-hidden="true"
-    />
-  );
-}
-
-/** Render a stage's stats dict as a one-line key=value summary.
- *  Trims to the first two entries to keep the line short ; the full
- *  payload is still available via the React devtools / network tab
- *  for debugging. */
-/** Render a millisecond duration as a human-readable string. Sub-
- *  second values display 3 decimals (e.g. `0.029 s` for 29 ms) so a
- *  fast retrieval doesn't appear as a meaningless `0 s` ; durations
- *  of a second or more use 1 decimal (e.g. `1.4 s`). Pure formatting
- *  helper — the backend keeps emitting raw ms in the SSE payload. */
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${(ms / 1000).toFixed(3)} s`;
-  return `${(ms / 1000).toFixed(1)} s`;
 }
 
 /** Derive a conversation title from the user's first message. Trims
@@ -749,15 +735,6 @@ function deriveTitleFromMessage(message: string): string {
   const lastSpace = window.lastIndexOf(" ");
   const cut = lastSpace > MAX / 2 ? lastSpace : MAX - 1;
   return `${cleaned.slice(0, cut).trimEnd()}…`;
-}
-
-function formatStats(stats: Record<string, unknown>): string {
-  const parts: string[] = [];
-  for (const [k, v] of Object.entries(stats)) {
-    if (parts.length === 2) break;
-    parts.push(`${k}=${typeof v === "number" ? v : String(v)}`);
-  }
-  return parts.join(", ");
 }
 
 // ---------------------------------------------------------------------------

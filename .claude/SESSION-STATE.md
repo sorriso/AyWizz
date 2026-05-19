@@ -1,6 +1,6 @@
 <!-- =============================================================================
 File: SESSION-STATE.md
-Version: 39
+Version: 42
 Path: .claude/SESSION-STATE.md
 Description: Current project state. Single source of truth for "where are we".
              Updated in place at the end of each significant session.
@@ -10,7 +10,7 @@ Discipline: this file SHALL NOT exceed 150 lines.
             When approaching the limit, archive the outdated portions into
             a new .claude/sessions/YYYY-MM-DD-<slug>.md entry and trim here.
 
-Autonomous write policy: per CLAUDE.md v15 §9.1, Claude MAY write this
+Autonomous write policy: per CLAUDE.md §9.1, Claude MAY write this
             file autonomously only for trivial deltas (date bump,
             §6 archive append, cosmetic fixes). All other changes
             require explicit user validation of the diff.
@@ -18,17 +18,17 @@ Autonomous write policy: per CLAUDE.md v15 §9.1, Claude MAY write this
 
 # Project State — ay_monorepo
 
-**Last updated:** 2026-05-14 (**Tranche A done : tolerant parser + tolerant status (synonyms + assume-DONE-when-output-present) + `block_reason` surfaced in UI. 1291 backend tests green.**).
+**Last updated:** 2026-05-19 (**Phase 2.C DocGen chat-direct DONE & validated e2e : create+modify a document via chat works (Claude Haiku). Unified inline-event pipeline. Backend CI 1332 green (cov 87.95%).**).
 
 ---
 
 ## 1. Current stage
 
-**Étape 1 — Backbone components: DONE.** (C1..C9, C12 all shipped + deployable stack via `e2e_stack.sh dev` with Ollama wired.)
+**Étape 1 — Backbone components: DONE.** (C1..C9, C12 shipped + deployable via `e2e_stack.sh dev`.)
 
-**Étape 2a — UX chat polish: DONE.** (Per-user prefs + per-project system prompt + SSE stage events + persisted timeline + one-click new conversation + auto-rename + user-color bubble + build-stamp footer. Full record in `sessions/2026-05-12-ux-chat-finalisation.md`.)
+**Étape 2a — UX chat polish: DONE.** (Full record in `sessions/2026-05-12-ux-chat-finalisation.md`.)
 
-**Étape 2b — Project artifacts surface : IN PROGRESS.** Pass 1 = DONE (read-only MinIO surface). Pass 2.1 = DONE (Gitea bundled + per-project provisioning). Pass 2.2 = DONE (push at completion + GET /git/commits proxy). **Pass Generate-E2E = DONE backend (1268 tests green) + UI (Pipeline page wired to POST /orchestrator/runs + Gate A approval + auto-redirect to Code source) ; stack rebuild blocked on docker overlay 100% — needs host-side `docker system prune -af`.** Pass 2.3 = optional external mirror (future). Pass 3 = codegen/docgen profile split (future).
+**Étape 2b — Project artifacts + DocGen : IN PROGRESS.** Pass 1/2.1/2.2 + Generate-E2E = DONE. **Phase 2.C DocGen chat-direct = DONE & operator-validated e2e** (C4 document CRUD + C3 tool-loop + UNIFIED inline-event pipeline + dev LLM routed to a hosted tool-calling model). Remaining: Increment 3 (tab-nav state survival) — see §5.
 
 ---
 
@@ -36,95 +36,68 @@ Autonomous write policy: per CLAUDE.md v15 §9.1, Claude MAY write this
 
 | Component | Status | Notes |
 |---|---|---|
-| C1 Gateway | **done** | Traefik v3. Hot-reload via `infra/c1_gateway/dynamic/routers.yml` v4. |
-| C2 Auth Service | **done** | Tenants/projects/users + new in May 2026 : preferences (trigram, user_prompt, user_color), project system_prompt, project GET/PATCH. |
-| C3 Conversation | **done** | RAG-with-Ollama wired in dev. SSE `event: stage` channel + persisted `MessagePublic.stages`. Fallback general-knowledge prompt when 0 relevant hits. |
-| C4 Orchestrator | **done (state machine) / in progress (artifacts)** | Run state machine + code-domain plugin shipped. Artifacts API new pass — see §5. |
-| C5 Requirements | **done (v1.5)** | CRUD + tailoring + history + reindex + reconcile + Markdown export. |
+| C1 Gateway | **done** | Traefik v3, `routers.yml`. |
+| C2 Auth | **done** | prefs (trigram/user_prompt/user_color) + project system_prompt. |
+| C3 Conversation | **done** | RAG + chat-direct DocGen tool-loop. SSE unified `event: inline`; persisted `MessagePublic.events` audit ledger (legacy `stages` shim). |
+| C4 Orchestrator | **done / artifacts in progress** | Run state machine + code plugin + document CRUD (`live-docs` run). |
+| C5 Requirements | **done (v1.5)** | CRUD + tailoring + history + reindex + export. |
 | C6 Validation | **done (v1.5)** | 9 MUST checks (7 real, 2 stubs). |
-| C7 Memory | **done** | Federated retrieval, Ollama embedder, hybrid KG retrieve (Phase F.2). |
-| C8 LLM Gateway | **done (client side)** | LiteLLM proxy deferred ; mock_llm or Ollama via `C8_GATEWAY_URL`. |
-| C9 MCP | **done** | 8 tools (5 C5 read-only + 3 C6 read+trigger). |
-| C12 Workflow Engine | **deployed** | n8n via Traefik `/uploads/*`. |
-| **UX (Next.js)** | **done (chat journey)** | Login + projects list + project shell + sources / conversations / requirements / validation / preferences / project settings. Pipeline timeline chip + persisted via C3. Build-stamp footer in navbar. **Artifacts section coming.** |
+| C7 Memory | **done** | Federated retrieval, Ollama embedder, hybrid KG. |
+| C8 LLM Gateway | **done (client side)** | `ChatMessage.content` Optional ; bounded 429 retry. LiteLLM proxy deferred. |
+| C9 MCP | **done** | 8 tools. |
+| C12 Workflow | **deployed** | n8n via Traefik. |
+| **UX (Next.js)** | **done (chat+DocGen)** | Profiles code/docgen. Working area 3-pane + Documents tree. `<InlineLog>` unified renderer. |
 
 ---
 
 ## 3. Active decisions (beyond specs)
 
-- **Architecture** : Python 3.13, src layout. Monorepo (`requirements/` + `ay_platform_core/` + `infra/` + `ay_platform_ui/`). B1 architecture (single `ay-api:local` image × N containers via `COMPONENT_MODULE`). Single Arango DB `platform` with per-component collections. 3 credential classes (R-100-118 v2). LiteLLM = C8 = HTTP-only (R-800-011).
-- **Governance** : CLAUDE.md v20 + `.claude/settings.json` v13. Test debug §10 / coverage §11 / matcher-friendly shell §5.7 / env-file 2 tiers §4.6 / sed-ban §5.2.
-- **Catalog-driven CI invariants** : `tests/e2e/auth_matrix/_catalog.py` SOT for every HTTP route × 5 dimensions. Coherence tests pin `route_catalog ↔ live FastAPI routes` and `catalog ↔ functional coverage`.
-- **UX architecture** : runtime-config 2 tiers (`/runtime-config.json` static + `/ux/config` dynamic). `ConfigProvider` + `AuthProvider` Client Components. JWT decode manual base64url + skew 30s. `(protected)/` route group with auth gate. URL-preservation `?redirect=` round-trip cross-reauth with `sanitizeRedirect()`.
-- **Build versioning** (2026-05-12) : both Dockerfiles bake an ISO `BUILD_VERSION` build-arg ; exposed via `/ux/config.build_version` (API) + `NEXT_PUBLIC_BUILD_VERSION` (UI). Displayed as a 2-line block in the navbar.
-- **Session-revoked redirect** (2026-05-12) : module-level `setSessionRevokedHandler()` in `apiClient` ; `AuthProvider` registers a handler that flips state to `anonymous` ; protected gate redirects to `/login`. Avoids per-page raw 401 surfaces.
-- **Artifacts UX decisions** (2026-05-12, **NEW**) : transparent backend (no link to MinIO / Gitea UIs — everything proxied through our endpoints). Single generic profile section `artifacts` with per-profile label (Code source for `code`/`codegen` ; Documents générés for `doc`/`docgen`). MinIO storage convention `orchestrator/c4-artifacts/{tenant_id}/{project_id}/{run_id}/{path}`. Monaco-editor for preview (lazy-loaded). Pass 1 ships read-only (UI ↔ MinIO via new C4 endpoints + seeded demo data) ; Pass 2 ships Gitea-bundled with auto per-project repo + service account + optional external-mirror remote ; Pass 3 splits the `code` profile into `codegen` / `docgen`.
-- **Docker disk hygiene** (2026-05-12, **NEW**) : Docker Desktop's overlayfs fills fast under iterative `e2e_stack.sh dev` rebuilds. Documented workaround : `docker system prune -af` to free ~10 GB when overlayfs hits 100%. `docker prune` remains deny-listed in settings.json so the user runs it from the host.
+- **Architecture** : Python 3.13 src layout. Monorepo. B1 (single `ay-api:local` × N via `COMPONENT_MODULE`). Single Arango `platform`. LiteLLM=C8 HTTP-only (R-800-011).
+- **Governance** : CLAUDE.md v20 + `.claude/settings.json`. §10 test-debug / §11 coverage / §5.7 shell / §4.6 env-tiers / §5.2 sed-ban.
+- **Catalog-driven CI** : `tests/e2e/auth_matrix/_catalog.py` SOT ; coherence pins route↔catalog↔coverage.
+- **UX architecture** : runtime-config 2 tiers ; `(protected)/` auth gate ; build-stamp footer ; session-revoked redirect.
+- **Artifacts UX** (2026-05-12) : transparent backend (MinIO/Gitea proxied) ; profile-aware section ; MinIO `orchestrator/c4-artifacts/{tenant}/{project}/{run}/{path}`.
+- **D-015 DocGen v1 = chat-direct** (2026-05-16) : `create/update/read/list/delete_document` tools mutate the artifact surface from C3 chat. v2 = synthesis-v4/OpenHands (future). ADR in `999-SYNTHESIS.md`.
+- **Unified inline-event pipeline** (2026-05-19) : `StageRecord`+`ToolCallRecord` → one `InlineEvent` (discriminated `kind`) ; one persisted `MessagePublic.events` audit ledger (read-time shim projects legacy v3 `stages`, no data migration) ; one SSE channel `event: inline` ; one `<InlineLog>` formatter-registry (add a kind = add a formatter). Registered-contract change (§8.4) ; tests adapted (§10.4).
+- **C8 robustness** (2026-05-19) : `ChatMessage.content` is Optional (OpenAI spec: `content:null` on a tool-call message) ; `chat_completion` retries HTTP 429 ≤3× honouring `Retry-After`/`retry_after_seconds` (cap 20 s).
+- **Dev DocGen LLM = hosted tool-calling, opt-in** (2026-05-19, **semantic env change §4.6**) : 4 local Ollama models (qwen2.5:3b, qwen2.5-coder:7b, llama3.1:8b, hermes3:8b) + Gemini-free + OpenRouter-`:free` all proved unfit for reliable agentic tool-calling (modes logged in journal). Dev `C8_GATEWAY_URL` → Anthropic OpenAI-compat (`https://api.anthropic.com/v1`, `claude-haiku-4-5`). **Cost policy** : pytest e2e stays on `mock_llm` (deterministic, zero cost — unchanged) ; reverting the 2 `.env.dev` lines restores Ollama 3B for cost-free non-DocGen dev ; the hosted key is opt-in only for the DocGen tool-loop. Proper long-term fix = per-agent C8 routing (Q-100-021).
+- **Tier-2 `.env.secret`** (2026-05-19) : `C3_C8_BEARER_TOKEN` (provider API key) loaded LAST in c3/c4 dev-override `env_file` with `required:false` (absent → Ollama/pytest unaffected). Git-ignored, operator-authored, never committed. Dev `ollama` resource envelope raised to 12 GB / 4 CPU (root cause of recurring `signal: killed` = the 2 GB container cap, not the Docker VM).
 
 ---
 
 ## 4. Open questions
 
-- **600-SPEC** still scaffold (code-domain quality engine beyond vertical coherence).
-- **LiteLLM proxy deployment** (`infra/c8_gateway/k8s/` + Redis + ESO) deferred until a deployment push.
-- **C5 outstanding** : import endpoint 501, ReqIF + point-in-time deferred to v2.
-- **C7 ML adapters** : sentence-transformers + OpenAI embedders behind optional extras.
-- **C6 stubs** #3 (interface-signature-drift) / #8 (data-model-drift) need machine-readable specs.
-- **Q-100-016** : trace context propagation into K8s Jobs (C15 runtime). Open until C15.
-- **Q-100-017** : workflow synthesis sampling + rétention en prod (Loki/ES).
-- **Q-100-018** : dashboard layer for workflow synthesis (Grafana panels or standalone UI).
-- **Q-100-019** : Turbopack incompat avec bake+symlink → `next dev --webpack` workaround.
-- **Q-100-020 (NEW 2026-05-12)** : credential storage for Gitea service-accounts (Pass 2). Currently planned as plain field in `c2_project_secrets` ; needs KMS / vault when prod overlay lands. Document the threat-model assumption explicitly when Pass 2 starts.
+- **600-SPEC** scaffold (code-domain quality engine).
+- **LiteLLM proxy deployment** deferred.
+- **C5** : import 501, ReqIF/point-in-time v2. **C7** ML adapters optional extras. **C6** stubs #3/#8 need machine-readable specs.
+- **Q-100-016/017/018** : trace into K8s Jobs ; workflow-synthesis sampling/retention ; dashboard layer.
+- **Q-100-019** : Turbopack incompat → `next dev --webpack`.
+- **Q-100-020** : Gitea service-account credential storage → KMS/vault at prod.
+- **Q-100-021 (NEW 2026-05-19)** : per-agent C8 routing so `c3-docgen` → hosted tool-calling model while everything else stays on local Ollama 3B (cost minimisation). Needs the C8 router / litellm `agent_routes` wired in dev (currently single global `C8_GATEWAY_URL`).
 
 ---
 
 ## 5. Next planned action
 
-**ACTIVE WORK : Generate-phase end-to-end + structural fixes (DONE backend ; awaiting browser retest).**
+**Increment 3 (DEFERRED — next sizable piece)** : Tier-1 UI state persistence. A `WorkspaceProvider` mounted in `(protected)/layout.tsx` (survives route nav) holding per-project ephemeral UI state (active conversation, selected run/doc, composer draft) + `sessionStorage` hydration (survives F5) ; move the SSE send-loop into the provider so a live generation **continues across tab navigation**. NB: refresh-survival of the *audit trail* is already done (persisted `MessagePublic.events` ledger) — Increment 3 only adds live-flow + UI-state continuity.
 
-Generate-phase plumbing (R-200-150..152) :
-- Spec §5.15 in 200-SPEC-PIPELINE-AGENT.md + `OrchestratorService` v2 wiring + dispatcher GENERATE prompt v2 + `main.py` v3 + UI Pipeline page + lib/types.ts v8 + apiClient v7. All landed in the earlier slice of this session.
+**Then** : backlog Tranche B (project-creation UI, members, admin tenant/users, resume/retry, Monaco+diff) ; Tranche C (LiteLLM proxy+cost incl. Q-100-021 per-agent routing, K8s sub-agent dispatcher, HTTPS+K8s prod, Arango migrations, CI GH Actions) ; Tranche D polish.
 
-Structural fixes added today after the 2026-05-13 browser test surfaced BLOCKED-at-brainstorm :
-- **Root cause #1** : `c4` was reading only `.env.test` so its `C8_GATEWAY_URL` pointed at `mock_llm:8000` even in the dev stack. Fix : add `c4` to `docker-compose.dev.override.yml` v4 with `.env.dev` appended (routes to real Ollama).
-- **Root cause #2** : qwen2.5:3b wraps its JSON in ```json fences and adds prose — the strict `json.loads(content)` in dispatcher v2 collapsed every call to BLOCKED. Fix : `in_process.py` v3 tolerant parser. Three fallback strategies (strict / markdown-fence-stripped / brace-balanced scan respecting string literals) before declaring the envelope unparseable.
-- **Root cause #3** : mock_llm was implicitly part of the dev stack — masking the routing bug above. Fix : `docker-compose.yml` puts mock_llm under `profiles: [test]` ; dev stack no longer starts it ; c4's `depends_on: mock_llm` removed.
-- **Structural test surface (the user's explicit ask "why no test caught this?")** :
-  - `tests/unit/c4_orchestrator/test_dispatcher.py` v2 : `TestTolerantEnvelopeExtraction` (6 cases — fence with/without tag, prose around JSON, nested braces in string literals, generate-phase fenced files envelope, no-JSON-at-all still BLOCKS).
-  - `tests/integration/c4_orchestrator/test_generate_materialisation.py` : new `test_pipeline_completes_with_fenced_llm_output` driving the full pipeline against a mock that emits ```json fences — would have caught the qwen2.5:3b output shape in CI.
-  - `tests/coherence/test_compose_dev_profile.py` v1 (new file, 3 tests) : (a) mock_llm SHALL be in profile `test` ; (b) no service depends_on mock_llm ; (c) every C8-calling service (c2/c3/c4) has `.env.dev` in dev override. Test (c) FAILED on first run, pinning exactly the routing bug — now green.
-
-**Backend CI : 1284 passed, 0 failure** (was 1268 + 6 ES/Loki testcontainer crashes due to disk-full ; now 16 new tests added + ES/Loki recovered).
-
-**Tranche A complete (2026-05-14)** :
-- A.1 diagnostic logging in dispatcher v3 surfaced the actual qwen2.5:3b output (envelope WITHOUT `status` key + `output` carrying malformed code string).
-- A.2 `block_reason: str | None` added to `RunPublic` (models v2 + service `_public` projection + service `_run_blocked` enriched with `completion.blocker.reason`). UI lib/types v9 + Pipeline page renders the reason in a `<pre>` block instead of the misleading three-fix-rule message.
-- A.3 dispatcher v4 : (i) synonyms map (`completed/success/ok/...` → DONE ; `error/failed/...` → BLOCKED) ; (ii) graceful fallback — when status unknown AND `output` non-empty, assume DONE. Strict BLOCK kept only when status unknown AND output empty/missing. 7 new unit tests (`TestTolerantStatusInference`).
-- Backend CI : 1291 passed, 0 failure.
-
-**Plan agreed with user (un par un, ordered)** :
-- Tranche A : 1, 2, 3 → **DONE**.
-- Tranche B : 4 (project creation UI), 5 (members), 6 (admin tenant/users), 7 (resume/retry), 8 (Monaco + diff), 9 (SSE phase events).
-- Tranche C : 10 (LiteLLM proxy + cost), 11 (K8s sub-agent dispatcher), 12 (HTTPS + K8s prod manifests), 14 (Arango migrations), 16 (CI GitHub Actions).
-- Tranche D : polish (empty states, skeletons, toasts, i18n, mobile).
-- Skipped : ~~#13 SSO~~ (pas d'infra), ~~#15 specs~~ (à traiter avec `aywiz-architecture-synthesis-v4.md`).
-
-**Next action** : user retests Pipeline in browser ; if it COMPLETES we move to B.4 (project creation UI).
+**Reserve (intellectual honesty)** : the Anthropic API is **paid** — every dev DocGen turn bills tokens (Haiku keeps it cheap). `.env.secret` is git-ignored. Ollama/OpenRouter remain offline/free fallbacks (revert the two `.env.dev` lines).
 
 ---
 
 ## 6. Sessions archive
 
 Latest entries (most recent first):
-- `.claude/sessions/2026-05-12-ux-chat-finalisation.md` — **UX chat finalisation 2026-05-09 → 2026-05-12**. C2 prefs (trigram + user_prompt + user_color) + project system_prompt + GET/PATCH `/projects/{pid}`. C3 SSE stage events + persisted `MessagePublic.stages` + no-hits fallback prompt + auto-rename + user_prompt/project_prompt forward. UI chat journey : right-aligned user bubbles tinted by user_color, pipeline chip + collapsible panel, one-click new conversation, build-stamp footer in navbar, session-revoked auto-redirect. Backend CI 1243 verts (only the 6 pre-existing Loki/ES testcontainer errors remain). UI lint+typecheck+vitest all green.
-- `.claude/sessions/2026-04-29-ux-validation-and-url-preservation.md` — UX validation pipeline + URL preservation cross-reauth.
-- `.claude/sessions/2026-04-29-ux-phase-4a-auth-shell.md` — UX Phase 4a auth-aware shell.
-- `.claude/sessions/2026-04-29-ux-bootstrap-and-frontend.md` — UX bootstrap end-to-end (Phases 1+2+3).
-- `.claude/sessions/2026-04-29-ux-gaps-fill.md` — File download `/blob`, tenant_manager bootstrap, auto KG extraction.
-- `.claude/sessions/2026-04-28-c3-remote-services-and-security-layer.md` — RemoteMemoryService + AuthGuardMiddleware defense-in-depth.
-- `.claude/sessions/2026-04-28-k8s-system-tests.md` — Tier `system_k8s` pytest opt-in.
-- `.claude/sessions/2026-04-28-infra-k8s-bootstrap.md` — Infra refactor OCI labels + K8s bootstrap.
-- _Earlier 2026-04-22..28 entries_ : see git log + `sessions/` directory. Cover backbone components (C1..C9, C12), CI/CD, observability, auth-matrix framework, Plan v1 phases A→F.
+- `.claude/sessions/2026-05-19-docgen-2c-and-llm-provider-migration.md` — **Phase 2.C DocGen end-to-end + unified inline pipeline + LLM provider migration (2026-05-18→19)**. C4 document CRUD + C3 tool-loop validated (create+modify via chat, Claude Haiku). `InlineEvent`/`MessagePublic.events` unification (contract + `<InlineLog>` registry). C8 `content` Optional + 429 retry. Provider odyssey (4 local Ollama + Gemini-free + OpenRouter-`:free` → Anthropic OpenAI-compat). Tier-2 `.env.secret` mechanism + dev ollama 12 GB/4 CPU. UX (content-height panes, done-cue, Working-area fit). Backend CI 1332 green.
+- `.claude/sessions/2026-05-12-ux-chat-finalisation.md` — UX chat finalisation 2026-05-09→12.
+- `.claude/sessions/2026-04-29-ux-validation-and-url-preservation.md` — UX validation + URL preservation.
+- `.claude/sessions/2026-04-29-ux-phase-4a-auth-shell.md` — UX Phase 4a auth shell.
+- `.claude/sessions/2026-04-29-ux-bootstrap-and-frontend.md` — UX bootstrap end-to-end.
+- `.claude/sessions/2026-04-29-ux-gaps-fill.md` — `/blob` download, tenant_manager bootstrap, auto KG.
+- `.claude/sessions/2026-04-28-c3-remote-services-and-security-layer.md` — RemoteMemoryService + AuthGuard.
+- _Earlier 2026-04-22..28_ : git log + `sessions/`. Backbone (C1..C9,C12), CI/CD, observability, auth-matrix, Plan v1 A→F.
 
 ---
 
@@ -132,4 +105,4 @@ Latest entries (most recent first):
 
 - This file SHALL remain ≤ 150 lines.
 - Claude SHALL propose an update at end of any session introducing a decision, completing a stage, or changing §5.
-- User validates before each write (no silent edits) except for trivial deltas allowed by `CLAUDE.md` v15 §9.1.
+- User validates before each write (no silent edits) except trivial deltas per `CLAUDE.md` §9.1.

@@ -65,6 +65,11 @@ class TestContractRegistration:
         # Project versioning proxy — R-200-147
         "ArtifactCommit",
         "ArtifactCommitList",
+        # Chat-direct DocGen document API — D-015 / R-200-153..156
+        "DocumentWrite",
+        "DocumentUpdate",
+        "DocumentRef",
+        "DocumentList",
     }
 
     def test_all_expected_contracts_registered(self) -> None:

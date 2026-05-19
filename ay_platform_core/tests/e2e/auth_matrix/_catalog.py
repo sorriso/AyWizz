@@ -973,6 +973,68 @@ _C4_ORCHESTRATOR: list[EndpointSpec] = [
             "Gitea directly. Returns [] when Gitea is not wired."
         ),
     ),
+    # Chat-direct DocGen document CRUD (D-015 / R-200-153..156). The
+    # C3 conversation's tool calls land here. Project-scoped content ;
+    # tenant_manager rejected (content-blind per E-100-002 v2).
+    EndpointSpec(
+        component="c4_orchestrator",
+        method="POST",
+        path="/api/v1/projects/{project_id}/documents",
+        auth=Auth.AUTHENTICATED,
+        scope=Scope.PROJECT,
+        success_status=201,
+        excluded_global_roles=("tenant_manager",),
+        backend=Backend.BOTH,
+        backend_collection="c4_artifact_runs",
+        backend_bucket="orchestrator",
+        notes="Create/overwrite a document in the live-docs run (D-015).",
+    ),
+    EndpointSpec(
+        component="c4_orchestrator",
+        method="PUT",
+        path="/api/v1/projects/{project_id}/documents/{path:path}",
+        auth=Auth.AUTHENTICATED,
+        scope=Scope.PROJECT,
+        success_status=200,
+        excluded_global_roles=("tenant_manager",),
+        backend=Backend.BOTH,
+        backend_collection="c4_artifact_runs",
+        backend_bucket="orchestrator",
+        notes="Overwrite an existing document (D-015).",
+    ),
+    EndpointSpec(
+        component="c4_orchestrator",
+        method="GET",
+        path="/api/v1/projects/{project_id}/documents",
+        auth=Auth.AUTHENTICATED,
+        scope=Scope.PROJECT,
+        success_status=200,
+        excluded_global_roles=("tenant_manager",),
+        notes="List documents in the live-docs corpus (D-015).",
+    ),
+    EndpointSpec(
+        component="c4_orchestrator",
+        method="GET",
+        path="/api/v1/projects/{project_id}/documents/{path:path}",
+        auth=Auth.AUTHENTICATED,
+        scope=Scope.PROJECT,
+        success_status=200,
+        excluded_global_roles=("tenant_manager",),
+        notes="Read one document (D-015).",
+    ),
+    EndpointSpec(
+        component="c4_orchestrator",
+        method="DELETE",
+        path="/api/v1/projects/{project_id}/documents/{path:path}",
+        auth=Auth.AUTHENTICATED,
+        scope=Scope.PROJECT,
+        success_status=204,
+        excluded_global_roles=("tenant_manager",),
+        backend=Backend.BOTH,
+        backend_collection="c4_artifact_runs",
+        backend_bucket="orchestrator",
+        notes="Delete a document from MinIO ; Gitea history retained (D-015).",
+    ),
 ]
 
 

@@ -1,12 +1,18 @@
 // =============================================================================
 // File: apiClient.ts
-// Version: 6
+// Version: 7
 // Path: ay_platform_ui/lib/apiClient.ts
 // Description: Thin wrapper over `fetch` that prepends the runtime-config
 //              `apiBaseUrl` to every call and (optionally) attaches the
 //              user's JWT bearer token. Components use this rather than
 //              calling `fetch` directly so the API base URL is honoured
 //              uniformly.
+//
+//              v7 (2026-05-19) : unified inline channel.
+//              `sendMessageStream` parses ONE `event: inline` SSE
+//              type (replacing `event: stage` + `event: tool_call`)
+//              and dispatches every payload to `onInlineEvent`
+//              regardless of `kind` — the caller feeds `<InlineLog>`.
 //
 //              v6 : `sendMessageStream` now parses NAMED SSE events.
 //              Default `message` events carry assistant tokens (legacy
@@ -42,6 +48,7 @@ import type {
   ConversationResponse,
   Finding,
   FindingPage,
+  InlineEvent,
   MessageList,
   OrchestratorRun,
   OrchestratorRunCreate,
@@ -55,7 +62,6 @@ import type {
   RequirementEntityList,
   Source,
   SourceList,
-  StageEvent,
   UserPreferencesResponse,
   UserPreferencesUpdate,
   ValidationPlugin,
@@ -387,7 +393,11 @@ export class ApiClient {
     options: {
       userPrompt?: string | null;
       projectPrompt?: string | null;
-      onStage?: (stage: StageEvent) => void;
+      /** Unified inline-activity callback. Fires for every
+       *  `event: inline` SSE payload regardless of `kind` (stage /
+       *  tool_call / future). The caller accumulates them and feeds
+       *  `<InlineLog>` — one entry point. */
+      onInlineEvent?: (evt: InlineEvent) => void;
     } = {},
   ): Promise<void> {
     const url = this.url(`/api/v1/conversations/${encodeURIComponent(conversationId)}/messages`);
@@ -427,7 +437,7 @@ export class ApiClient {
     // SSE spec : events are separated by blank lines. Each event is
     // zero or more `event:` / `data:` lines. We dispatch by event
     // type: default `message` → assistant token (`onChunk`) ; named
-    // `stage` → pipeline-progress JSON (`onStage`).
+    // `inline` → unified inline-activity JSON (`onInlineEvent`).
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -456,13 +466,13 @@ export class ApiClient {
         }
         if (dataLines.length === 0) continue;
         const data = dataLines.join("\n");
-        if (eventType === "stage") {
-          if (options.onStage) {
+        if (eventType === "inline") {
+          if (options.onInlineEvent) {
             try {
-              options.onStage(JSON.parse(data) as StageEvent);
+              options.onInlineEvent(JSON.parse(data) as InlineEvent);
             } catch {
-              // Malformed stage payload — silently ignore so a server
-              // hiccup never breaks the token stream.
+              // Malformed inline payload — silently ignore so a
+              // server hiccup never breaks the token stream.
             }
           }
           continue;

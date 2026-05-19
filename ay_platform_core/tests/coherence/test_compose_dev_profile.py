@@ -1,6 +1,6 @@
 # =============================================================================
 # File: test_compose_dev_profile.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/tests/coherence/test_compose_dev_profile.py
 # Description: Coherence checks on the dev compose stack
 #              (`docker-compose.yml` + `docker-compose.dev.override.yml`).
@@ -117,7 +117,16 @@ def test_dev_override_routes_c8_calling_services_to_env_dev() -> None:
         env_files = svc.get("env_file") or []
         if isinstance(env_files, str):
             env_files = [env_files]
-        if not any(f.endswith(".env.dev") for f in env_files):
+        # Compose env_file supports BOTH short (string) and long
+        # ({"path": ..., "required": ...}) entry syntax. The Tier-2
+        # `.env.secret` is declared long-form with `required: false`,
+        # so normalise every entry to its path string before the
+        # `.endswith` check (a bare `f.endswith` would AttributeError
+        # on the dict entry).
+        env_paths = [
+            (f["path"] if isinstance(f, dict) else f) for f in env_files
+        ]
+        if not any(p.endswith(".env.dev") for p in env_paths):
             offenders.append(
                 f"{svc_name} (env_file={env_files!r} — missing .env.dev)"
             )

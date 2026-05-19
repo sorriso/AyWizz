@@ -1,6 +1,6 @@
 // =============================================================================
 // File: page.tsx
-// Version: 1
+// Version: 2
 // Path: ay_platform_ui/app/(protected)/projects/[pid]/pipeline/page.tsx
 // Description: Pipeline trigger page for the `code` profile. Lets the
 //              operator state a goal, fires a C4 orchestrator run,
@@ -12,11 +12,18 @@
 //              Transparent backend invariant : no mention of MinIO /
 //              Gitea / the LLM provider here — the operator just sees
 //              a pipeline.
+//
+//              v2 (2026-05-14) : run state persisted in the URL via
+//              `?run=<run_id>`. The Pipeline page re-fetches on mount
+//              and resumes polling, so navigating to Conversations /
+//              Requirements / Code source and back keeps the run
+//              visible. F5 also restores. Clearing the goal textarea
+//              + starting a fresh run pushes a new URL.
 // =============================================================================
 
 "use client";
 
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useReadyConfig } from "@/app/providers";
@@ -49,12 +56,17 @@ export default function PipelinePage() {
   const params = useParams<{ pid: string }>();
   const projectId = decodeURIComponent(params.pid);
   const router = useRouter();
+  const searchParams = useSearchParams();
   const cfg = useReadyConfig();
   const apiClient = useMemo(() => new ApiClient(cfg), [cfg]);
 
   // Stable per-page-mount session id — used to detect concurrent runs
   // server-side (R-200-002). One UUID per browser tab navigation here.
   const sessionId = useMemo(() => `ui-${crypto.randomUUID()}`, []);
+
+  // Run id sourced from `?run=<id>` in the URL — survives navigation
+  // away from the page and F5. `null` means "no active run yet".
+  const urlRunId = searchParams.get("run");
 
   const [goal, setGoal] = useState("");
   const [runLoad, setRunLoad] = useState<RunLoad>({ status: "idle" });
@@ -101,6 +113,46 @@ export default function PipelinePage() {
 
   useEffect(() => stopPolling, [stopPolling]);
 
+  // Restore the run from the URL on mount (or when `?run=<id>` changes).
+  // Pushed by `submitRun` AND by external navigation (e.g. operator
+  // pasting a deep link). Fetch the latest snapshot and resume polling
+  // when still running.
+  useEffect(() => {
+    if (!urlRunId) {
+      // No active run in the URL — drop any stale state from a prior
+      // mount of this component (Next.js may not unmount on shallow
+      // route changes, so we cannot rely on initial state).
+      setRunLoad((prev) => (prev.status === "idle" ? prev : { status: "idle" }));
+      return;
+    }
+    // Skip the refetch when we already have this run in state — avoids
+    // a flicker after `submitRun` (which sets state then pushes URL).
+    if (runLoad.run?.run_id === urlRunId) return;
+    let cancelled = false;
+    apiClient
+      .getOrchestratorRun(urlRunId)
+      .then((run) => {
+        if (cancelled) return;
+        setRunLoad({ status: "ready", run });
+        if (run.status === "running") {
+          startPolling(run.run_id);
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setRunLoad({
+          status: "error",
+          error:
+            err instanceof ApiError
+              ? `Could not load run ${urlRunId.slice(0, 8)} (${err.status})`
+              : String(err),
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [apiClient, urlRunId, startPolling, runLoad.run?.run_id]);
+
   const submitRun = useCallback(async () => {
     const cleaned = goal.trim();
     if (!cleaned) return;
@@ -117,6 +169,11 @@ export default function PipelinePage() {
       // the operator approve. Polling starts only if it's still running
       // beyond plan (defensive — covers a future async refactor).
       setRunLoad({ status: "ready", run });
+      // Persist the run id in the URL — survives navigation + F5 +
+      // shareable as a deep link.
+      router.replace(
+        `/projects/${encodeURIComponent(projectId)}/pipeline?run=${encodeURIComponent(run.run_id)}`,
+      );
       if (run.status === "running" && run.current_phase !== "plan") {
         startPolling(run.run_id);
       }
@@ -129,7 +186,7 @@ export default function PipelinePage() {
             : String(err),
       });
     }
-  }, [apiClient, goal, projectId, sessionId, startPolling]);
+  }, [apiClient, goal, projectId, sessionId, startPolling, router]);
 
   const approvePlan = useCallback(async () => {
     if (!runLoad.run) return;
@@ -196,6 +253,20 @@ export default function PipelinePage() {
           disabled={isWorking || runLoad.status === "ready"}
         />
         <div className="mt-3 flex items-center justify-end gap-2">
+          {runLoad.run && (
+            <button
+              type="button"
+              onClick={() => {
+                stopPolling();
+                setGoal("");
+                setRunLoad({ status: "idle" });
+                router.replace(`/projects/${encodeURIComponent(projectId)}/pipeline`);
+              }}
+              className="rounded-md border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
+            >
+              New run
+            </button>
+          )}
           <button
             type="button"
             onClick={submitRun}

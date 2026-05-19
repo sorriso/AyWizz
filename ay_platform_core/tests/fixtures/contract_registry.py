@@ -424,6 +424,64 @@ register_contract(
     )
 )
 
+# C4 — Chat-direct DocGen document API (D-015 / R-200-153..156).
+from ay_platform_core.c4_orchestrator.documents_router import (  # noqa: E402
+    DocumentList,
+    DocumentRef,
+    DocumentUpdate,
+    DocumentWrite,
+)
+
+register_contract(
+    ExposedContract(
+        producer="C4_orchestrator",
+        name="DocumentWrite",
+        schema=DocumentWrite,
+        consumers=("C1_gateway", "ay_platform_ui", "C3_conversation"),
+        transport="rest",
+        description=(
+            "Body of POST /api/v1/projects/{pid}/documents — create or "
+            "overwrite a document (D-015 / R-200-153)."
+        ),
+    )
+)
+register_contract(
+    ExposedContract(
+        producer="C4_orchestrator",
+        name="DocumentUpdate",
+        schema=DocumentUpdate,
+        consumers=("C1_gateway", "ay_platform_ui", "C3_conversation"),
+        transport="rest",
+        description=(
+            "Body of PUT /api/v1/projects/{pid}/documents/{path} "
+            "(D-015 / R-200-153)."
+        ),
+    )
+)
+register_contract(
+    ExposedContract(
+        producer="C4_orchestrator",
+        name="DocumentRef",
+        schema=DocumentRef,
+        consumers=("C1_gateway", "ay_platform_ui", "C3_conversation"),
+        transport="rest",
+        description=(
+            "One document listing row + the create/update response "
+            "(D-015 / R-200-153)."
+        ),
+    )
+)
+register_contract(
+    ExposedContract(
+        producer="C4_orchestrator",
+        name="DocumentList",
+        schema=DocumentList,
+        consumers=("C1_gateway", "ay_platform_ui", "C3_conversation"),
+        transport="rest",
+        description="Wrapper for the documents listing (D-015 / R-200-153).",
+    )
+)
+
 # ---------------------------------------------------------------------------
 # C7 Memory Service contracts
 # ---------------------------------------------------------------------------

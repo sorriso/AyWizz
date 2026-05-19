@@ -1,9 +1,55 @@
 # =============================================================================
 # File: service.py
-# Version: 5
+# Version: 11
 # Path: ay_platform_core/src/ay_platform_core/c3_conversation/service.py
 # Description: C3 Conversation Service facade.
 #              Orchestrates CRUD and the SSE message-send flow.
+#
+#              v11 (2026-05-19): hardened `_DOCGEN_TOOL_DIRECTIVE` —
+#              step-numbered modify workflow + an explicit FORBIDDEN
+#              list (no fenced-content "as if saved", no
+#              "save the file"/"specify" asks, no [placeholder]
+#              values, no stop-after-read). qwen2.5-coder:7b still
+#              answered modify requests in prose under the softer v8
+#              directive (no tool call at all).
+#
+#              v10 (2026-05-19): UNIFIED inline-event pipeline. The
+#              separate `event: stage` / `event: tool_call` SSE
+#              channels and the `collected_stages` / `collected_tool_
+#              calls` lists collapse into one `event: inline` channel
+#              and one `collected_events` audit ledger persisted as
+#              `MessagePublic.events`. `_inline_sse` is the single
+#              emitter ; `_legacy_stage_to_inline` projects pre-
+#              unification persisted `stages` at read time (no data
+#              migration). One formatter registry renders them UI-side.
+#
+#              v9 (2026-05-18): tool-loop observability — one INFO
+#              line per round (parsed tool names) and a truncated
+#              content preview when a round produced NO tool call
+#              (the qwen 'claims success in prose without calling
+#              update_document' failure mode, Phase 2.C.3 diagnosis).
+#
+#              v8 (2026-05-18): inject `_DOCGEN_TOOL_DIRECTIVE` into
+#              the system prompt when the chat-direct DocGen tool
+#              loop is active. Without it small models (qwen2.5:3b)
+#              read a document then print the edited content as a
+#              plain-text answer instead of calling update_document,
+#              so the file was never persisted (Phase 2.C.3 defect).
+#
+#              v7 (2026-05-18): the `event: tool_call` done payload
+#              now carries an optional `path` for mutating tools
+#              (create / update / delete_document) so the UI can
+#              deep-link the inline strip to the Working area viewer
+#              (D-015 / Phase 2.C.3). `_tool_result_path` helper.
+#
+#              v6 (2026-05-16): chat-direct DocGen tool loop
+#              (D-015 / Phase 2.C.2). When a `DocumentToolClient` is
+#              wired, the RAG flow runs a bounded NON-streaming
+#              tool-execution loop before the final answer : the LLM
+#              is offered the document tools, each `tool_calls` round
+#              is executed against C4 and fed back, and the resolved
+#              final assistant text is emitted over the existing SSE
+#              channel. New named SSE event `event: tool_call`.
 #
 #              v5: when retrieval surfaces no chunk above the
 #              relevance threshold, the system prompt switches to the
@@ -45,6 +91,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -54,6 +101,11 @@ from uuid import UUID
 from fastapi import HTTPException, status
 
 from ay_platform_core.c3_conversation.db.repository import ConversationRepository
+from ay_platform_core.c3_conversation.document_tools import (
+    DOC_TOOLS,
+    DocumentToolClient,
+    parse_tool_calls,
+)
 from ay_platform_core.c3_conversation.models import (
     ConversationCreate,
     ConversationInternal,
@@ -67,6 +119,13 @@ from ay_platform_core.c7_memory.remote import RemoteMemoryService
 from ay_platform_core.c7_memory.service import MemoryService
 from ay_platform_core.c8_llm.client import LLMGatewayClient
 from ay_platform_core.c8_llm.models import ChatCompletionRequest, ChatMessage, ChatRole
+
+_log = logging.getLogger("c3_conversation.tool_loop")
+"""Observability for the chat-direct DocGen tool loop. INFO-level :
+one line per round (parsed tool names) + a truncated preview of the
+model's text when a round produced NO tool call (the canonical
+'qwen answered in prose instead of calling update_document' failure
+mode — Phase 2.C.3). Permanent observability, not throwaway debug."""
 
 
 def _doc_to_public(doc: dict[str, Any]) -> ConversationPublic:
@@ -94,20 +153,53 @@ def _doc_to_internal(doc: dict[str, Any]) -> ConversationInternal:
     )
 
 
+def _inline_sse(payload: dict[str, Any]) -> str:
+    """Serialise one inline-activity event onto the single unified SSE
+    channel (`event: inline`). Every kind (stage / tool_call /
+    future) travels here ; the client dispatches on `payload['kind']`
+    via its formatter registry. Replaces the former per-kind
+    `event: stage` / `event: tool_call` channels."""
+    return (
+        "event: inline\n"
+        f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
+    )
+
+
+def _legacy_stage_to_inline(stage: dict[str, Any]) -> dict[str, Any]:
+    """Project a v3-era persisted `stages[]` entry into the unified
+    `InlineEvent` shape (kind='stage'). Read-time shim so messages
+    written before the unification still render — no data migration."""
+    return {
+        "kind": "stage",
+        "label": stage.get("label", stage.get("name", "stage")),
+        "status": stage.get("status", "done"),
+        "name": stage.get("name"),
+        "duration_ms": stage.get("duration_ms"),
+        "stats": stage.get("stats"),
+    }
+
+
 def _msg_doc_to_public(doc: dict[str, Any]) -> MessagePublic:
-    # `stages` is optional — absent on user messages and on legacy
-    # assistant messages persisted before the field existed. Pydantic
-    # validates per-item when present, so a corrupt stage entry would
-    # raise here ; we let it propagate (caller surfaces a 500 ; better
-    # than silently dropping malformed timeline data).
-    raw_stages = doc.get("stages")
+    # `events` is optional — absent on user messages. Pydantic
+    # validates per-item when present ; a corrupt entry raises here
+    # (caller surfaces a 500 ; better than silently dropping audit
+    # data). Legacy docs predate `events` and only carry the v3
+    # `stages` field — project them so old conversations still render.
+    raw_events = doc.get("events")
+    if not raw_events:
+        legacy_stages = doc.get("stages")
+        raw_events = (
+            [_legacy_stage_to_inline(s) for s in legacy_stages]
+            if legacy_stages
+            else None
+        )
     return MessagePublic(
         id=UUID(doc["id"]),
         conversation_id=UUID(doc["conversation_id"]),
         role=MessageRole(doc["role"]),
         content=doc["content"],
         timestamp=doc["timestamp"],
-        stages=raw_stages if raw_stages else None,
+        events=raw_events if raw_events else None,
     )
 
 
@@ -118,10 +210,16 @@ class ConversationService:
         *,
         memory_service: MemoryService | RemoteMemoryService | None = None,
         llm_client: LLMGatewayClient | None = None,
+        document_tools: DocumentToolClient | None = None,
         rag_top_k: int = 5,
         rag_history_turns: int = 6,
+        max_tool_rounds: int = 6,
     ) -> None:
         self._repo = repo
+        # Chat-direct DocGen tool client (D-015). None → tool loop
+        # disabled, plain RAG streaming chat (legacy v5 behaviour).
+        self._doc_tools = document_tools
+        self._max_tool_rounds = max_tool_rounds
         # Phase D wiring — optional. When BOTH are provided AND the
         # conversation has a project_id, `send_message_stream` runs the
         # RAG pipeline; otherwise it falls back to the static stub.
@@ -300,22 +398,23 @@ class ConversationService:
             #   - default `message` events (no `event:` line) carry the
             #     streamed LLM tokens — legacy clients keep working
             #     unchanged because that's exactly the v1 contract.
-            #   - named `event: stage` events carry JSON describing
-            #     macro-level pipeline progress (retrieval, generation,
-            #     persistence). New clients render a live timeline next
-            #     to the assistant avatar ; old clients ignore them
-            #     (per SSE spec: unknown event types fall through to
-            #     the default `message` listener which our token parser
-            #     ignores because the data is JSON, not plain text).
+            #   - named `event: inline` events carry JSON describing
+            #     ANY in-turn activity, discriminated by `kind`
+            #     ('stage' = pipeline progress, 'tool_call' = DocGen
+            #     tool, future kinds). One unified channel ; the client
+            #     dispatches via its formatter registry. Old clients
+            #     ignore them (per SSE spec: unknown event types fall
+            #     through to the default `message` listener which our
+            #     token parser ignores because the data is JSON).
             t_start = time.perf_counter()
 
-            # Collect `done` stage payloads as we emit them so they can
-            # be persisted alongside the assistant message — the UX
-            # uses these to re-render the chip + timeline on navigation
-            # / refresh (where the live SSE stream is gone). `running`
-            # events are intermediate signals for the live UI only,
-            # never stored.
-            collected_stages: list[dict[str, Any]] = []
+            # Unified inline-activity ledger. Every `done` event (any
+            # kind) is appended here and persisted with the assistant
+            # message so the UX re-renders the exact same inline log
+            # on navigation / reload, and so the list is the queryable
+            # audit trail of the turn. `running` events are live-only
+            # progress signals, never stored.
+            collected_events: list[dict[str, Any]] = []
 
             def _emit(
                 *,
@@ -325,7 +424,11 @@ class ConversationService:
                 duration_ms: int | None = None,
                 stats: dict[str, Any] | None = None,
             ) -> str:
+                # Pipeline-stage events on the unified channel
+                # (kind='stage'). Thin wrapper kept so the ~5 stage
+                # call sites stay readable.
                 payload: dict[str, Any] = {
+                    "kind": "stage",
                     "name": name,
                     "status": status,
                     "label": label,
@@ -335,11 +438,8 @@ class ConversationService:
                 if stats is not None:
                     payload["stats"] = stats
                 if status == "done":
-                    collected_stages.append(payload)
-                return (
-                    "event: stage\n"
-                    f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
-                )
+                    collected_events.append(payload)
+                return _inline_sse(payload)
 
             # 1. Retrieval phase.
             assert self._memory is not None  # narrowed in caller
@@ -398,6 +498,10 @@ class ConversationService:
                 # entirely. Small models confabulate when given an
                 # empty/irrelevant context block.
                 has_relevant_hits=hits_relevant > 0,
+                # DocGen mode → inject the mandatory tool-usage
+                # directive so the model persists via update_document
+                # instead of printing the edited content as text.
+                docgen_tools_active=self._doc_tools is not None,
             )
             messages: list[ChatMessage] = [
                 ChatMessage(role=ChatRole.SYSTEM, content=system_content),
@@ -405,33 +509,57 @@ class ConversationService:
                 ChatMessage(role=ChatRole.USER, content=user_message),
             ]
 
-            # 3. Generation phase — stream from C8 LLM gateway. Each
-            #    yielded chunk is an OpenAI SSE event ; we extract
-            #    `choices[0].delta.content` and re-emit as a plain SSE
-            #    message event for the C3 client.
+            # 3. Generation phase.
             t_generate = time.perf_counter()
             yield _emit(
                 name="generate",
                 status="running",
                 label="Asking the language model",
             )
-            request = ChatCompletionRequest(messages=messages, stream=True)
             collected_tokens: list[str] = []
-            async with self._llm.chat_completion_stream(
-                request,
-                agent_name="c3-rag",
-                session_id=str(conversation_id),
-                tenant_id=tenant_id,
-                project_id=project_id,
-            ) as chunks:
-                async for chunk in chunks:
-                    delta = _extract_delta_content(chunk)
-                    if delta:
-                        collected_tokens.append(delta)
-                        # SSE escape: replace any embedded newlines
-                        # so they don't break the SSE framing.
-                        safe = delta.replace("\n", "\\n")
-                        yield f"data: {safe}\n\n"
+
+            if self._doc_tools is not None:
+                # 3a. Chat-direct DocGen tool loop (D-015 / Phase 2.C.2).
+                #     Bounded NON-streaming rounds : offer the document
+                #     tools, execute each `tool_calls` against C4, feed
+                #     results back, loop until the model answers in
+                #     plain text. The final text is emitted in one SSE
+                #     `data:` chunk (tool turns take seconds anyway ;
+                #     streaming the final answer would need a second
+                #     LLM call — deferred).
+                async for sse in self._run_tool_loop(
+                    messages=messages,
+                    conversation_id=conversation_id,
+                    project_id=project_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    user_roles=user_roles,
+                    collected_tokens=collected_tokens,
+                    collected_events=collected_events,
+                ):
+                    yield sse
+            else:
+                # 3b. Legacy streaming RAG path (no tools). Each chunk
+                #     is an OpenAI SSE event ; we extract
+                #     `choices[0].delta.content` and re-emit as a plain
+                #     SSE message event.
+                request = ChatCompletionRequest(messages=messages, stream=True)
+                async with self._llm.chat_completion_stream(
+                    request,
+                    agent_name="c3-rag",
+                    session_id=str(conversation_id),
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                ) as chunks:
+                    async for chunk in chunks:
+                        delta = _extract_delta_content(chunk)
+                        if delta:
+                            collected_tokens.append(delta)
+                            # SSE escape: replace any embedded newlines
+                            # so they don't break the SSE framing.
+                            safe = delta.replace("\n", "\\n")
+                            yield f"data: {safe}\n\n"
+
             generate_ms = int((time.perf_counter() - t_generate) * 1000)
             total_tokens = sum(len(t) for t in collected_tokens)  # char count
             yield _emit(
@@ -460,7 +588,7 @@ class ConversationService:
                     conversation_id=conversation_id,
                     role=MessageRole.ASSISTANT,
                     content=full_reply,
-                    stages=collected_stages,
+                    events=collected_events or None,
                 )
                 # 5. Phase E — feed the turn back into C7 so follow-up
                 #    questions can retrieve it. Best-effort: a memory
@@ -491,6 +619,171 @@ class ConversationService:
                     )
 
         return _generate()
+
+    async def _run_tool_loop(
+        self,
+        *,
+        messages: list[ChatMessage],
+        conversation_id: UUID,
+        project_id: str,
+        tenant_id: str,
+        user_id: str,
+        user_roles: str,
+        collected_tokens: list[str],
+        collected_events: list[dict[str, Any]],
+    ) -> AsyncIterator[str]:
+        """Bounded non-streaming tool-execution loop (D-015). Yields
+        SSE strings : one unified `event: inline` (kind='tool_call')
+        per executed tool (running + done) plus one final `data:`
+        chunk with the model's plain-text answer. Appends the answer
+        to `collected_tokens` and each terminal tool event to
+        `collected_events` (the shared audit ledger persisted with the
+        assistant message). Mutates `messages` in place across rounds
+        (assistant tool_call turn + tool result turns), mirroring the
+        OpenAI function-calling protocol."""
+        assert self._llm is not None
+        assert self._doc_tools is not None
+
+        for round_idx in range(self._max_tool_rounds):
+            request = ChatCompletionRequest(
+                messages=messages,
+                stream=False,
+                tools=DOC_TOOLS,
+            )
+            try:
+                resp = await self._llm.chat_completion(
+                    request,
+                    agent_name="c3-docgen",
+                    session_id=str(conversation_id),
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                )
+            except Exception as exc:  # transport / gateway failure
+                msg = f"(LLM gateway error during tool loop: {exc})"
+                collected_tokens.append(msg)
+                yield f"data: {msg}\\n\n"
+                return
+
+            choice = resp.choices[0] if resp.choices else None
+            message = choice.message if choice is not None else None
+            tool_calls = parse_tool_calls(message) if message is not None else []
+
+            raw_content = ""
+            if message is not None and isinstance(message.content, str):
+                raw_content = message.content
+            if tool_calls:
+                _log.info(
+                    "tool_loop round=%d conv=%s parsed=%d tools=%s",
+                    round_idx + 1,
+                    conversation_id,
+                    len(tool_calls),
+                    [tc.get("name") for tc in tool_calls],
+                )
+            else:
+                # No tool call this round → the model answered in prose.
+                # Log a preview : this is exactly where the qwen
+                # 'claims success without calling update_document'
+                # failure surfaces, so the raw text is the evidence.
+                _log.info(
+                    "tool_loop round=%d conv=%s NO_TOOL_CALL "
+                    "content_preview=%r",
+                    round_idx + 1,
+                    conversation_id,
+                    raw_content[:600],
+                )
+
+            if not tool_calls:
+                # Final answer — the model chose to respond in text.
+                content = raw_content.strip() or "(the assistant returned no text)"
+                collected_tokens.append(content)
+                safe = content.replace("\n", "\\n")
+                yield f"data: {safe}\n\n"
+                return
+
+            # Preserve the raw tool_calls block so the loop-back
+            # assistant message is protocol-faithful (some providers
+            # reject a tool result whose call wasn't echoed back).
+            raw_calls = (getattr(message, "model_extra", {}) or {}).get(
+                "tool_calls", [],
+            )
+            # `ChatMessage` uses extra='allow' so `tool_calls` /
+            # `tool_call_id` / `name` are valid at runtime ; build via
+            # model_validate so the type checker accepts the extra keys.
+            assistant_content = (
+                message.content
+                if (message is not None and isinstance(message.content, str))
+                else ""
+            )
+            messages.append(
+                ChatMessage.model_validate(
+                    {
+                        "role": ChatRole.ASSISTANT,
+                        "content": assistant_content,
+                        "tool_calls": raw_calls,
+                    },
+                ),
+            )
+
+            for tc in tool_calls:
+                tool_name = tc["name"]
+                yield _inline_sse(
+                    {
+                        "kind": "tool_call",
+                        "status": "running",
+                        "name": tool_name,
+                        "label": tool_name,
+                        "round": round_idx + 1,
+                    },
+                )
+                result = await self._doc_tools.execute(
+                    name=tool_name,
+                    arguments=tc["arguments"],
+                    project_id=project_id,
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                    user_roles=user_roles,
+                )
+                ok = "error" not in result
+                summary = _summarise_tool_result(tool_name, result)
+                # Surface the affected document path on mutating tools
+                # so the UI can deep-link the inline log to the Working
+                # area viewer (D-015 / Phase 2.C.3).
+                doc_path = _tool_result_path(tool_name, result)
+                done_event: dict[str, Any] = {
+                    "kind": "tool_call",
+                    "status": "done",
+                    "name": tool_name,
+                    "label": summary,
+                    "ok": ok,
+                    "round": round_idx + 1,
+                    "summary": summary,
+                }
+                if doc_path is not None:
+                    done_event["path"] = doc_path
+                yield _inline_sse(done_event)
+                # Persist the terminal event into the shared audit
+                # ledger (done-only policy, same as stages).
+                collected_events.append(done_event)
+                messages.append(
+                    ChatMessage.model_validate(
+                        {
+                            "role": ChatRole.TOOL,
+                            "content": json.dumps(
+                                result, separators=(",", ":"),
+                            ),
+                            "tool_call_id": tc["id"],
+                            "name": tc["name"],
+                        },
+                    ),
+                )
+
+        # Round budget exhausted without a final text answer.
+        msg = (
+            "(stopped after the tool-call budget — ask me to continue "
+            "or rephrase)"
+        )
+        collected_tokens.append(msg)
+        yield f"data: {msg}\n\n"
 
     async def _recent_history_messages(
         self,
@@ -575,6 +868,54 @@ mode). Keeping the user / project behavioural preambles on top of
 this prompt is still correct — they aren't tied to retrieval."""
 
 
+_DOCGEN_TOOL_DIRECTIVE = (
+    "[Document tools — MANDATORY protocol]\n"
+    "You operate in document-generation mode. You have function tools : "
+    "list_documents, read_document, create_document, update_document, "
+    "delete_document. You MUST act by CALLING these tools. A chat reply "
+    "is NEVER a substitute for a tool call.\n"
+    "\n"
+    "To CREATE a document : call create_document with the full content.\n"
+    "\n"
+    "To MODIFY / add a section to / rewrite an EXISTING document, do "
+    "EXACTLY this, as tool calls, without talking to the user in "
+    "between :\n"
+    "  1. call read_document(path) to get the current content ;\n"
+    "  2. compute the new full file content yourself (apply the "
+    "requested change to what you read) ;\n"
+    "  3. call update_document(path, content=<the COMPLETE new file>) "
+    "— update_document replaces the whole file, so pass everything, "
+    "not just the added part ;\n"
+    "  4. only AFTER the tool call returns, reply with ONE short "
+    "confirmation sentence.\n"
+    "\n"
+    "ABSOLUTELY FORBIDDEN (these lose the user's work — never do them) :\n"
+    "- Replying with the document content in a ``` code block ``` as "
+    "if that saved it. It does NOT. Only update_document/"
+    "create_document persist.\n"
+    "- Asking the user to 'save the file', to 'specify' a value, or "
+    "to confirm, when you can perform the action yourself. Do it.\n"
+    "- Using placeholders like [insert_date_here] : if a value is "
+    "needed (e.g. a date) and the user didn't give one, choose a "
+    "sensible concrete value yourself and proceed with the tool call.\n"
+    "- Stopping after read_document without the follow-up "
+    "update_document call.\n"
+    "If the user's message asks to change a document, your FIRST "
+    "action this turn MUST be a read_document or update_document tool "
+    "call — not prose."
+)
+"""Operational directive injected ONLY when the chat-direct DocGen
+tool loop is active (`self._doc_tools is not None`). Without (and
+even with an earlier, softer version of) it, local models
+(qwen2.5:3b, qwen2.5-coder:7b) answer a modify request in prose —
+emitting the edited content in a fenced block and asking the user to
+'save the file' / 'specify the date' — instead of calling
+update_document, so nothing is persisted (observed Phase 2.C.3, then
+again 2026-05-19 with the 7b). This hardened, step-numbered,
+explicitly-forbidden-patterns version is the mitigation ; it raises
+compliance but a weak model can still ignore it — not a guarantee."""
+
+
 def _assemble_system_prompt(
     *,
     project_id: str,
@@ -582,13 +923,15 @@ def _assemble_system_prompt(
     user_prompt: str | None,
     project_prompt: str | None,
     has_relevant_hits: bool,
+    docgen_tools_active: bool = False,
 ) -> str:
     """Compose the LLM system message in the user-mandated order :
-    user behavioural prompt → project behavioural prompt → RAG
-    instructions + context (or a general-knowledge variant when no
-    retrieved chunk cleared the relevance threshold). Empty / None
-    preambles are silently skipped so the LLM sees a clean prompt
-    without empty section headers."""
+    user behavioural prompt → project behavioural prompt → (DocGen
+    tool directive when the tool loop is active) → RAG instructions +
+    context (or a general-knowledge variant when no retrieved chunk
+    cleared the relevance threshold). Empty / None preambles are
+    silently skipped so the LLM sees a clean prompt without empty
+    section headers."""
     sections: list[str] = []
     user_clean = (user_prompt or "").strip()
     if user_clean:
@@ -596,6 +939,8 @@ def _assemble_system_prompt(
     project_clean = (project_prompt or "").strip()
     if project_clean:
         sections.append(f"[Project instructions]\n{project_clean}")
+    if docgen_tools_active:
+        sections.append(_DOCGEN_TOOL_DIRECTIVE)
     if has_relevant_hits:
         sections.append(
             _RAG_SYSTEM_PROMPT.format(project_id=project_id, context=context),
@@ -654,6 +999,44 @@ def _hit_stats(hits: list[Any]) -> tuple[int, int, float]:
     above = sum(1 for h in hits if getattr(h, "score", 0.0) >= _RAG_MIN_SCORE)
     top = max((getattr(h, "score", 0.0) for h in hits), default=0.0)
     return total, above, round(float(top), 3)
+
+
+def _summarise_tool_result(tool: str, result: dict[str, Any]) -> str:
+    """One-line human summary of a tool result for the unified
+    `event: inline` (kind='tool_call') done payload — it becomes the
+    event `label`/`summary` the UX formatter renders. Kept terse —
+    the full result is fed to the model, not the user."""
+    if "error" in result:
+        return f"error: {result['error']}"
+    summaries: dict[str, str] = {
+        "list_documents": f"{len(result.get('documents', []))} document(s)",
+        "read_document": (
+            f"read {result.get('path', '?')} "
+            f"({len(result.get('content', ''))} chars)"
+        ),
+        "create_document": f"created {result.get('created', {}).get('path', '?')}",
+        "update_document": f"updated {result.get('updated', {}).get('path', '?')}",
+        "delete_document": f"deleted {result.get('deleted', '?')}",
+    }
+    return summaries.get(tool, "ok")
+
+
+def _tool_result_path(tool: str, result: dict[str, Any]) -> str | None:
+    """Extract the affected document path from a mutating tool result,
+    for the SSE `done` payload `path` field. Returns ``None`` for
+    non-mutating tools or on a malformed result so the UI simply
+    omits the deep-link rather than rendering a broken one."""
+    if "error" in result:
+        return None
+    if tool == "create_document":
+        path = result.get("created", {}).get("path")
+    elif tool == "update_document":
+        path = result.get("updated", {}).get("path")
+    elif tool == "delete_document":
+        path = result.get("deleted")
+    else:
+        return None
+    return path if isinstance(path, str) and path else None
 
 
 def _extract_delta_content(chunk: dict[str, Any]) -> str:

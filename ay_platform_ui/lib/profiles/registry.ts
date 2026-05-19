@@ -1,6 +1,6 @@
 // =============================================================================
 // File: registry.ts
-// Version: 1
+// Version: 2
 // Path: ay_platform_ui/lib/profiles/registry.ts
 // Description: Lookup for `Project.profile` → `ProfileDefinition`.
 //              Single source of truth — every shell render goes
@@ -10,13 +10,17 @@
 //
 //              Adding a profile = one import + one entry in the map.
 //              No other UI file needs to change.
+//
+//              v2 (2026-05-14) : registers the `docgen` profile.
 // =============================================================================
 
 import { CODE_PROFILE } from "./code";
+import { DOCGEN_PROFILE } from "./docgen";
 import type { ProfileDefinition } from "./types";
 
 const REGISTRY: Record<string, ProfileDefinition> = {
   [CODE_PROFILE.id]: CODE_PROFILE,
+  [DOCGEN_PROFILE.id]: DOCGEN_PROFILE,
 };
 
 /** Map of every known profile id to its label, for switchers that

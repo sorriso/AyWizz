@@ -263,17 +263,19 @@ async def test_rag_flow_round_trip(rag_stack: dict[str, Any]) -> None:
     ) as response:
         assert response.status_code == 200
         # Tokens (default `message` events with `data:` lines) end up
-        # in `chunks` ; `event: stage` lines are tracked separately so
-        # the assertions below can verify both protocols.
+        # in `chunks` ; unified `event: inline` lines are tracked
+        # separately. Was: a dedicated `event: stage` channel ; now
+        # one `event: inline` channel carries every kind (the unified-
+        # pipeline contract, 2026-05-19).
         chunks: list[str] = []
-        stage_event_count = 0
+        inline_event_count = 0
         current_event_type = "message"
         async for line in response.aiter_lines():
             if line.startswith("event: "):
                 current_event_type = line[len("event: "):].strip()
             elif line.startswith("data: "):
-                if current_event_type == "stage":
-                    stage_event_count += 1
+                if current_event_type == "inline":
+                    inline_event_count += 1
                 else:
                     chunks.append(line[len("data: "):])
             elif line == "":
@@ -282,10 +284,10 @@ async def test_rag_flow_round_trip(rag_stack: dict[str, Any]) -> None:
 
     # 4. Assert SSE framing — at least the [DONE] sentinel is present.
     assert "[DONE]" in chunks, f"no [DONE] sentinel in stream: {chunks}"
-    # And that the named `event: stage` channel emitted at least one
-    # payload (regression : the live pipeline chip depends on it).
-    assert stage_event_count >= 2, (
-        f"expected ≥2 stage SSE events, got {stage_event_count}"
+    # And that the unified `event: inline` channel emitted pipeline
+    # activity (regression : the live inline log depends on it).
+    assert inline_event_count >= 2, (
+        f"expected ≥2 inline SSE events, got {inline_event_count}"
     )
 
     # 5. Reconstruct the assistant reply from the streamed tokens.
@@ -312,23 +314,26 @@ async def test_rag_flow_round_trip(rag_stack: dict[str, Any]) -> None:
     assert messages[1].role == MessageRole.ASSISTANT
     assert "Voyager" in messages[1].content
 
-    # 8. Pipeline timeline persisted alongside the assistant message
-    #    (regression for the chat-UX work : without this, navigating
-    #    away and back loses the chip + collapsible panel). At least
-    #    `retrieve`, `generate`, `done` SHALL be present, each as a
+    # 8. Inline-activity ledger persisted alongside the assistant
+    #    message (regression for the chat-UX work : without this,
+    #    navigating away and back loses the inline log). Pipeline
+    #    phases now live in the UNIFIED `events` list as kind='stage'
+    #    entries (was the dedicated `stages` field). At least
+    #    `retrieve`, `generate`, `done` SHALL be present, each a
     #    `status='done'` row with a non-null `duration_ms`.
-    assert messages[1].stages is not None, "stages were not persisted"
-    stage_names = [s.name for s in messages[1].stages]
+    assert messages[1].events is not None, "events were not persisted"
+    stage_events = [e for e in messages[1].events if e.kind == "stage"]
+    stage_names = [e.name for e in stage_events]
     assert "retrieve" in stage_names
     assert "generate" in stage_names
     assert "done" in stage_names
-    for s in messages[1].stages:
-        assert s.status == "done", f"non-done stage persisted : {s}"
-        assert s.duration_ms is not None, f"missing duration on {s.name}"
-    # The user message has no stages — they only attach to assistant
-    # turns (server enforces by only persisting on the assistant
-    # append_message call).
-    assert messages[0].stages is None
+    for e in stage_events:
+        assert e.status == "done", f"non-done stage persisted : {e}"
+        assert e.duration_ms is not None, f"missing duration on {e.name}"
+    # The user message has no inline events — they only attach to
+    # assistant turns (server enforces by only persisting on the
+    # assistant append_message call).
+    assert messages[0].events is None
 
 
 async def test_stub_fallback_when_llm_not_wired(

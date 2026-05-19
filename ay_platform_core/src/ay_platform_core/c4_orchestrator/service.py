@@ -529,8 +529,23 @@ class OrchestratorService:
         for entry in files_raw:
             if not isinstance(entry, dict):
                 continue
-            path = entry.get("path")
-            content = entry.get("content")
+            # Accept common synonyms used by small open models : qwen2.5
+            # emits `name`/`contents`, some Llama variants use
+            # `filename`/`body` or `path`/`source`. Normalise here so
+            # downstream code keeps reading `path` / `content`.
+            path = (
+                entry.get("path")
+                or entry.get("name")
+                or entry.get("filename")
+                or entry.get("file")
+            )
+            content = (
+                entry.get("content")
+                or entry.get("contents")
+                or entry.get("body")
+                or entry.get("source")
+                or entry.get("code")
+            )
             if not isinstance(path, str) or not isinstance(content, str):
                 _log.warning(
                     "skipping malformed file entry in generate output (run=%s): %r",

@@ -325,3 +325,112 @@ def test_prompt_drops_empty_behavioural_preambles() -> None:
     )
     assert "[User instructions]" not in prompt
     assert "[Project instructions]" not in prompt
+
+
+@pytest.mark.unit
+def test_prompt_omits_docgen_directive_by_default() -> None:
+    """Non-DocGen conversations (no tool loop) SHALL NOT see the
+    document-tool directive — it would confuse a plain RAG chat with
+    instructions about tools it isn't offered."""
+    prompt = _assemble_system_prompt(
+        project_id="proj-x",
+        context="[1] (source=A, score=0.8)\nSomething.",
+        user_prompt=None,
+        project_prompt=None,
+        has_relevant_hits=True,
+    )
+    assert "Document tools — MANDATORY protocol" not in prompt
+
+
+@pytest.mark.unit
+def test_prompt_injects_docgen_directive_when_tools_active() -> None:
+    """When the chat-direct DocGen tool loop is active the system
+    prompt SHALL carry the mandatory tool-usage directive so the
+    model persists via update_document instead of printing the
+    edited content as plain text (Phase 2.C.3 defect fix). The
+    directive SHALL sit AFTER the behavioural preambles and BEFORE
+    the RAG context (operational mechanics, not behaviour)."""
+    prompt = _assemble_system_prompt(
+        project_id="proj-x",
+        context="[1] (source=A, score=0.8)\nSome context.",
+        user_prompt="Be concise.",
+        project_prompt="Formal French.",
+        has_relevant_hits=True,
+        docgen_tools_active=True,
+    )
+    assert "Document tools — MANDATORY protocol" in prompt
+    # The directive must explicitly forbid the observed failure modes
+    # (2026-05-19 hardened version) : prose-instead-of-tool, the
+    # fenced-content "as if that saved it" pattern, placeholder
+    # values, and stopping after read_document. Assert the invariants
+    # that express the requirement, not the exact prose (which was
+    # intentionally rewritten — §10.4 test update for a contract/
+    # content change).
+    assert "ABSOLUTELY FORBIDDEN" in prompt
+    assert "code block" in prompt
+    assert "update_document" in prompt
+    assert "read_document or update_document tool" in prompt
+    directive_pos = prompt.index("Document tools — MANDATORY protocol")
+    project_pos = prompt.index("Formal French.")
+    rag_pos = prompt.index("Retrieved context")
+    assert project_pos < directive_pos < rag_pos
+
+
+# ---------------------------------------------------------------------------
+# _tool_result_path — drives the SSE `done` payload `path` field that the
+# Conversations inline strip uses to deep-link the Working area viewer
+# (D-015 / Phase 2.C.3). Pure function, imported directly.
+
+
+from ay_platform_core.c3_conversation.service import (  # noqa: E402
+    _tool_result_path,
+)
+
+
+@pytest.mark.unit
+def test_tool_result_path_create_reads_created_path() -> None:
+    """create_document result nests the path under `created` — the
+    helper SHALL surface it so the UI can open the new doc."""
+    assert (
+        _tool_result_path("create_document", {"created": {"path": "docs/a.md"}})
+        == "docs/a.md"
+    )
+
+
+@pytest.mark.unit
+def test_tool_result_path_update_reads_updated_path() -> None:
+    """update_document nests the path under `updated`."""
+    assert (
+        _tool_result_path("update_document", {"updated": {"path": "docs/b.md"}})
+        == "docs/b.md"
+    )
+
+
+@pytest.mark.unit
+def test_tool_result_path_delete_reads_deleted_string() -> None:
+    """delete_document returns the path as a bare `deleted` string
+    (mirrors `_summarise_tool_result`'s `result.get('deleted')`)."""
+    assert _tool_result_path("delete_document", {"deleted": "docs/c.md"}) == "docs/c.md"
+
+
+@pytest.mark.unit
+def test_tool_result_path_non_mutating_tool_returns_none() -> None:
+    """Read / list tools have no affected path — no deep-link."""
+    assert _tool_result_path("read_document", {"path": "docs/x.md"}) is None
+    assert _tool_result_path("list_documents", {"documents": []}) is None
+
+
+@pytest.mark.unit
+def test_tool_result_path_error_result_returns_none() -> None:
+    """An errored tool result SHALL NOT yield a path — the UI would
+    otherwise render a deep-link to a document that was never written."""
+    assert _tool_result_path("create_document", {"error": "boom"}) is None
+
+
+@pytest.mark.unit
+def test_tool_result_path_malformed_result_returns_none() -> None:
+    """Missing / non-string path → None (UI omits the link rather
+    than building a broken href)."""
+    assert _tool_result_path("create_document", {"created": {}}) is None
+    assert _tool_result_path("update_document", {}) is None
+    assert _tool_result_path("delete_document", {"deleted": 123}) is None

@@ -1,11 +1,13 @@
 # =============================================================================
 # File: main.py
-# Version: 3
+# Version: 4
 # Path: ay_platform_core/src/ay_platform_core/c4_orchestrator/main.py
 # Description: FastAPI app factory for C4 Orchestrator. Wires the in-process
 #              dispatcher backed by a real C8 LLM client (the C8 URL is read
 #              from C4_LLM_GATEWAY_URL).
 #
+#              v4: mounts `documents_router` — the chat-direct DocGen
+#              document CRUD surface (D-015 / R-200-153..156).
 #              v3: passes the `ArtifactsService` instance into the
 #              `OrchestratorService` so the generate phase materialises
 #              its `output.files` into the artifacts surface and triggers
@@ -42,6 +44,9 @@ from ay_platform_core.c4_orchestrator.artifacts_storage import ArtifactStorage
 from ay_platform_core.c4_orchestrator.config import OrchestratorConfig
 from ay_platform_core.c4_orchestrator.db.repository import OrchestratorRepository
 from ay_platform_core.c4_orchestrator.dispatcher.in_process import InProcessDispatcher
+from ay_platform_core.c4_orchestrator.documents_router import (
+    router as documents_router,
+)
 from ay_platform_core.c4_orchestrator.domains.code.plugin import CodeDomainPlugin
 from ay_platform_core.c4_orchestrator.events.null_publisher import NullPublisher
 from ay_platform_core.c4_orchestrator.router import router
@@ -118,6 +123,7 @@ def create_app(config: OrchestratorConfig | None = None) -> FastAPI:
     app.add_middleware(TraceContextMiddleware, sample_rate=log_cfg.trace_sample_rate)
     app.include_router(router)
     app.include_router(artifacts_router)
+    app.include_router(documents_router)
     app.state.orchestrator_service = service
     app.state.artifacts_service = artifacts_service
 

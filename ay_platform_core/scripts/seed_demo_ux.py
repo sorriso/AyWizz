@@ -40,6 +40,8 @@ import httpx
 DEFAULT_BASE_URL = "http://localhost:56000"
 TENANT_ID = "tenant-test"
 PROJECT_ID = "project-test"
+DOCGEN_PROJECT_ID = "project-docgen"
+DOCGEN_PROJECT_NAME = "Demo DocGen Project"
 ADMIN_USERNAME = "tenant-admin"
 ADMIN_PASSWORD = "dev-tenant"
 
@@ -114,6 +116,88 @@ DEMO_ARTIFACT_FILES: list[dict[str, str]] = [
             "def greet(name: str) -> str:\n"
             '    """Return a friendly greeting."""\n'
             '    return f"Hello, {name}!"\n'
+        ),
+    },
+]
+
+
+# Demo artifact run for the DocGen project — a small library of
+# markdown documents organised in nested folders so the VSCode-like
+# tree view has something interesting to render at startup. README.md
+# at the root mirrors the "every project has at least one README.md
+# with its name inside" invariant (will be enforced at project
+# creation time once the projects-router gets the bootstrap step).
+# D-015 : the DocGen corpus is the perpetual `live-docs` run. Seeding
+# into it (not a separate `demo-docs-001`) means chat-created documents
+# appear in the SAME tree as the seeded library — one coherent corpus
+# per project instead of two disjoint runs.
+DOCGEN_ARTIFACT_RUN_ID = "live-docs"
+DOCGEN_ARTIFACT_LABEL = "Live documents"
+DOCGEN_ARTIFACT_FILES: list[dict[str, str]] = [
+    {
+        "path": "README.md",
+        "content": (
+            f"# {DOCGEN_PROJECT_NAME}\n\n"
+            f"Welcome to **{DOCGEN_PROJECT_NAME}**.\n\n"
+            "This project demos the DocGen profile — the assistant\n"
+            "creates and updates documents in this tree as you chat.\n\n"
+            "## Sections\n\n"
+            "- `docs/getting-started.md` — operator-facing quickstart.\n"
+            "- `docs/architecture/overview.md` — high-level diagram.\n"
+            "- `reports/quarterly/Q1-2026.md` — sample report.\n"
+        ),
+    },
+    {
+        "path": "docs/getting-started.md",
+        "content": (
+            "# Getting started\n\n"
+            "1. Open the **Conversations** tab.\n"
+            "2. Tell the assistant what document you want.\n"
+            "3. The assistant proposes a draft ; iterate by asking\n"
+            "   for changes ; selected snippets get cited in the chat.\n"
+        ),
+    },
+    {
+        "path": "docs/architecture/overview.md",
+        "content": (
+            "# Architecture overview\n\n"
+            "DocGen flows are conversational : the model invokes\n"
+            "platform tools (`create_document` / `update_document` /\n"
+            "`read_document`) that mutate the project's MinIO tree.\n"
+            "Every change is also pushed to the project's Gitea repo\n"
+            "so a clone gives an auditable history.\n"
+        ),
+    },
+    {
+        "path": "docs/architecture/sequence.md",
+        "content": (
+            "# Sequence — conversation-driven document update\n\n"
+            "```\n"
+            "User → C3 chat : 'add a section about caching'\n"
+            "C3 → C8 LLM   : prompt + tool catalogue\n"
+            "C8 ← LLM      : tool_call(update_document, ...)\n"
+            "C3 → C4 art.  : write through ArtifactsService\n"
+            "C3 → User     : confirmation + diff preview\n"
+            "```\n"
+        ),
+    },
+    {
+        "path": "reports/quarterly/Q1-2026.md",
+        "content": (
+            "# Quarterly report — Q1 2026\n\n"
+            "Placeholder report seeded by `seed_demo_ux.py`. Ask the\n"
+            "assistant to expand each bullet — it will refine in-place.\n\n"
+            "- Highlights\n"
+            "- Risks\n"
+            "- Next steps\n"
+        ),
+    },
+    {
+        "path": "reports/quarterly/Q2-2026-draft.md",
+        "content": (
+            "# Quarterly report — Q2 2026 (draft)\n\n"
+            "Empty stub. Tell the assistant to draft a status update\n"
+            "based on the Q1 report above.\n"
         ),
     },
 ]
@@ -304,16 +388,23 @@ async def ensure_demo_source(
 
 
 async def ensure_demo_artifacts(
-    client: httpx.AsyncClient, base_url: str, token: str,
+    client: httpx.AsyncClient,
+    base_url: str,
+    token: str,
+    *,
+    project_id: str = PROJECT_ID,
+    run_id: str = DEMO_ARTIFACT_RUN_ID,
+    label: str = DEMO_ARTIFACT_LABEL,
+    files: list[dict[str, str]] | None = None,
 ) -> str:
-    """POST the demo artifact run via the C4 admin seed endpoint.
-    Idempotent : same `run_id` upserts the row + re-uploads each
-    file (MinIO key collision is overwritten). Returns "created"
-    or "exists" — we don't pre-check ; the endpoint accepts replay
-    by design."""
+    """POST a demo artifact run via the C4 admin seed endpoint for
+    `project_id`. Idempotent : same `run_id` upserts the row +
+    re-uploads each file (MinIO key collision is overwritten).
+    Returns the descriptor (`run/<id>`) the caller logs."""
+    payload_files = files if files is not None else DEMO_ARTIFACT_FILES
     payload = {
-        "run_id": DEMO_ARTIFACT_RUN_ID,
-        "label": DEMO_ARTIFACT_LABEL,
+        "run_id": run_id,
+        "label": label,
         "files": [
             {
                 "path": f["path"],
@@ -321,23 +412,21 @@ async def ensure_demo_artifacts(
                     f["content"].encode("utf-8"),
                 ).decode("ascii"),
             }
-            for f in DEMO_ARTIFACT_FILES
+            for f in payload_files
         ],
     }
     resp = await client.post(
-        f"{base_url}/api/v1/admin/projects/{PROJECT_ID}/artifacts/seed",
+        f"{base_url}/api/v1/admin/projects/{project_id}/artifacts/seed",
         headers={"Authorization": f"Bearer {token}"},
         json=payload,
         timeout=30.0,
     )
     if resp.status_code in (200, 201):
         body = resp.json()
-        # Whether the run existed before is opaque from the response —
-        # report as "created" for simplicity ; the seeder log shows
-        # one line per artifact-run regardless.
-        return f"run/{body.get('run_id', DEMO_ARTIFACT_RUN_ID)}"
+        return f"run/{body.get('run_id', run_id)}"
     raise SeedError(
-        f"artifact seed failed: {resp.status_code} {resp.text[:200]}",
+        f"artifact seed for project {project_id!r} failed: "
+        f"{resp.status_code} {resp.text[:200]}",
     )
 
 
@@ -379,16 +468,30 @@ async def run(args: argparse.Namespace) -> int:
         except SeedError as exc:
             print(f"   [error] requirements doc: {exc}", file=sys.stderr)
 
-        # Phase Artifacts : seed one C4 artifact run so the new
-        # "Code source" section has something to browse on day one.
-        # Non-fatal — the UX section just shows an empty state if
-        # this step fails.
+        # Phase Artifacts : seed one C4 artifact run per demo project
+        # so both the CodeGen "Code source" tab AND the DocGen
+        # "Documents" tab have something to browse on day one.
+        # Non-fatal — each section shows an empty state on failure.
         try:
             descriptor = await ensure_demo_artifacts(client, args.base_url, token)
             results["created"].append(descriptor)
             print(f"   [created] {descriptor}")
         except SeedError as exc:
-            print(f"   [error] artifacts: {exc}", file=sys.stderr)
+            print(f"   [error] artifacts (code): {exc}", file=sys.stderr)
+        try:
+            descriptor = await ensure_demo_artifacts(
+                client,
+                args.base_url,
+                token,
+                project_id=DOCGEN_PROJECT_ID,
+                run_id=DOCGEN_ARTIFACT_RUN_ID,
+                label=DOCGEN_ARTIFACT_LABEL,
+                files=DOCGEN_ARTIFACT_FILES,
+            )
+            results["created"].append(f"docgen/{descriptor}")
+            print(f"   [created] docgen/{descriptor}")
+        except SeedError as exc:
+            print(f"   [error] artifacts (docgen): {exc}", file=sys.stderr)
 
     summary: dict[str, Any] = {
         "base_url": args.base_url,

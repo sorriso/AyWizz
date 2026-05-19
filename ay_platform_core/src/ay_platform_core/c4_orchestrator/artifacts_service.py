@@ -1,6 +1,6 @@
 # =============================================================================
 # File: artifacts_service.py
-# Version: 2
+# Version: 3
 # Path: ay_platform_core/src/ay_platform_core/c4_orchestrator/artifacts_service.py
 # Description: Facade for the project-artifacts surface. Bridges the
 #              Arango run metadata (R-200-132) and the MinIO blob
@@ -19,6 +19,9 @@
 # @relation implements:R-200-131
 # @relation implements:R-200-132
 # @relation implements:R-200-133
+# @relation implements:R-200-153
+# @relation implements:R-200-154
+# @relation implements:R-200-155
 # =============================================================================
 
 from __future__ import annotations
@@ -330,6 +333,209 @@ class ArtifactsService:
             }
             for c in commits
         ]
+
+    # ------------------------------------------------------------------
+    # Chat-direct document API (D-015) — the DocGen v1 path. The
+    # conversation's tool calls land here. All documents for a project
+    # live under one perpetual `live-docs` run (status=RUNNING, never
+    # `mark_completed`). Each write triggers an immediate single-file
+    # Gitea push (incremental, not batch-on-complete like R-200-146).
+    # ------------------------------------------------------------------
+
+    LIVE_DOCS_RUN_ID = "live-docs"
+
+    async def ensure_live_docs_run(
+        self, *, project_id: str, tenant_id: str,
+    ) -> str:
+        """Idempotently ensure the per-project `live-docs` artifact run
+        exists. Returns its run_id (always `live-docs`). The run is
+        never completed — it is the perpetual document corpus."""
+        existing = await self._repo.get_artifact_run(self.LIVE_DOCS_RUN_ID)
+        if (
+            existing is not None
+            and existing.get("project_id") == project_id
+            and existing.get("tenant_id") == tenant_id
+        ):
+            return self.LIVE_DOCS_RUN_ID
+        if existing is not None:
+            # The deterministic id is already taken by another
+            # (tenant, project). That violates the one-live-run-per-id
+            # assumption — surface loudly rather than silently cross
+            # tenants.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="live-docs run id already bound to another project",
+            )
+        await self.create_run(
+            project_id=project_id,
+            tenant_id=tenant_id,
+            run_id=self.LIVE_DOCS_RUN_ID,
+            label="Live documents",
+            status_=ArtifactRunStatus.RUNNING,
+        )
+        return self.LIVE_DOCS_RUN_ID
+
+    async def list_documents(
+        self, *, project_id: str, tenant_id: str,
+    ) -> list[dict[str, Any]]:
+        """List every document path in the project's live-docs run.
+        Returns dicts `{path, size_bytes}` ; empty list when the run
+        doesn't exist yet (no documents created so far)."""
+        run = await self._repo.get_artifact_run(self.LIVE_DOCS_RUN_ID)
+        if (
+            run is None
+            or run.get("project_id") != project_id
+            or run.get("tenant_id") != tenant_id
+        ):
+            return []
+        entries = await self._storage.list_tree(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            run_id=self.LIVE_DOCS_RUN_ID,
+        )
+        return [{"path": p, "size_bytes": s} for p, s in entries]
+
+    async def read_document(
+        self, *, project_id: str, tenant_id: str, path: str,
+    ) -> ArtifactBlob:
+        """Read one document. 404 when the live-docs run or the path
+        is missing ; 400 on a malformed path (`..`, leading `/`)."""
+        await self._load_run_or_404(
+            run_id=self.LIVE_DOCS_RUN_ID,
+            project_id=project_id,
+            tenant_id=tenant_id,
+        )
+        try:
+            return await self._storage.get_blob(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                run_id=self.LIVE_DOCS_RUN_ID,
+                relative_path=path,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"document {path!r} not found",
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+
+    async def write_document(
+        self,
+        *,
+        project_id: str,
+        tenant_id: str,
+        path: str,
+        content: str,
+    ) -> dict[str, Any]:
+        """Create or overwrite a document. Ensures the live-docs run
+        exists, writes the blob, then best-effort single-file Gitea
+        push (incremental — one commit per write). Returns
+        `{path, size_bytes}`. 400 on a malformed path."""
+        await self.ensure_live_docs_run(
+            project_id=project_id, tenant_id=tenant_id,
+        )
+        data = content.encode("utf-8")
+        try:
+            await self.put_file(
+                run_id=self.LIVE_DOCS_RUN_ID,
+                project_id=project_id,
+                tenant_id=tenant_id,
+                relative_path=path,
+                data=data,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+        await self._push_one_doc_to_gitea(
+            project_id=project_id,
+            tenant_id=tenant_id,
+            path=path,
+            data=data,
+        )
+        return {"path": path, "size_bytes": len(data)}
+
+    async def delete_document(
+        self, *, project_id: str, tenant_id: str, path: str,
+    ) -> None:
+        """Delete a document from MinIO. 404 when missing. Gitea
+        history is intentionally NOT rewritten — the deleted doc
+        survives in git history (audit trail ; D-015 tech-debt note)."""
+        await self._load_run_or_404(
+            run_id=self.LIVE_DOCS_RUN_ID,
+            project_id=project_id,
+            tenant_id=tenant_id,
+        )
+        entries = await self._storage.list_tree(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            run_id=self.LIVE_DOCS_RUN_ID,
+        )
+        if path not in {p for p, _ in entries}:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"document {path!r} not found",
+            )
+        try:
+            await self._storage.delete_blob(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                run_id=self.LIVE_DOCS_RUN_ID,
+                relative_path=path,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+        # Recompute run totals after removal so the UX file-count stays
+        # accurate.
+        remaining = await self._storage.list_tree(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            run_id=self.LIVE_DOCS_RUN_ID,
+        )
+        run = await self._repo.get_artifact_run(self.LIVE_DOCS_RUN_ID)
+        if run is not None:
+            run["file_count"] = len(remaining)
+            run["total_bytes"] = sum(s for _, s in remaining)
+            await self._repo.upsert_artifact_run(run)
+
+    async def _push_one_doc_to_gitea(
+        self,
+        *,
+        project_id: str,
+        tenant_id: str,
+        path: str,
+        data: bytes,
+    ) -> None:
+        """Best-effort single-file Gitea push for the chat-direct
+        document path (D-015). Mirrors R-200-146 semantics (root admin
+        owner, one commit per file, WARN-and-continue on failure) but
+        scoped to one file instead of the whole run."""
+        if self._gitea is None:
+            return
+        import logging  # noqa: PLC0415 — keep import on the cold path
+
+        log = logging.getLogger("c4_orchestrator.artifacts")
+        owner = f"svc-{tenant_id}-{project_id}"
+        try:
+            await self._gitea.create_or_update_file(
+                owner=owner,
+                repo=project_id,
+                path=path,
+                content=data,
+                message=f"docgen — {path}",
+            )
+        except GiteaError as exc:
+            log.warning(
+                "gitea push (live-docs, path=%s) failed: %s", path, exc,
+            )
 
     # ------------------------------------------------------------------
     # Internals

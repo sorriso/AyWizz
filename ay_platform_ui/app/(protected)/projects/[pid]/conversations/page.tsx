@@ -1,7 +1,14 @@
 // =============================================================================
 // File: page.tsx
-// Version: 3
+// Version: 4
 // Path: ay_platform_ui/app/(protected)/projects/[pid]/conversations/page.tsx
+//
+// v4 (2026-05-19): Increment 3a — on mount, resume the last active
+// conversation (cross-nav store) so re-entering the Conversations
+// tab returns the operator into their conversation (like Working
+// area) rather than the bare list. The list stays reachable via the
+// `[cid]` breadcrumb which clears the stored marker.
+//
 // Description: Conversations list (Phase D). One row per conversation
 //              the caller owns, scoped to the active project. A single
 //              "New conversation" button creates a placeholder
@@ -25,8 +32,9 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
+import { useProjectUi } from "@/app/(protected)/workspace-store";
 import { ApiClient, ApiError } from "@/lib/apiClient";
 import type { Conversation } from "@/lib/types";
 
@@ -51,6 +59,13 @@ export default function ConversationsListPage() {
   const configState = useConfigState();
   const [state, setState] = useState<ListState>({ status: "loading" });
   const [refreshCounter, setRefreshCounter] = useState(0);
+  // Cross-nav store (Increment 3a). Coming back to the Conversations
+  // tab resumes the conversation the operator was in (like Working
+  // area) instead of dumping them on the list. The `[cid]` page
+  // clears `activeConversationId` when its "← Conversations"
+  // breadcrumb is used, so the list IS reachable on purpose.
+  const { ui } = useProjectUi(projectId);
+  const resumedRef = useRef(false);
 
   const apiClient = useMemo(() => {
     if (configState.status !== "ready") return null;
@@ -81,6 +96,20 @@ export default function ConversationsListPage() {
       cancelled = true;
     };
   }, [apiClient, projectId, refreshCounter]);
+
+  // Resume the last conversation once (per mount) when the store
+  // points at one that still exists. router.replace so the list
+  // isn't left in history between it and the conversation.
+  useEffect(() => {
+    if (resumedRef.current || state.status !== "ready") return;
+    const last = ui.activeConversationId;
+    if (last && state.items.some((c) => c.id === last)) {
+      resumedRef.current = true;
+      router.replace(
+        `/projects/${encodeURIComponent(projectId)}/conversations/${encodeURIComponent(last)}`,
+      );
+    }
+  }, [state, ui.activeConversationId, projectId, router]);
 
   return (
     <main className="mx-auto max-w-7xl px-6 py-10">
@@ -237,7 +266,9 @@ function ConversationRow({
   apiClient: ApiClient | null;
   onChanged: () => void;
 }) {
+  const router = useRouter();
   const [deleting, setDeleting] = useState(false);
+  const [renaming, setRenaming] = useState(false);
 
   async function onDelete(e: React.MouseEvent): Promise<void> {
     e.preventDefault();
@@ -251,6 +282,33 @@ function ConversationRow({
     } catch (err) {
       window.alert(`Delete failed: ${String(err)}`);
       setDeleting(false);
+    }
+  }
+
+  function onOpenInWorkingArea(e: React.MouseEvent): void {
+    e.preventDefault();
+    e.stopPropagation();
+    router.push(
+      `/projects/${encodeURIComponent(projectId)}/working-area?conv=${encodeURIComponent(conversation.id)}`,
+    );
+  }
+
+  async function onRename(e: React.MouseEvent): Promise<void> {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!apiClient) return;
+    const next = window.prompt("New title", conversation.title);
+    if (next === null) return; // user cancelled
+    const trimmed = next.trim();
+    if (!trimmed || trimmed === conversation.title) return;
+    setRenaming(true);
+    try {
+      await apiClient.updateConversation(conversation.id, { title: trimmed });
+      onChanged();
+    } catch (err) {
+      window.alert(`Rename failed: ${String(err)}`);
+    } finally {
+      setRenaming(false);
     }
   }
 
@@ -269,15 +327,36 @@ function ConversationRow({
             {new Date(conversation.updated_at).toLocaleString()}
           </p>
         </div>
-        <button
-          type="button"
-          onClick={onDelete}
-          disabled={deleting}
-          className="rounded-md border border-red-200 px-2 py-1 text-xs text-red-700 hover:bg-red-50 disabled:opacity-50"
-          data-testid={`conversation-delete-${conversation.id}`}
-        >
-          {deleting ? "…" : "Delete"}
-        </button>
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            onClick={onRename}
+            disabled={renaming}
+            className="rounded-md border border-neutral-200 px-2 py-1 text-xs text-neutral-700 hover:bg-neutral-50 disabled:opacity-50"
+            data-testid={`conversation-rename-${conversation.id}`}
+            title="Rename this conversation"
+          >
+            {renaming ? "…" : "Rename"}
+          </button>
+          <button
+            type="button"
+            onClick={onOpenInWorkingArea}
+            className="rounded-md border border-blue-200 px-2 py-1 text-xs text-blue-700 hover:bg-blue-50"
+            data-testid={`conversation-open-working-${conversation.id}`}
+            title="Open this conversation in the Working area (3-pane workspace)"
+          >
+            Open in Working area
+          </button>
+          <button
+            type="button"
+            onClick={onDelete}
+            disabled={deleting}
+            className="rounded-md border border-red-200 px-2 py-1 text-xs text-red-700 hover:bg-red-50 disabled:opacity-50"
+            data-testid={`conversation-delete-${conversation.id}`}
+          >
+            {deleting ? "…" : "Delete"}
+          </button>
+        </div>
       </Link>
     </li>
   );

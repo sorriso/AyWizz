@@ -245,6 +245,15 @@ class AuthConfig(BaseSettings):
         description="Project id created by the demo seed under tenant-test.",
     )
     demo_seed_project_name: str = Field(default="Test Project")
+    # Second demo project — DocGen profile. Same tenant + grants as
+    # `project-test`, but `profile=docgen` so the UI shows the
+    # simplified sidebar (Overview / Sources / Conversations /
+    # Documents / Settings — no Pipeline / Validation / Requirements).
+    demo_seed_docgen_project_id: str = Field(
+        default="project-docgen",
+        description="DocGen demo project id created under the demo tenant.",
+    )
+    demo_seed_docgen_project_name: str = Field(default="Demo DocGen Project")
     # Per-user credentials. Defaults are intentionally non-trivial yet
     # well-known so they can be auto-filled from /ux/config without
     # secret-leak risk (prod has demo_seed_enabled=False anyway).

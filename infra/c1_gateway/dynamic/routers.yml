@@ -1,6 +1,6 @@
 # =============================================================================
 # File: routers.yml
-# Version: 6
+# Version: 7
 # Path: infra/c1_gateway/dynamic/routers.yml
 # Description: Traefik HTTP router definitions. v3 adds the UI catch-all
 #              (priority 1) so the Next.js standalone server receives
@@ -112,6 +112,20 @@ http:
     # reason against c2-projects.
     c4-git:
       rule: "PathRegexp(`^/api/v1/projects/[^/]+/git(/.*)?$`)"
+      service: c4
+      entryPoints:
+        - web
+      middlewares:
+        - forward-auth-c2
+        - secure-headers
+      priority: 100
+
+    # C4 — Chat-direct DocGen document CRUD (D-015 / R-200-153..156).
+    # Same precedence (100) as c4-artifacts so it wins over the
+    # generic c2-projects route. Regexp matches
+    # `/api/v1/projects/<pid>/documents` and any sub-path.
+    c4-documents:
+      rule: "PathRegexp(`^/api/v1/projects/[^/]+/documents(/.*)?$`)"
       service: c4
       entryPoints:
         - web

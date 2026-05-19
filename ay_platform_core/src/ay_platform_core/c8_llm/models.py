@@ -1,6 +1,6 @@
 # =============================================================================
 # File: models.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/src/ay_platform_core/c8_llm/models.py
 # Description: Pydantic v2 models for C8's public surface. These are the
 #              wire-level payloads exchanged between internal components and
@@ -8,6 +8,15 @@
 #              C8 exposes an OpenAI-compatible API (R-800-010); the request
 #              and response models mirror the OpenAI schema subset the
 #              platform depends on, not the full specification.
+#
+#              v2 (2026-05-19): `ChatMessage.content` is now Optional
+#              (`| None = None`). Per the OpenAI spec a tool-call
+#              assistant message has `content: null`. Spec-compliant
+#              hosted providers (OpenRouter) return that ; the
+#              previously-required field raised a ChatCompletionResponse
+#              validation error before `tool_calls` could be read,
+#              breaking the entire DocGen tool loop on the hosted-LLM
+#              switch. Ollama always sent a string so this was latent.
 #
 # @relation implements:R-800-010
 # @relation implements:R-800-013
@@ -42,7 +51,13 @@ class ChatMessage(BaseModel):
     model_config = ConfigDict(extra="allow")  # `name`, `tool_call_id`, etc. are optional
 
     role: ChatRole
-    content: str | list[dict[str, Any]]
+    # OpenAI spec : `content` is null on an assistant message that
+    # carries `tool_calls` (the model chose a tool over prose). A
+    # spec-compliant provider (OpenRouter/OpenAI) returns content=null
+    # there ; Ollama always sent a string so this never surfaced
+    # until the 2026-05-19 hosted-provider switch. Optional + default
+    # None ; downstream already guards with isinstance(content, str).
+    content: str | list[dict[str, Any]] | None = None
 
 
 class ChatCompletionRequest(BaseModel):

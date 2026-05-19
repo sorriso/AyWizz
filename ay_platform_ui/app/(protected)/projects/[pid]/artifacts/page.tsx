@@ -21,7 +21,9 @@ import { useEffect, useMemo, useState } from "react";
 
 import { useReadyConfig } from "@/app/providers";
 import { CodeViewer } from "@/components/code-viewer";
+import { FileTree } from "@/components/file-tree";
 import { ApiClient, ApiError } from "@/lib/apiClient";
+import { resolveProfile } from "@/lib/profiles/registry";
 import type { ArtifactCommit, ArtifactNode, ArtifactRun } from "@/lib/types";
 
 type Tab = "files" | "versions";
@@ -64,6 +66,36 @@ export default function ArtifactsPage() {
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [blobLoad, setBlobLoad] = useState<BlobLoad>({ status: "idle" });
   const [commitsLoad, setCommitsLoad] = useState<CommitsLoad>({ status: "idle" });
+  const [profileId, setProfileId] = useState<string | null>(null);
+
+  // The artifacts route is profile-agnostic (R-200-131) but the
+  // label varies : `code` → "Code source", `docgen` → "Documents".
+  // We fetch the project once at mount to know which to show.
+  useEffect(() => {
+    let cancelled = false;
+    apiClient
+      .getProject(projectId)
+      .then((p) => {
+        if (!cancelled) setProfileId(p.profile);
+      })
+      .catch(() => {
+        // Profile fetch failure is non-fatal — fall back to the
+        // generic "Artifacts" label instead of blocking the page.
+        if (!cancelled) setProfileId(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [apiClient, projectId]);
+
+  const sectionLabel = useMemo(() => {
+    const profile = profileId ? resolveProfile(profileId) : null;
+    if (profile) {
+      const section = profile.sections.find((s) => s.path === "artifacts");
+      if (section?.label) return section.label;
+    }
+    return "Artifacts";
+  }, [profileId]);
 
   // Load the runs list once on mount. Auto-select the most recent
   // run so the operator lands directly on something useful.
@@ -206,7 +238,7 @@ export default function ArtifactsPage() {
   return (
     <main className="mx-auto max-w-7xl px-6 py-8" data-testid="artifacts-view">
       <header>
-        <h2 className="text-2xl font-semibold tracking-tight">Code source</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">{sectionLabel}</h2>
         <p className="mt-1 text-sm text-neutral-500">
           Browse files produced by each pipeline run. Read-only view ; downloads stream through the
           platform gateway.
@@ -423,31 +455,8 @@ function TreePanel({
         <p className="px-3 py-3 text-sm text-red-700" role="alert">
           {load.error}
         </p>
-      ) : !load.nodes || load.nodes.length === 0 ? (
-        <p className="px-3 py-3 text-sm text-neutral-500">No files in this run.</p>
       ) : (
-        <ul className="max-h-[60vh] overflow-y-auto divide-y divide-neutral-100">
-          {load.nodes.map((n) => {
-            const active = n.path === selectedPath;
-            return (
-              <li key={n.path}>
-                <button
-                  type="button"
-                  onClick={() => onSelect(n.path)}
-                  className={[
-                    "block w-full truncate px-3 py-1.5 text-left font-mono text-xs transition-colors",
-                    active ? "bg-blue-50 text-blue-900" : "text-neutral-700 hover:bg-neutral-50",
-                  ].join(" ")}
-                  data-testid={`artifacts-file-${n.path}`}
-                  data-active={active ? "true" : "false"}
-                  title={`${n.path} · ${formatBytes(n.size_bytes)}`}
-                >
-                  {n.path}
-                </button>
-              </li>
-            );
-          })}
-        </ul>
+        <FileTree nodes={load.nodes ?? []} selectedPath={selectedPath} onSelect={onSelect} />
       )}
     </div>
   );

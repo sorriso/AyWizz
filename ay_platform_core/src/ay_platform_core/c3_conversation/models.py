@@ -1,10 +1,23 @@
 # =============================================================================
 # File: models.py
-# Version: 3
+# Version: 4
 # Path: ay_platform_core/src/ay_platform_core/c3_conversation/models.py
 # Description: Pydantic v2 data contracts for C3 Conversation Service.
 #              ConversationPublic and MessagePublic are registered as
 #              platform contracts (consumed by C1, C4, future UI).
+#
+#              v4: UNIFIED inline-event pipeline. `StageRecord` and
+#              the short-lived `ToolCallRecord` are collapsed into a
+#              single `InlineEvent` (discriminated by `kind`) and a
+#              single `MessagePublic.events` list. One channel for
+#              every kind of in-turn activity (pipeline stages,
+#              DocGen tool calls, future kinds) : the service emits
+#              them through one collector, the UX renders them through
+#              one formatter registry, and the persisted list is one
+#              queryable audit ledger. Legacy messages persisted with
+#              the v3 `stages` field are projected into `events`
+#              (kind="stage") at read time — no data migration. Only
+#              terminal (`done`) events are persisted.
 #
 #              v3: `StageRecord` + `MessagePublic.stages` persist the
 #              pipeline timeline (retrieve / generate / done phases
@@ -53,20 +66,58 @@ class ConversationPublic(BaseModel):
     message_count: int = 0
 
 
-class StageRecord(BaseModel):
-    """One pipeline phase persisted alongside an assistant message.
-    Mirrors the SSE `event: stage` payload emitted during the live
-    stream so the UX can re-render the same chip + timeline after a
-    page reload — without this, the timeline was transient (client-
-    only state) and disappeared on navigation. Only `done` events are
-    stored ; the `running` events are intermediate signals for the
-    live UI and have no `duration_ms`."""
+class InlineEvent(BaseModel):
+    """One inline-activity event — the unified record for every kind
+    of in-turn activity surfaced to the operator (pipeline stages,
+    chat-direct DocGen tool calls, and future kinds).
 
-    name: str
+    Single channel by design : the service emits all of them through
+    one collector, the SSE carries them on one `event: inline`
+    channel, the UX renders them through one formatter registry keyed
+    on `kind`, and the persisted list is one queryable audit ledger.
+    Adding a new kind = adding a formatter, no new field plumbing.
+
+    Only terminal (`done`) events are persisted — `running` events
+    are live-only progress signals (same policy the former
+    StageRecord applied to pipeline phases). `kind`-specific fields
+    are optional ; a formatter reads the subset relevant to its
+    kind."""
+
+    kind: str = Field(
+        description="Discriminator : 'stage' (pipeline phase), "
+        "'tool_call' (DocGen tool), extensible.",
+    )
+    label: str = Field(description="Human-readable one-line summary.")
     status: Literal["running", "done"] = "done"
-    label: str
-    duration_ms: int | None = None
-    stats: dict[str, Any] | None = None
+    name: str | None = Field(
+        default=None,
+        description="Machine id : stage name or tool name.",
+    )
+    ok: bool | None = Field(
+        default=None,
+        description="Outcome flag for tool_call events ; None for stages.",
+    )
+    round: int | None = Field(
+        default=None,
+        description="Tool-loop round index for tool_call events.",
+    )
+    duration_ms: int | None = Field(
+        default=None,
+        description="Elapsed time for stage events.",
+    )
+    stats: dict[str, Any] | None = Field(
+        default=None,
+        description="Free-form metrics for stage events.",
+    )
+    summary: str | None = Field(
+        default=None,
+        description="Result summary for tool_call events.",
+    )
+    path: str | None = Field(
+        default=None,
+        description="Affected document path for mutating DocGen tools "
+        "(create / update / delete_document) ; None otherwise.",
+    )
 
 
 class MessagePublic(BaseModel):
@@ -77,12 +128,14 @@ class MessagePublic(BaseModel):
     role: MessageRole
     content: str
     timestamp: datetime
-    stages: list[StageRecord] | None = Field(
+    events: list[InlineEvent] | None = Field(
         default=None,
-        description="Pipeline timeline captured during the SSE stream "
-        "(assistant messages only). None for user messages and for "
-        "legacy assistant messages persisted before this field was "
-        "introduced.",
+        description="Unified inline-activity ledger captured during "
+        "the SSE stream (assistant messages only) : pipeline stages, "
+        "DocGen tool calls, future kinds — one audit list. None for "
+        "user messages. Legacy messages persisted with the v3 "
+        "`stages` field are projected into this list (kind='stage') "
+        "at read time, so no data migration is required.",
     )
 
 

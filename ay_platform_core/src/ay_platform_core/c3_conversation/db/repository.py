@@ -1,6 +1,6 @@
 # =============================================================================
 # File: repository.py
-# Version: 3
+# Version: 4
 # Path: ay_platform_core/src/ay_platform_core/c3_conversation/db/repository.py
 # Description: ArangoDB repository for C3 — conversations and messages.
 #              All public methods are async (asyncio.to_thread wrapper over
@@ -8,11 +8,14 @@
 #              c3_messages.
 #              soft-delete: conversations get deleted=True, never physically
 #              removed. Messages are not deleted when a conversation is deleted.
-#              v3: append_message accepts an optional `stages` list (the
-#                  pipeline timeline captured during the SSE stream) and
-#                  persists it alongside the assistant message so the UX
-#                  can re-render the same chip + timeline after navigation
-#                  or reload.
+#              v4: append_message persists a single unified `events`
+#                  list (the inline-activity audit ledger : pipeline
+#                  stages + DocGen tool calls + future kinds) replacing
+#                  the v3 per-kind `stages` field. Legacy docs keep
+#                  their `stages` field ; the C3 service read path
+#                  projects them into `events` (no data migration).
+#              v3: append_message accepted an optional `stages` list
+#                  (superseded by v4's unified `events`).
 #              v2: _append_message_sync AQL rewritten — OLD is not bound in
 #                  WITH of `UPDATE @key`; use LET doc = DOCUMENT(...) to read
 #                  the current message_count before the UPDATE.
@@ -150,7 +153,7 @@ class ConversationRepository:
         conversation_id: UUID,
         role: str,
         content: str,
-        stages: list[dict[str, Any]] | None = None,
+        events: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         msg_id = uuid4()
         now = datetime.now(UTC).isoformat()
@@ -162,12 +165,14 @@ class ConversationRepository:
             "content": content,
             "timestamp": now,
         }
-        # Only persist `stages` when the caller supplied a non-empty
-        # list. Absent field == "no timeline available", which the UX
-        # interprets as "render the bubble without a pipeline chip"
-        # (same fallback as legacy messages from before this feature).
-        if stages:
-            doc["stages"] = stages
+        # Only persist `events` when the caller supplied a non-empty
+        # list. Absent field == no inline activity (user message /
+        # non-DocGen non-pipeline turn) ; the UX renders the bubble
+        # with no inline log. Legacy messages carry the pre-unification
+        # `stages` field instead — the read path projects those into
+        # `events` so no migration is needed.
+        if events:
+            doc["events"] = events
         self._db.collection(COLL_MESSAGES).insert(doc)
         # Increment message_count on the parent conversation. OLD is not bound
         # in the WITH clause of `UPDATE @key`; bind the current document via
@@ -189,10 +194,14 @@ class ConversationRepository:
         conversation_id: UUID,
         role: str,
         content: str,
-        stages: list[dict[str, Any]] | None = None,
+        events: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         return await asyncio.to_thread(
-            self._append_message_sync, conversation_id, role, content, stages,
+            self._append_message_sync,
+            conversation_id,
+            role,
+            content,
+            events,
         )
 
     def _list_messages_sync(self, conversation_id: UUID) -> list[dict[str, Any]]:
