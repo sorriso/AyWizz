@@ -72,6 +72,16 @@ class OrchestratorConfig(BaseSettings):
     # reserve the real dispatcher for infra-ready deployments).
     dispatcher_backend: str = Field(default="in-process")
 
+    # Active domain plug-in selection (R-200-061 v2 / P4.a). Per-
+    # deployment binding — one OrchestratorService instance hosts ONE
+    # domain plug-in. Per-run cross-domain dispatch deferred to v2
+    # (Q-200-012). Valid values : `code`, `documentation`.
+    domain: str = Field(
+        default="code",
+        validation_alias="C4_DOMAIN",
+        description="Production domain plug-in : `code` or `documentation`.",
+    )
+
     # ---- Gitea backend (R-200-146..147) ----------------------------------
     # C4 talks to the bundled Gitea instance with the root admin
     # credentials so it can push artifacts to ANY project's repo
@@ -95,3 +105,50 @@ class OrchestratorConfig(BaseSettings):
         validation_alias="GITEA_ROOT_PASSWORD",
         description="Root admin password for the bundled Gitea.",
     )
+
+    # ---- NATS event publisher (R-200-070 / R-200-071) ---------------------
+    # Empty string keeps the orchestrator on `NullPublisher` (events are
+    # captured in the trace ledger only) — backward-compatible with v1
+    # deployments that haven't deployed NATS yet. Non-empty enables the
+    # JetStream publisher ; failures during connect raise at startup so
+    # the lifespan surfaces the misconfig immediately.
+    nats_url: str = Field(
+        default="",
+        validation_alias="C4_NATS_URL",
+        description="NATS server URL(s) — comma-separated. Empty = "
+        "disable NATS publishing, fall back to NullPublisher.",
+    )
+    nats_connect_timeout_seconds: float = Field(
+        default=5.0,
+        ge=0.1,
+        validation_alias="C4_NATS_CONNECT_TIMEOUT_SECONDS",
+    )
+
+    # ---- K8s sub-agent dispatcher (R-200-030..033) -----------------------
+    # All `C4_K8S_*`. Consumed ONLY when `dispatcher_backend == "k8s"`.
+    # The `pod_view_*` settings describe how the POD sees MinIO / C8 —
+    # on Docker Desktop K8s the pod uses `host.docker.internal` to
+    # reach docker-compose services, in prod K8s it's the cluster
+    # Service DNS.
+    k8s_namespace: str = Field(default="c4-workers")
+    k8s_image: str = Field(default="ay-api:local")
+    k8s_image_pull_policy: str = Field(default="IfNotPresent")
+    k8s_service_account_name: str = Field(default="c4-sub-agent")
+    k8s_pod_view_minio_endpoint: str = Field(
+        default="host.docker.internal:9000",
+        description="MinIO endpoint as the sub-agent pod sees it.",
+    )
+    k8s_pod_view_c8_gateway_url: str = Field(
+        default="http://host.docker.internal:4000/v1",
+        description="C8 LLM gateway URL as the sub-agent pod sees it.",
+    )
+    k8s_pod_view_c8_default_model: str = Field(default="")
+    k8s_sub_agent_c8_bearer_token: str = Field(
+        default="",
+        description="Bearer token the sub-agent passes to C8 ; "
+        "scoped to this purpose so it can be rotated without touching "
+        "the orchestrator's own C3_C8_BEARER_TOKEN.",
+    )
+    # Path to kubeconfig. Empty = in-cluster config first, fall back
+    # to default kubeconfig discovery (~/.kube/config).
+    k8s_kubeconfig_path: str = Field(default="")

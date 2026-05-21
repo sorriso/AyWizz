@@ -29,6 +29,9 @@ from ay_platform_core.c4_orchestrator.documents_router import (
     router as c4_documents_router,
 )
 from ay_platform_core.c4_orchestrator.router import router as c4_router
+from ay_platform_core.c4_orchestrator.source_router import (
+    router as c4_source_router,
+)
 from ay_platform_core.c5_requirements.router import router as c5_router
 from ay_platform_core.c6_validation.router import router as c6_router
 from ay_platform_core.c7_memory.router import router as c7_router
@@ -51,6 +54,7 @@ _ROUTERS: list[tuple[str, object, str]] = [
     ("c4_orchestrator", c4_router, ""),
     ("c4_orchestrator", c4_artifacts_router, ""),
     ("c4_orchestrator", c4_documents_router, ""),
+    ("c4_orchestrator", c4_source_router, ""),
     ("c5_requirements", c5_router, ""),
     ("c6_validation", c6_router, ""),
     ("c7_memory", c7_router, ""),

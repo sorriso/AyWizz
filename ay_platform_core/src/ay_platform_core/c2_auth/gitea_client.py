@@ -1,6 +1,6 @@
 # =============================================================================
 # File: gitea_client.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/src/ay_platform_core/c2_auth/gitea_client.py
 # Description: Async httpx client for the bundled Gitea backend
 #              (R-200-140..145). Surface kept minimal — exactly what
@@ -16,8 +16,15 @@
 #              overlays SHALL switch to per-deployment tokens stored
 #              in a vault (Q-100-020).
 #
+#              v2 (2026-05-21): `get_file_at_ref` — fetch a file's raw
+#              bytes at a specific commit SHA/branch (R-200-147 version
+#              history). Backs the "view a previous revision" UX : the
+#              file tree lists a doc's commit history and loads its
+#              content at the chosen ref.
+#
 # @relation implements:R-200-140
 # @relation implements:R-200-141
+# @relation implements:R-200-147
 # =============================================================================
 
 from __future__ import annotations
@@ -330,15 +337,25 @@ class GiteaClient:
         repo: str,
         page: int = 1,
         limit: int = 50,
+        path: str | None = None,
     ) -> list[GiteaCommit]:
         """Return up to `limit` commits, most recent first. Gitea's
         API uses 1-based pagination ; we mirror that to keep the
         proxy a thin layer. An empty repo returns `[]` ; the caller
-        SHALL handle the empty state in the UX."""
+        SHALL handle the empty state in the UX.
+
+        `path` (optional) restricts results to commits touching that
+        file path, used by the source-file metadata endpoint (R-200-173)
+        to recover the last commit on a given file."""
+        params: dict[str, str | int] = {
+            "page": page, "limit": limit, "stat": "false", "files": "false",
+        }
+        if path is not None:
+            params["path"] = path
         r = await self._client.get(
             f"{self._base_url}/api/v1/repos/{owner}/{repo}/commits",
             auth=self._auth,
-            params={"page": page, "limit": limit, "stat": "false", "files": "false"},
+            params=params,
         )
         if r.status_code == 404:
             # Empty repo or wrong owner/name : surface empty list
@@ -376,3 +393,31 @@ class GiteaClient:
                 )
             )
         return out
+
+    async def get_file_at_ref(
+        self, *, owner: str, repo: str, path: str, ref: str,
+    ) -> bytes | None:
+        """Return the raw bytes of `path` as it existed at commit `ref`
+        (a SHA or branch name), or None if the file did not exist at
+        that ref. Backs the version-history viewer (R-200-147).
+
+        Gitea's Contents API returns `{content: <base64>, encoding:
+        "base64", ...}` for a file. A directory path returns a JSON
+        list (no `content`) — treated as "not a file" → None."""
+        r = await self._client.get(
+            f"{self._base_url}/api/v1/repos/{owner}/{repo}/contents/{path}",
+            auth=self._auth,
+            params={"ref": ref},
+        )
+        if r.status_code == 404:
+            return None
+        if r.status_code != 200:
+            raise GiteaError(
+                f"get_file_at_ref({owner}/{repo}, {path!r}@{ref}) failed: "
+                f"{r.status_code} {r.text[:200]}",
+            )
+        payload = r.json()
+        if not isinstance(payload, dict) or payload.get("encoding") != "base64":
+            # Directory listing or an unexpected shape — not a file.
+            return None
+        return base64.b64decode(payload.get("content", ""))

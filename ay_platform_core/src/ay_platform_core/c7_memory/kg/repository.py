@@ -1,6 +1,6 @@
 # =============================================================================
 # File: repository.py
-# Version: 2
+# Version: 3
 # Path: ay_platform_core/src/ay_platform_core/c7_memory/kg/repository.py
 # Description: ArangoDB persistence for the knowledge graph extracted by
 #              `extractor.py` (Phase F.1 of v1 plan). Two collections:
@@ -121,6 +121,10 @@ class KGRepository:
                 "source_ids": [source_id],
                 "first_seen_at": now,
                 "last_seen_at": now,
+                # Provenance + confidence (R-400-201) so the graph is honest
+                # about extracted-vs-inferred and queryable by the lint pass.
+                "provenance": entity.provenance.value,
+                "confidence": entity.confidence,
             }
             existing = cast("dict[str, Any] | None", ent_coll.get(key))
             if existing is None:
@@ -162,6 +166,9 @@ class KGRepository:
                 "relation": rel.relation,
                 "source_id": source_id,
                 "created_at": now,
+                # Provenance + confidence (R-400-201) on the edge.
+                "provenance": rel.provenance.value,
+                "confidence": rel.confidence,
             }
             if not rel_coll.has(edge_key):
                 rel_coll.insert(edge_doc)
@@ -226,6 +233,49 @@ class KGRepository:
     ) -> list[dict[str, Any]]:
         return await asyncio.to_thread(
             self._list_relations_for_source_sync, tenant_id, project_id, source_id,
+        )
+
+    # ------------------------------------------------------------------
+    # Project-level summary — a simple graph "bootstrap" inspection view.
+    # ------------------------------------------------------------------
+
+    def _summary_sync(
+        self, tenant_id: str, project_id: str, *, sample_limit: int
+    ) -> dict[str, Any]:
+        bind: dict[str, Any] = {"t": tenant_id, "p": project_id}
+        ent_count = next(iter(cast("Cursor", self._db.aql.execute(
+            "RETURN LENGTH(FOR e IN memory_kg_entities "
+            "FILTER e.tenant_id == @t AND e.project_id == @p RETURN 1)",
+            bind_vars=bind,
+        ))))
+        rel_count = next(iter(cast("Cursor", self._db.aql.execute(
+            "RETURN LENGTH(FOR r IN memory_kg_relations "
+            "FILTER r.tenant_id == @t AND r.project_id == @p RETURN 1)",
+            bind_vars=bind,
+        ))))
+        sample_bind: dict[str, Any] = {**bind, "n": sample_limit}
+        sample = list(cast("Cursor", self._db.aql.execute(
+            "FOR r IN memory_kg_relations "
+            "FILTER r.tenant_id == @t AND r.project_id == @p "
+            "LIMIT @n "
+            "LET s = DOCUMENT(r._from) LET o = DOCUMENT(r._to) "
+            "RETURN {subject: s.name, relation: r.relation, object: o.name, "
+            "provenance: r.provenance, confidence: r.confidence}",
+            bind_vars=sample_bind,
+        )))
+        return {
+            "entity_count": int(ent_count),
+            "relation_count": int(rel_count),
+            "sample": sample,
+        }
+
+    async def summary(
+        self, tenant_id: str, project_id: str, *, sample_limit: int = 10
+    ) -> dict[str, Any]:
+        """Counts + a small sample of relation triples (with provenance) for
+        a project's knowledge graph — a lightweight inspection view."""
+        return await asyncio.to_thread(
+            self._summary_sync, tenant_id, project_id, sample_limit=sample_limit,
         )
 
     # ------------------------------------------------------------------

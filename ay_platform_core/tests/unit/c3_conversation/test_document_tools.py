@@ -1,6 +1,6 @@
 # =============================================================================
 # File: test_document_tools.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/tests/unit/c3_conversation/test_document_tools.py
 # Description: Unit tests for the chat-direct DocGen tool layer
 #              (D-015 / Phase 2.C.2) :
@@ -11,6 +11,12 @@
 #                  with a fake LLM + fake DocumentToolClient : a
 #                  tool-call round is executed, results fed back, and
 #                  the final plain-text answer emitted over SSE.
+#
+#              v2 (2026-05-21): `DocumentToolClient` forwards the
+#              optional `turn_id` as the `X-Turn-Id` header on every
+#              mutation call (live-docs per-response version batching,
+#              R-200-147). Verified end-to-end through an httpx
+#              MockTransport that captures the outbound request.
 # =============================================================================
 
 from __future__ import annotations
@@ -19,9 +25,13 @@ import json
 from typing import Any
 from uuid import uuid4
 
+import httpx
 import pytest
 
-from ay_platform_core.c3_conversation.document_tools import parse_tool_calls
+from ay_platform_core.c3_conversation.document_tools import (
+    DocumentToolClient,
+    parse_tool_calls,
+)
 from ay_platform_core.c3_conversation.service import ConversationService
 from ay_platform_core.c8_llm.models import (
     ChatCompletionResponse,
@@ -425,3 +435,75 @@ async def test_tool_loop_round_budget_exhausted() -> None:
     # list_documents ran each round → 3 terminal tool events recorded
     # in the unified audit ledger.
     assert [e["kind"] for e in events] == ["tool_call", "tool_call", "tool_call"]
+
+
+# ---------------------------------------------------------------------------
+# X-Turn-Id forwarding (live-docs per-response version batching)
+# ---------------------------------------------------------------------------
+
+
+def _client_with_capture(
+    captured: list[httpx.Request],
+) -> DocumentToolClient:
+    """A DocumentToolClient whose transport records every outbound
+    request and replies with a minimal success body, so a unit test can
+    assert on the headers C3 sends to C4 without a live C4."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        if request.method == "POST":
+            return httpx.Response(201, json={"path": "a.md", "size_bytes": 1})
+        if request.method == "PUT":
+            return httpx.Response(200, json={"path": "a.md", "size_bytes": 2})
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        return httpx.Response(200, json={"documents": []})
+
+    client = DocumentToolClient("http://c4")
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+    return client
+
+
+@pytest.mark.asyncio
+async def test_execute_forwards_turn_id_header_on_create() -> None:
+    """A create_document call carrying a turn id MUST send it as the
+    `X-Turn-Id` header so C4 can tag the commit and batch the version."""
+    captured: list[httpx.Request] = []
+    client = _client_with_capture(captured)
+    try:
+        await client.execute(
+            name="create_document",
+            arguments={"path": "a.md", "content": "x"},
+            project_id="p",
+            user_id="alice",
+            tenant_id="t",
+            user_roles="project_editor",
+            turn_id="turn-xyz",
+        )
+    finally:
+        await client.aclose()
+    assert len(captured) == 1
+    assert captured[0].headers.get("X-Turn-Id") == "turn-xyz"
+    # The identity headers travel alongside, unchanged.
+    assert captured[0].headers.get("X-User-Id") == "alice"
+
+
+@pytest.mark.asyncio
+async def test_execute_omits_turn_id_header_when_absent() -> None:
+    """No turn id (operator-driven path / not in a chat loop) → the
+    header is simply not sent, so C4 records an untagged commit."""
+    captured: list[httpx.Request] = []
+    client = _client_with_capture(captured)
+    try:
+        await client.execute(
+            name="update_document",
+            arguments={"path": "a.md", "content": "y"},
+            project_id="p",
+            user_id="alice",
+            tenant_id="t",
+            user_roles="project_editor",
+        )
+    finally:
+        await client.aclose()
+    assert len(captured) == 1
+    assert "X-Turn-Id" not in captured[0].headers

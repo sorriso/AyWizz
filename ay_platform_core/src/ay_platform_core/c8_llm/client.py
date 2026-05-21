@@ -1,12 +1,19 @@
 # =============================================================================
 # File: client.py
-# Version: 2
+# Version: 3
 # Path: ay_platform_core/src/ay_platform_core/c8_llm/client.py
 # Description: Python client for the C8 LLM gateway. All internal components
 #              (C3, C4, C6, C7, …) use this class rather than importing
 #              LiteLLM directly (R-800-011 policy). Enforces the mandatory
 #              agent/session headers (R-800-013) at the call site so no
 #              component can accidentally bypass cost attribution.
+#
+#              v3 (2026-05-20) : per-agent route resolver client-side
+#              (R-800-030 v1 note). Loaded from `agent_routes:` in the
+#              litellm YAML OR an inline JSON env override ; resolves
+#              `agent_name → model_name` before every request when the
+#              caller leaves `model` unset. Proxy is off-the-shelf
+#              LiteLLM ; Q-800-011 tracks proxy-side admission for v2.
 #
 #              v2 (2026-05-19): `chat_completion` now retries HTTP 429
 #              (provider rate-limit) up to 3 attempts, honouring the
@@ -20,6 +27,7 @@
 # @relation implements:R-800-011
 # @relation implements:R-800-013
 # @relation implements:R-800-014
+# @relation implements:R-800-030
 # @relation implements:R-800-073
 # =============================================================================
 
@@ -60,6 +68,76 @@ class LLMGatewayError(RuntimeError):
 _RETRY_429_MAX_ATTEMPTS = 3
 _RETRY_429_CAP_SECONDS = 20.0
 _RETRY_429_DEFAULT_SECONDS = 5.0
+
+
+def _routes_from_inline(raw: str) -> dict[str, str] | None:
+    """Parse `C8_AGENT_ROUTES_INLINE` JSON. None when malformed/empty."""
+    import logging  # noqa: PLC0415 — cold path
+
+    log = logging.getLogger("c8_llm.client")
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        log.warning("C8_AGENT_ROUTES_INLINE not valid JSON, ignoring: %s", exc)
+        return {}
+    if not isinstance(parsed, dict):
+        log.warning(
+            "C8_AGENT_ROUTES_INLINE must be a JSON object, got %s",
+            type(parsed).__name__,
+        )
+        return {}
+    return {str(k): str(v) for k, v in parsed.items() if isinstance(v, str)}
+
+
+def _routes_from_yaml(path: str) -> dict[str, str]:
+    """Parse `agent_routes:` from the LiteLLM YAML. Always returns a
+    dict (empty on any failure ; a WARNING is logged)."""
+    import logging  # noqa: PLC0415 — cold path
+
+    log = logging.getLogger("c8_llm.client")
+    try:
+        import yaml  # noqa: PLC0415 — PyYAML is an optional dependency
+    except ImportError:
+        log.warning("PyYAML not installed ; C8_AGENT_ROUTES_YAML_PATH ignored")
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except OSError as exc:
+        log.warning("agent_routes YAML %s unreadable: %s", path, exc)
+        return {}
+    except yaml.YAMLError as exc:
+        log.warning("agent_routes YAML %s malformed: %s", path, exc)
+        return {}
+    routes = data.get("agent_routes") if isinstance(data, dict) else None
+    if not isinstance(routes, dict):
+        return {}
+    return {str(k): str(v) for k, v in routes.items() if isinstance(v, str)}
+
+
+def _load_agent_routes(settings: ClientSettings) -> dict[str, str]:
+    """Build the in-memory `agent_name → model_name` table from the
+    ClientSettings, evaluating the two sources in priority order :
+
+    1. `C8_AGENT_ROUTES_INLINE` (JSON object) — useful for tests and
+       dev overrides without a YAML on disk.
+    2. `C8_AGENT_ROUTES_YAML_PATH` — the `agent_routes:` section of
+       the same `litellm-config.yaml` LiteLLM consumes (single
+       source-of-truth shape per R-800-024).
+
+    Failure modes (missing file, malformed JSON, malformed YAML) log
+    a WARNING and yield an empty dict — the client then falls back to
+    `default_model` for every agent, which is the safe behaviour.
+    """
+    inline = _routes_from_inline((settings.agent_routes_inline or "").strip())
+    if inline is not None:
+        return inline
+    yaml_path = (settings.agent_routes_yaml_path or "").strip()
+    if not yaml_path:
+        return {}
+    return _routes_from_yaml(yaml_path)
 
 
 def _retry_after_seconds(resp: httpx.Response) -> float:
@@ -107,9 +185,19 @@ class LLMGatewayClient:
         *,
         bearer_token: str | None = None,
         http_client: httpx.AsyncClient | None = None,
+        agent_routes: dict[str, str] | None = None,
     ) -> None:
         self._settings = settings
         self._default_bearer = bearer_token
+        # Client-side per-agent route map (R-800-030 v1 note). Three
+        # sources, evaluated in priority order : constructor arg
+        # `agent_routes` ; inline JSON from `C8_AGENT_ROUTES_INLINE` ;
+        # `agent_routes:` block of the YAML at `C8_AGENT_ROUTES_YAML_PATH`.
+        # First non-empty wins ; absence is fine (the client then falls
+        # back to `default_model` for every agent).
+        self._agent_routes: dict[str, str] = (
+            agent_routes if agent_routes is not None else _load_agent_routes(settings)
+        )
         # Reuse caller-provided client (e.g. from FastAPI app state) so that
         # connection pooling is shared. Otherwise spawn a dedicated client
         # and close it via `aclose()`.
@@ -125,6 +213,28 @@ class LLMGatewayClient:
     async def aclose(self) -> None:
         if self._owned_client:
             await self._client.aclose()
+
+    # ------------------------------------------------------------------
+    # Per-agent route resolution (R-800-030)
+    # ------------------------------------------------------------------
+
+    def _resolve_model(
+        self, payload: ChatCompletionRequest, agent_name: str,
+    ) -> ChatCompletionRequest:
+        """Apply the v1 client-side resolver per R-800-030 :
+          1. explicit `payload.model` wins ;
+          2. `agent_routes[agent_name]` ;
+          3. fallback to `settings.default_model`.
+
+        Returns the (possibly model-substituted) payload. No mutation of
+        the input — Pydantic's `model_copy` keeps the original safe.
+        """
+        if payload.model:
+            return payload
+        target = self._agent_routes.get(agent_name) or self._settings.default_model
+        if not target:
+            return payload  # let the proxy emit a 400 per R-800-030
+        return payload.model_copy(update={"model": target})
 
     # ------------------------------------------------------------------
     # Chat completions
@@ -153,10 +263,7 @@ class LLMGatewayClient:
                 "chat_completion() does not support streaming payloads; "
                 "call chat_completion_stream() instead"
             )
-        if payload.model is None and self._settings.default_model:
-            payload = payload.model_copy(
-                update={"model": self._settings.default_model}
-            )
+        payload = self._resolve_model(payload, agent_name)
         headers = self._headers(
             agent_name=agent_name,
             session_id=session_id,
@@ -204,13 +311,12 @@ class LLMGatewayClient:
         connection is released even when the caller cancels early.
         """
         stream_payload = payload.model_copy(update={"stream": True})
-        # Inject the configured default model when the caller didn't
-        # specify one — Ollama / strict OpenAI gateways require it
-        # (mock_llm ignores `model` either way).
-        if stream_payload.model is None and self._settings.default_model:
-            stream_payload = stream_payload.model_copy(
-                update={"model": self._settings.default_model}
-            )
+        # Resolve the model via the v1 client-side per-agent route
+        # resolver (R-800-030). Falls back to settings.default_model
+        # when no agent route matches ; leaves `model` unset when both
+        # are absent (the proxy then surfaces a 400, the prod-correct
+        # behaviour ; mock_llm ignores `model` so tests stay green).
+        stream_payload = self._resolve_model(stream_payload, agent_name)
         headers = self._headers(
             agent_name=agent_name,
             session_id=session_id,

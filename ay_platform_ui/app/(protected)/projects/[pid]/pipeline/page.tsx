@@ -1,6 +1,6 @@
 // =============================================================================
 // File: page.tsx
-// Version: 2
+// Version: 3
 // Path: ay_platform_ui/app/(protected)/projects/[pid]/pipeline/page.tsx
 // Description: Pipeline trigger page for the `code` profile. Lets the
 //              operator state a goal, fires a C4 orchestrator run,
@@ -19,6 +19,19 @@
 //              Requirements / Code source and back keeps the run
 //              visible. F5 also restores. Clearing the goal textarea
 //              + starting a fresh run pushes a new URL.
+//
+//              v3 (2026-05-20) : BLOCKED runs surface two operator
+//              controls — Retry (re-attempt the failing phase per
+//              R-200-021) and Abort (terminate the run). Both call
+//              `POST /api/v1/orchestrator/runs/{id}/resume`. `admin`
+//              role is enforced server-side ; non-admins see a 403
+//              from the request. `skip-phase` deferred (Q-200-009).
+//
+//              v4 (2026-05-20) : Tranche B — live <RunTrace> timeline
+//              renders the run's TraceEvent ledger (R-500-009) ; older
+//              events are loaded lazily via the paginated /trace
+//              endpoint. A <SteerComposer> is visible while the run is
+//              RUNNING and POSTs operator hints to /steer (R-200-202).
 // =============================================================================
 
 "use client";
@@ -27,8 +40,15 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useReadyConfig } from "@/app/providers";
+import { RunTrace, SteerComposer } from "@/components/run-trace";
 import { ApiClient, ApiError } from "@/lib/apiClient";
-import type { OrchestratorPhase, OrchestratorRun, OrchestratorRunStatus } from "@/lib/types";
+import type {
+  OrchestratorPhase,
+  OrchestratorRun,
+  OrchestratorRunResumeStrategy,
+  OrchestratorRunStatus,
+  TraceEvent,
+} from "@/lib/types";
 
 const _PHASE_ORDER: OrchestratorPhase[] = ["brainstorm", "spec", "plan", "generate", "review"];
 
@@ -71,7 +91,14 @@ export default function PipelinePage() {
   const [goal, setGoal] = useState("");
   const [runLoad, setRunLoad] = useState<RunLoad>({ status: "idle" });
   const [approving, setApproving] = useState(false);
+  const [resuming, setResuming] = useState<OrchestratorRunResumeStrategy | null>(null);
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Older trace events fetched on demand via the paginated /trace
+  // endpoint. They sit BENEATH the sliding-window `run.trace` block
+  // in display order (newest-first stays unchanged on top).
+  const [olderTrace, setOlderTrace] = useState<TraceEvent[]>([]);
+  const [loadingMoreTrace, setLoadingMoreTrace] = useState(false);
+  const [steerError, setSteerError] = useState<string | null>(null);
 
   const stopPolling = useCallback(() => {
     if (pollTimer.current !== null) {
@@ -187,6 +214,79 @@ export default function PipelinePage() {
       });
     }
   }, [apiClient, goal, projectId, sessionId, startPolling, router]);
+
+  const loadMoreTrace = useCallback(
+    async (beforeIso: string) => {
+      if (!runLoad.run || loadingMoreTrace) return;
+      setLoadingMoreTrace(true);
+      try {
+        const slice = await apiClient.readOrchestratorTrace(runLoad.run.run_id, {
+          before: beforeIso,
+          limit: 200,
+        });
+        setOlderTrace((prev) => [...prev, ...slice]);
+      } catch (err) {
+        // Non-fatal — keep the existing slice visible.
+        if (err instanceof ApiError) {
+          setSteerError(`Trace pagination failed (${err.status})`);
+        }
+      } finally {
+        setLoadingMoreTrace(false);
+      }
+    },
+    [apiClient, runLoad.run, loadingMoreTrace],
+  );
+
+  const submitSteer = useCallback(
+    async (message: string) => {
+      if (!runLoad.run) return;
+      setSteerError(null);
+      try {
+        const next = await apiClient.steerOrchestratorRun(runLoad.run.run_id, {
+          message,
+        });
+        setRunLoad({ status: "ready", run: next });
+        if (next.status === "running") {
+          startPolling(next.run_id);
+        }
+      } catch (err) {
+        const msg = err instanceof ApiError ? `Steer rejected (${err.status})` : String(err);
+        setSteerError(msg);
+        throw err instanceof Error ? err : new Error(msg);
+      }
+    },
+    [apiClient, runLoad.run, startPolling],
+  );
+
+  // Reset paginated history when the displayed run changes (new run or
+  // deep-link to a different one). Avoids leaking events across runs.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional reset on run_id change only.
+  useEffect(() => {
+    setOlderTrace([]);
+    setSteerError(null);
+  }, [runLoad.run?.run_id]);
+
+  const resumeRun = useCallback(
+    async (strategy: OrchestratorRunResumeStrategy) => {
+      if (!runLoad.run) return;
+      setResuming(strategy);
+      try {
+        const next = await apiClient.resumeOrchestratorRun(runLoad.run.run_id, strategy);
+        setRunLoad({ status: "ready", run: next });
+        if (next.status === "running") {
+          startPolling(next.run_id);
+        }
+      } catch (err) {
+        setRunLoad({
+          status: "error",
+          error: err instanceof ApiError ? `Resume failed (${err.status})` : String(err),
+        });
+      } finally {
+        setResuming(null);
+      }
+    },
+    [apiClient, runLoad.run, startPolling],
+  );
 
   const approvePlan = useCallback(async () => {
     if (!runLoad.run) return;
@@ -378,6 +478,25 @@ export default function PipelinePage() {
                   full envelope.
                 </div>
               )}
+              <div className="mt-3 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => resumeRun("retry")}
+                  disabled={resuming !== null}
+                  className="rounded-md bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-700 disabled:bg-zinc-400"
+                >
+                  {resuming === "retry" ? "Retrying…" : "Retry phase"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => resumeRun("abort")}
+                  disabled={resuming !== null}
+                  className="rounded-md border border-red-400 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100 disabled:bg-zinc-100 disabled:text-zinc-400 dark:border-red-700 dark:bg-zinc-900 dark:text-red-300 dark:hover:bg-red-950"
+                >
+                  {resuming === "abort" ? "Aborting…" : "Abort run"}
+                </button>
+                <span className="ml-2 text-[11px] text-red-600 dark:text-red-400">Admin only.</span>
+              </div>
             </div>
           )}
 
@@ -395,6 +514,32 @@ export default function PipelinePage() {
               ))}
             </ul>
           )}
+
+          {/* Tranche B — live trace timeline + steer composer (R-500-009) */}
+          <div className="mt-6 space-y-3">
+            <div className="flex items-baseline justify-between">
+              <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-200">Run trace</h2>
+              <span className="text-[10px] text-zinc-400">
+                {runLoad.run.trace.length + olderTrace.length} event
+                {runLoad.run.trace.length + olderTrace.length === 1 ? "" : "s"} loaded
+              </span>
+            </div>
+            {runLoad.run.status === "running" && <SteerComposer onSubmit={submitSteer} />}
+            {steerError && (
+              <div className="rounded-md border border-red-300 bg-red-50 px-3 py-1 text-xs text-red-700 dark:border-red-700 dark:bg-red-950 dark:text-red-300">
+                {steerError}
+              </div>
+            )}
+            <RunTrace
+              events={[...runLoad.run.trace, ...olderTrace]}
+              canLoadMore={
+                runLoad.run.trace.length >= 200 ||
+                (runLoad.run.trace.length > 0 && olderTrace.length > 0)
+              }
+              loadingMore={loadingMoreTrace}
+              onLoadMore={(beforeIso) => void loadMoreTrace(beforeIso)}
+            />
+          </div>
         </section>
       )}
     </div>

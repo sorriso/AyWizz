@@ -139,6 +139,7 @@ register_contract(
 from ay_platform_core.c3_conversation.models import (  # noqa: E402
     ConversationPublic,
     MessagePublic,
+    PromptReference,
 )
 
 register_contract(
@@ -159,6 +160,20 @@ register_contract(
         consumers=("C1_gateway", "C4_orchestrator"),
         transport="rest",
         description="Public view of a conversation message.",
+    )
+)
+register_contract(
+    ExposedContract(
+        producer="C3_conversation",
+        name="PromptReference",
+        schema=PromptReference,
+        consumers=("C1_gateway", "ay_platform_ui"),
+        transport="rest",
+        description=(
+            "Operator-attached prompt reference (E-200-008, R-200-180..184). "
+            "File or excerpt pinned to a chat turn ; resolved server-side "
+            "and inlined as a separate system block before the user message."
+        ),
     )
 )
 
@@ -302,6 +317,8 @@ from ay_platform_core.c4_orchestrator.models import (  # noqa: E402
     AgentCompletion,
     DomainDescriptor,
     RunPublic,
+    RunSteer,
+    TraceEvent,
 )
 
 register_contract(
@@ -309,9 +326,40 @@ register_contract(
         producer="C4_orchestrator",
         name="RunPublic",
         schema=RunPublic,
-        consumers=("C1_gateway", "C3_conversation"),
+        consumers=("C1_gateway", "C3_conversation", "ay_platform_ui"),
         transport="rest",
-        description="Run state exposed through the REST API (E-200-001 projection).",
+        description=(
+            "Run state exposed through the REST API (E-200-001 projection). "
+            "v2 (Tranche B) includes a 200-event sliding window of TraceEvents."
+        ),
+    )
+)
+register_contract(
+    ExposedContract(
+        producer="C4_orchestrator",
+        name="TraceEvent",
+        schema=TraceEvent,
+        consumers=("C1_gateway", "ay_platform_ui"),
+        transport="rest",
+        description=(
+            "One entry of a run's append-only trace ledger (E-200-006). "
+            "Surfaced via `RunPublic.trace` (sliding window) and the "
+            "paginated `GET /runs/{id}/trace?before=<ts>` endpoint."
+        ),
+    )
+)
+register_contract(
+    ExposedContract(
+        producer="C4_orchestrator",
+        name="RunSteer",
+        schema=RunSteer,
+        consumers=("C1_gateway", "ay_platform_ui"),
+        transport="rest",
+        description=(
+            "POST /runs/{id}/steer body (E-200-007). A single operator "
+            "hint queued FIFO, consumed at the next phase / sub-agent "
+            "boundary per R-200-203."
+        ),
     )
 )
 register_contract(
@@ -367,6 +415,42 @@ register_contract(
         ),
     )
 )
+
+# C4 — Source-files surface (§5.18 Tranche B). Recursive tree + metadata
+# contracts surfaced by the new source_router endpoints (R-200-170..174).
+from ay_platform_core.c4_orchestrator.source_router import (  # noqa: E402
+    SourceFileMeta,
+    SourceTreeNode,
+)
+
+register_contract(
+    ExposedContract(
+        producer="C4_orchestrator",
+        name="SourceTreeNode",
+        schema=SourceTreeNode,
+        consumers=("C1_gateway", "ay_platform_ui"),
+        transport="rest",
+        description=(
+            "Recursive source-files tree node (R-200-170). Distinct "
+            "from ArtifactNode (flat per-run shape) — this contract "
+            "carries `children?` for the hierarchical projection."
+        ),
+    )
+)
+register_contract(
+    ExposedContract(
+        producer="C4_orchestrator",
+        name="SourceFileMeta",
+        schema=SourceFileMeta,
+        consumers=("C1_gateway", "ay_platform_ui"),
+        transport="rest",
+        description=(
+            "Per-file metadata response for `GET /source/file/{path}/meta` "
+            "(R-200-173). Best-effort Gitea commit fields + MinIO size + "
+            "mime type."
+        ),
+    )
+)
 register_contract(
     ExposedContract(
         producer="C4_orchestrator",
@@ -375,6 +459,46 @@ register_contract(
         consumers=("C1_gateway", "ay_platform_ui"),
         transport="rest",
         description="Wrapper for the artifact-runs listing response.",
+    )
+)
+
+# C4 — Sub-agent context bundle contracts (P2.1.a, R-200-033). The
+# orchestrator builds these envelopes ; the sub-agent runtime
+# (`ay_platform_core._sub_agent`) consumes them inside ephemeral K8s
+# pods. Registered so the parallel-definitions coherence check
+# recognises the legitimate id-field overlap with RunPublic /
+# AgentCompletion (same domain, different concern).
+from ay_platform_core._sub_agent.models import (  # noqa: E402
+    SubAgentRunReport,
+    TaskEnvelope,
+)
+
+register_contract(
+    ExposedContract(
+        producer="C4_orchestrator",
+        name="TaskEnvelope",
+        schema=TaskEnvelope,
+        consumers=("C4_orchestrator",),  # sub-agent runtime is part of C4
+        transport="python-import",
+        description=(
+            "Sub-agent context bundle manifest (R-200-033). Written to "
+            "MinIO at `c4-dispatch/<run_id>/<sub_agent_id>/manifest.json` "
+            "by the K8sDispatcher ; read by the in-pod runtime."
+        ),
+    )
+)
+register_contract(
+    ExposedContract(
+        producer="C4_orchestrator",
+        name="SubAgentRunReport",
+        schema=SubAgentRunReport,
+        consumers=("C4_orchestrator",),
+        transport="python-import",
+        description=(
+            "Completion report written by the sub-agent runtime to "
+            "`<bundle_prefix>output/completion.json`. The orchestrator "
+            "reads it back after the pod terminates."
+        ),
     )
 )
 register_contract(

@@ -1,6 +1,6 @@
 ---
 document: 800-SPEC-LLM-ABSTRACTION
-version: 1
+version: 2
 path: requirements/800-SPEC-LLM-ABSTRACTION.md
 language: en
 status: draft
@@ -312,6 +312,8 @@ C8 SHALL implement a **route resolver** that maps each incoming request to a con
 If none of these resolves to a configured model, C8 SHALL return HTTP 400 with an explanatory error.
 
 **Rationale.** Three-level resolution accommodates explicit control (test harnesses, admin tools), agent-centric mapping (normal operation), and sane default behaviour.
+
+**v1 implementation note (2026-05-20).** "C8" denotes the LLM-abstraction system as a whole — proxy + SDK client. The resolver step MAY live in the **client SDK** (`LLMGatewayClient`) in v1 : the client resolves `agent_name → model_name` from a locally-loaded copy of the `agent_routes:` table and forwards the resolved name to the LiteLLM proxy as the OpenAI `model:` field. This sidesteps the absence of native `X-Agent-Name`-aware routing in upstream LiteLLM, keeps the proxy off-the-shelf, and preserves the spec's three-level priority. The proxy still receives + logs the `X-Agent-Name` header for audit, cost attribution, and budget enforcement (R-800-013 / R-800-070). v2 moves the resolver into a proxy-side admission hook (Q-800-011).
 
 #### R-800-031
 
@@ -922,6 +924,7 @@ A sample projection appears in Appendix 8.1.
 | Q-800-008 | Quota reset on tenant upgrade (paid tier): immediate reset or period-end transition? | — | v2 (billing concern) |
 | Q-800-009 | Local Ollama integration: does C8 need special handling for local models (no cost tracking, no rate limit)? | — | v1 (baseline: Ollama treated as a provider with `cost_per_million_*` = 0 and no upstream rate limits) |
 | Q-800-010 | v2 ensemble mode: voting algorithm (majority, weighted, structured-output cross-check)? | D-011 | v3 |
+| Q-800-011 | Proxy-side admission middleware for `X-Agent-Name`-based resolution — LiteLLM pre-request hook vs thin FastAPI shim in front of the proxy. v1 sidesteps this by doing the resolution in the client SDK (see R-800-030 v1 note). | D-011 | v2 |
 
 ---
 

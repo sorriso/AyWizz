@@ -1,6 +1,6 @@
 # =============================================================================
 # File: conftest.py
-# Version: 2
+# Version: 3
 # Path: ay_platform_core/tests/integration/c4_orchestrator/conftest.py
 # Description: Fixtures for C4 integration tests. Uses REAL ArangoDB and
 #              REAL C8 client, but the LiteLLM proxy is impersonated by a
@@ -38,6 +38,9 @@ from ay_platform_core.c4_orchestrator.artifacts_storage import ArtifactStorage
 from ay_platform_core.c4_orchestrator.config import OrchestratorConfig
 from ay_platform_core.c4_orchestrator.db.repository import OrchestratorRepository
 from ay_platform_core.c4_orchestrator.dispatcher.in_process import InProcessDispatcher
+from ay_platform_core.c4_orchestrator.documents_router import (
+    router as documents_router,
+)
 from ay_platform_core.c4_orchestrator.domains.code.plugin import CodeDomainPlugin
 from ay_platform_core.c4_orchestrator.events.null_publisher import NullPublisher
 from ay_platform_core.c4_orchestrator.router import router
@@ -257,3 +260,54 @@ async def c4_app_with_artifacts(
     app.state.orchestrator_service = service
     app.state.artifacts_service = artifacts_service
     yield app, artifacts_service, fake_gitea
+
+
+# ---------------------------------------------------------------------------
+# Chat-direct DocGen documents app (D-015) — shared across the documents
+# test modules. A fixture MUST live in conftest to be visible across test
+# modules; test_documents_structural_ops.py reuses this one.
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture(scope="function")
+async def documents_app(
+    arango_container: ArangoEndpoint,
+    minio_container: MinioEndpoint,
+) -> AsyncIterator[tuple[FastAPI, _FakeGiteaClient]]:
+    """Documents router wired with real Arango + real MinIO + stubbed
+    Gitea. Used by test_documents_api.py and
+    test_documents_structural_ops.py."""
+    from minio import Minio  # noqa: PLC0415 — heavy import scoped to fixture
+
+    db_name = f"c4_doc_{uuid.uuid4().hex[:8]}"
+    bucket = f"docbucket-{uuid.uuid4().hex[:8]}"
+    sys_db = ArangoClient(hosts=arango_container.url).db(
+        "_system", username="root", password=arango_container.password,
+    )
+    sys_db.create_database(db_name)
+    db = ArangoClient(hosts=arango_container.url).db(
+        db_name, username="root", password=arango_container.password,
+    )
+    repo = OrchestratorRepository(db)
+    repo._ensure_collections_sync()
+
+    minio_client = Minio(
+        minio_container.endpoint,
+        access_key=minio_container.access_key,
+        secret_key=minio_container.secret_key,
+        secure=False,
+    )
+    storage = ArtifactStorage(minio_client, bucket)
+    await storage.ensure_bucket()
+    fake_gitea = _FakeGiteaClient()
+    service = ArtifactsService(
+        repo=repo, storage=storage, gitea=fake_gitea,  # type: ignore[arg-type]
+    )
+
+    app = FastAPI()
+    app.include_router(documents_router)
+    app.state.artifacts_service = service
+    try:
+        yield app, fake_gitea
+    finally:
+        cleanup_arango_database(arango_container, db_name)

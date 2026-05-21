@@ -41,7 +41,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class MessageRole(StrEnum):
@@ -120,6 +120,31 @@ class InlineEvent(BaseModel):
     )
 
 
+class PromptReferenceRange(BaseModel):
+    """Inclusive 1-indexed line range for an `excerpt`-kind reference
+    (E-200-008). End line is inclusive ; `start_line <= end_line`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    start_line: int = Field(ge=1)
+    end_line: int = Field(ge=1)
+
+
+class PromptReference(BaseModel):
+    """One file/excerpt the operator pinned to their prompt
+    (E-200-008 / R-200-180..184). `kind=file` references the whole
+    file ; `kind=excerpt` carries a line range. `source=live-docs`
+    targets the project live-docs artifact run ; `source=source` is
+    deferred to v2 (Q-200-019 — run_id ambiguity)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["file", "excerpt"]
+    source: Literal["live-docs", "source"]
+    path: str = Field(min_length=1, max_length=512)
+    range: PromptReferenceRange | None = None
+
+
 class MessagePublic(BaseModel):
     """Public view of a single message."""
 
@@ -136,6 +161,13 @@ class MessagePublic(BaseModel):
         "user messages. Legacy messages persisted with the v3 "
         "`stages` field are projected into this list (kind='stage') "
         "at read time, so no data migration is required.",
+    )
+    references: list[PromptReference] | None = Field(
+        default=None,
+        description="Operator-attached prompt references (R-200-182). "
+        "Metadata only — `path` + `kind` + `range` — NEVER the resolved "
+        "content (storage discipline). None on assistant messages and "
+        "on legacy user messages persisted before Tranche B.",
     )
 
 
@@ -183,6 +215,17 @@ class MessageRequest(BaseModel):
     content: str = Field(min_length=1)
     user_prompt: str | None = Field(default=None, max_length=4000)
     project_prompt: str | None = Field(default=None, max_length=4000)
+    # Tranche B (R-200-180) — up to 10 file/excerpt references the
+    # operator pinned to this turn. Server-resolved and inlined as a
+    # separate system block before the user message. Empty list and
+    # None are equivalent (no references attached).
+    references: list[PromptReference] | None = Field(
+        default=None,
+        max_length=10,
+        description="Up to 10 prompt-attached references "
+        "(R-200-180). 32K-token cap on combined resolved content "
+        "(R-200-181) — over-cap requests SHALL return 413.",
+    )
 
 
 class ConversationListResponse(BaseModel):

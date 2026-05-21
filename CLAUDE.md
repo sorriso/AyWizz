@@ -1,6 +1,6 @@
 <!-- =============================================================================
 File: CLAUDE.md
-Version: 15
+Version: 16
 Path: CLAUDE.md
 Description: Operating instructions for Claude Code in this monorepo.
              Read at session start. Keep dense - every line costs tokens.
@@ -300,17 +300,35 @@ The authoritative allow/deny list for bash commands is in
 `.claude/settings.json`, loaded automatically by Claude Code at session
 start. Evaluation order: `deny > ask > allow`.
 
+**Validation philosophy** (codified 2026-05-19): human-in-the-loop
+applies at **decision gates** (architecture choices, plan / todo
+validation, semantic env changes per §4.6, new specs, contract
+changes). It does NOT apply at **execution gates** for read-only,
+test, lint, build, or analysis commands — those are pure mechanical
+operations whose review-cost outweighs their review-value. The
+allow-list scope reflects this distinction and expands over time as
+new lecture-only / test-only commands prove safe and frequent.
+
 Summary of current config (for human readability; `settings.json` is the source of truth):
 
 - **Allowed without prompt**:
   - Test & lint: `pytest`, `ruff`, `mypy`.
   - Project scripts (wrappers): `./scripts/run_tests.sh`,
-    `./scripts/run_coherence_checks.sh`, `./scripts/e2e_stack.sh`
-    (each with 4 invocation forms: `./path`, `ay_platform_core/path`,
-    `bash path`, `bash ay_platform_core/path`).
+    `./scripts/run_coherence_checks.sh`, `./scripts/e2e_stack.sh`,
+    `docker_test_cleanup.sh`, `run_k8s_system_tests.sh`,
+    `k8s_validate.sh`, `k8s_kind_smoke.sh`, `infra/k8s/run.sh`,
+    `infra/k8s/stop.sh` (each with the 5 invocation forms per §5.7
+    canonical path rules).
   - Python: `pip install -e .` / `.[all]`, pip read-only
     (`show`, `list`, `freeze`), `python -m pytest/ruff/mypy`,
     `python -c`, `python --version`.
+  - **UI tooling (Next.js / TypeScript)**: `npm run lint`,
+    `npm run typecheck`, `npm run test*`, `npm run ci`,
+    `npm run format`, `npm run build` (plus their
+    `npm --prefix ay_platform_ui run X` variants); `npm list`,
+    `npm ls`. Plus npx-direct entry points: `npx biome check`,
+    `npx biome ci`, `npx biome format`, `npx tsc`, `npx eslint`,
+    `npx prettier --check`, `npx --version`.
   - Shell read-only: `ls`, `cat`, `grep`, `find`, `wc`, `head`,
     `tail`, `stat`, `diff`, `tree`, `sed -n`, etc.
   - Git read-only: `status`, `diff`, `log`, `show`, `branch`,
@@ -1048,4 +1066,4 @@ SHOULD be added to CI when the workflow next gets a refresh.
 
 ---
 
-*End of `CLAUDE.md` v20.*
+*End of `CLAUDE.md` v16.*

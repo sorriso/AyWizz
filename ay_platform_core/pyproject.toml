@@ -85,6 +85,20 @@ dependencies = [
     # in spirit, but bundled in the main image because the module rides
     # on the same `ay-api:local` Dockerfile as every other component.
     "docker>=7.1,<8.0",
+
+    # NATS client (R-200-070 / R-200-071) — at-least-once via JetStream
+    # for the C4 orchestrator's hybrid-exposure event channel. Python
+    # client `nats-py` covers Core NATS + JetStream from one package.
+    "nats-py>=2.6,<3.0",
+
+    # Kubernetes async client (R-200-030..033) — the C4 K8sDispatcher
+    # creates ephemeral sub-agent pods in the `c4-workers` namespace and
+    # watches them to completion. `kubernetes_asyncio` is the async
+    # fork of the official `kubernetes` client and matches the platform's
+    # FastAPI-async style. Optional in spirit (orchestrator falls back
+    # to InProcessDispatcher when not installed) but bundled in the main
+    # `ay-api:local` image — same shared-image rule as `R-100-114`.
+    "kubernetes_asyncio>=33.0,<34.0",
 ]
 
 [project.optional-dependencies]
@@ -260,6 +274,16 @@ module = [
     "requests.*",
     "docker",
     "docker.*",
+    # nats-py ships without type stubs ; covered by the project-wide
+    # ignore_missing_imports below but also listed explicitly so mypy's
+    # error message points operators at this block when nats-py isn't
+    # installed (P1.2 — R-200-070 publisher).
+    "nats",
+    "nats.*",
+    # kubernetes_asyncio same story — async fork of the official client
+    # ships without py.typed (P2.1.c — R-200-030 K8s sub-agent dispatcher).
+    "kubernetes_asyncio",
+    "kubernetes_asyncio.*",
     # Coherence scripts under scripts/checks/ are standalone executables
     # loaded at test time via sys.path insertion — not an installable package.
     "check_pydantic_schemas_valid",

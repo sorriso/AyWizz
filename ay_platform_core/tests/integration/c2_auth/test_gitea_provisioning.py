@@ -1,6 +1,6 @@
 # =============================================================================
 # File: test_gitea_provisioning.py
-# Version: 1
+# Version: 4
 # Path: ay_platform_core/tests/integration/c2_auth/test_gitea_provisioning.py
 # Description: Integration tests for the Gitea provisioning hook
 #              (R-200-141..142). Uses a `FakeGiteaClient` stub
@@ -9,6 +9,18 @@
 #              container ; the contract verified is the C2 service
 #              layer's behaviour, not the Gitea API itself (which is
 #              upstream-vendor-owned).
+#
+#              v3 (2026-05-21): `_FakeGiteaClient.list_commits` now
+#              honours the `path` filter (it records the touched path
+#              per commit), matching the real client. This is needed by
+#              the live-docs per-file version count (R-200-147), which
+#              relies on path-scoped commit history to batch revisions
+#              per file. `path=None` still returns the full repo log.
+#
+#              v4 (2026-05-21): `_FakeGiteaClient.get_file_at_ref`
+#              records content per commit and returns the bytes a file
+#              had at a given SHA — backs the "view a previous revision"
+#              tests (R-200-147 history viewer).
 # =============================================================================
 
 from __future__ import annotations
@@ -67,6 +79,13 @@ class _FakeGiteaClient:
     # commits[(owner, repo)] = [GiteaCommit, ...] — one commit per
     # `create_or_update_file` call, prepended (most recent first).
     commits: dict[tuple[str, str], list[GiteaCommit]] = field(default_factory=dict)
+    # commit_paths[(owner, repo)] = [path, ...] — index-aligned with
+    # `commits`, so `list_commits(path=...)` can filter like real Gitea.
+    commit_paths: dict[tuple[str, str], list[str]] = field(default_factory=dict)
+    # commit_contents[(owner, repo)] = [bytes, ...] — index-aligned with
+    # `commits`, so `get_file_at_ref` can return the bytes a file had at
+    # a given SHA (real Gitea keeps full history ; the fake snapshots).
+    commit_contents: dict[tuple[str, str], list[bytes]] = field(default_factory=dict)
     fail_on_create_repo: bool = False
     fail_on_create_file: bool = False
 
@@ -142,11 +161,48 @@ class _FakeGiteaClient:
                 committed_at=datetime.now(UTC),
             ),
         )
+        # Keep the touched path + content index-aligned with `commits`
+        # so `list_commits(path=...)` filters and `get_file_at_ref`
+        # returns historical bytes faithfully.
+        self.commit_paths.setdefault((owner, repo), []).insert(0, path)
+        self.commit_contents.setdefault((owner, repo), []).insert(0, content)
 
     async def list_commits(
-        self, *, owner: str, repo: str, page: int = 1, limit: int = 50,
+        self,
+        *,
+        owner: str,
+        repo: str,
+        page: int = 1,
+        limit: int = 50,
+        path: str | None = None,
     ) -> list[GiteaCommit]:
-        return list(self.commits.get((owner, repo), []))[:limit]
+        # `path` mirrors the real GiteaClient (R-200-173 / R-200-147).
+        # When supplied, restrict to commits that touched that path
+        # (index-aligned with `commit_paths`) ; otherwise return the
+        # full repo log, most recent first.
+        commits = list(self.commits.get((owner, repo), []))
+        if path is not None:
+            paths = self.commit_paths.get((owner, repo), [])
+            commits = [
+                c
+                for c, p in zip(commits, paths, strict=False)
+                if p == path
+            ]
+        return commits[:limit]
+
+    async def get_file_at_ref(
+        self, *, owner: str, repo: str, path: str, ref: str,
+    ) -> bytes | None:
+        # Walk the index-aligned commit/path/content lists (most recent
+        # first) and return the content of the commit whose sha == ref
+        # and which touched `path`. None when there's no such commit.
+        commits = self.commits.get((owner, repo), [])
+        paths = self.commit_paths.get((owner, repo), [])
+        contents = self.commit_contents.get((owner, repo), [])
+        for c, p, data in zip(commits, paths, contents, strict=False):
+            if c.sha == ref and p == path:
+                return data
+        return None
 
     async def aclose(self) -> None:  # match real client
         return None

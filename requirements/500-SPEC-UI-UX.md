@@ -1,17 +1,15 @@
 ---
 document: 500-SPEC-UI-UX
-version: 2
+version: 3
 path: requirements/500-SPEC-UI-UX.md
 language: en
 status: draft
-derives-from: [D-008, R-100-114]
+derives-from: [D-008, R-100-114, R-200-200, R-200-160, R-200-170, R-200-180]
 ---
 
 # UI & UX Specification
 
-> **STATUS: v2 (2026-05-11).** Populated with the entities + decisions
-> covering Phases A-F of the v1 UX implementation (`ay_platform_ui/`).
-> Scaffold-only sections are explicitly marked.
+> **STATUS: v3 (2026-05-20).** v2 baseline (Phases A-F) unchanged. Adds R-500-008..014 covering the Tranche B UX surface introduced by `200-SPEC` §4.10 / §5.17 / §5.18 / §5.19 : Pipeline blocked Retry/Abort, live trace timeline + steer composer, tree right-click menus for live-docs and source-files (mkdir / rename / move), source-file metadata panel, and prompt-attached references (file + excerpt).
 
 ---
 
@@ -224,6 +222,147 @@ auto-fill panel **only** when both backend flags
 asserted (defense in depth, R-100-118 v2). Production overlays
 SHALL leave the second flag False.
 
+#### R-500-008
+
+```yaml
+id: R-500-008
+version: 1
+status: approved
+category: functional
+derives-from: [R-200-021]
+```
+
+The **Pipeline** page SHALL, when the displayed run has
+`status == "blocked"`, surface two operator controls : **Retry
+phase** (calls `POST /runs/{id}/resume` with `strategy:"retry"`)
+and **Abort run** (`strategy:"abort"`). Both buttons SHALL be
+visible to every project member ; the backend enforces the
+admin-only RBAC (R-200-002) and the UX SHALL surface a 403 as a
+clear error message. `skip-phase` is NOT surfaced in v1 per
+Q-200-009 deferral.
+
+#### R-500-009
+
+```yaml
+id: R-500-009
+version: 1
+status: draft
+category: functional
+derives-from: [R-200-200, R-200-201, R-200-202, R-200-203]
+```
+
+The **Pipeline** page SHALL render a live **run-trace timeline**
+beneath the phase stepper that hydrates from `RunPublic.trace`
+(the 200-most-recent window per R-200-201) and appends every new
+event surfaced by the existing 2 s polling loop. The timeline
+SHALL render one row per `TraceEvent` with the icon mapped from
+`kind` (agent-dispatch / gate-eval / fix-attempt / phase-boundary
+/ steer-applied), the `label`, the timestamp (relative), and
+`duration_ms` if present. Older events SHALL be loaded lazily on
+upward scroll via `GET /runs/{id}/trace?before=<ts>`. While
+`status == "running"`, a **steer composer** (single-line text
+input + "Send hint" button) SHALL be visible above the timeline ;
+submission calls `POST /runs/{id}/steer` and clears on success.
+The composer SHALL be hidden on `completed` / `blocked`.
+
+#### R-500-010
+
+```yaml
+id: R-500-010
+version: 1
+status: draft
+category: functional
+derives-from: [R-200-160, R-200-161, R-200-162, R-200-163]
+```
+
+The **Working area** Documents pane SHALL render the live-docs
+listing as a recursive tree (folder/file nodes) with a
+right-click context menu offering : **New folder** (`mkdir`),
+**Rename** (`rename`), **Move to…** (`move` ; opens a folder
+picker), and **Delete** (existing `DELETE /documents/{path}`).
+Each action calls the corresponding endpoint from §5.17 of
+200-SPEC ; the tree refreshes on success. Server-side 4xx errors
+(409 conflict, 400 invalid path) SHALL be surfaced as inline
+toasts with the server's `detail` message — never silenced.
+
+#### R-500-011
+
+```yaml
+id: R-500-011
+version: 1
+status: draft
+category: functional
+derives-from: [R-200-170, R-200-171, R-200-173]
+```
+
+The **Working area** SHALL expose a **Source files** pane mirror
+of the Documents pane, hydrated from `GET /source/tree` (R-200-170).
+The right-click context menu SHALL offer the same four actions as
+R-500-010 plus a **Metadata** entry that opens a side panel
+populated by `GET /source/file/{path}/meta` (R-200-173) displaying
+size, mime type, last-modified, last commit SHA / message / author,
+and `kg_indexed` boolean. The metadata side panel SHALL close on
+ESC or click-outside ; it SHALL NOT block the underlying tree
+interaction.
+
+#### R-500-012
+
+```yaml
+id: R-500-012
+version: 1
+status: draft
+category: functional
+derives-from: [R-200-180, R-200-181, R-200-184]
+```
+
+The Documents and Source-files tree right-click menu SHALL also
+offer **Add as reference** (whole-file `PromptReference{kind:"file"}`).
+The currently-open document viewer SHALL additionally offer
+**Add selection as reference** when the operator has a non-empty
+text selection inside it — emitting a
+`PromptReference{kind:"excerpt", range:{start_line, end_line}}`
+computed from the selection. References SHALL accumulate in a
+**reference tray** docked above the chat composer, displaying one
+chip per attached reference (path + range badge for excerpts) with
+an X to remove. On `send_message`, the chips SHALL be serialised
+into the request body's `references` field (R-200-180) ; the tray
+SHALL clear on successful send.
+
+#### R-500-013
+
+```yaml
+id: R-500-013
+version: 1
+status: draft
+category: functional
+derives-from: [R-200-181]
+```
+
+The reference tray SHALL display a running **token estimate** of
+the combined inlined content (4-chars-per-token approximation per
+R-200-181), turning the estimate red when it exceeds the 32 K cap
+and disabling the **Send** button. A 413 response from the server
+SHALL be surfaced as an inline error listing which references
+would overflow, with a one-click "Drop excess" action that removes
+the latest-added references until the estimate fits.
+
+#### R-500-014
+
+```yaml
+id: R-500-014
+version: 1
+status: draft
+category: ux
+derives-from: [R-500-010, R-500-011, R-500-012]
+```
+
+The tree right-click menu SHALL be accessible via keyboard :
+Shift+F10 OR the context-menu key on a focused tree node opens the
+menu at the node's bounding box. Menu items SHALL be navigable via
+ArrowUp / ArrowDown and triggered with Enter, dismissible with ESC.
+This is a baseline-accessibility requirement (WAI-ARIA tree +
+menu patterns) ; touch-screen long-press is a v2 concern.
+
 ---
 
 ## 4. Entities
@@ -371,3 +510,12 @@ states.
   Component MDX path ? Dep + bundle-size trade-off.
 - **Q-500-004** : list-runs-by-project endpoint on C6 — required to
   surface a project's run history on the Validation page.
+- **Q-500-005** : real-tokenizer integration for the reference tray
+  estimate (R-500-013). v1 uses a 4 chars/token approximation
+  matching R-200-181 ; once C8 exposes per-model tokenizers, the
+  estimate SHALL switch to the authoritative count. Tied to
+  Q-800-* (LLM gateway tokenizer surface).
+- **Q-500-006** : drag-and-drop for tree rename/move (R-500-010 /
+  R-500-011) — v1 is right-click-menu only ; native drag-and-drop is
+  a v2 polish concern (requires custom drop-zone handling with the
+  same atomicity contract as the REST endpoints).

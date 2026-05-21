@@ -214,6 +214,15 @@ export interface InlineEvent {
    *  (create / update / delete_document). Drives the inline log's
    *  "Open in Working area" deep-link (Phase 2.C.3). */
   path?: string | null;
+  /** Size-capped call arguments for `tool_call` events. Lets the
+   *  inline log expand each tool call into its chain-of-thought detail
+   *  (#4). Large string values (e.g. document `content`) are truncated
+   *  server-side to a preview. Absent on stages / legacy events. */
+  arguments?: Record<string, unknown> | null;
+  /** Resulting per-file version after a create/update_document tool
+   *  call (R-200-147). Drives the versioned "Open in working area (vN)"
+   *  link rendered below the response (#5). Absent otherwise. */
+  version?: number | null;
 }
 
 /** Parse status of a C7 source — mirrors `ParseStatus` server-side
@@ -408,6 +417,11 @@ export interface ArtifactNode {
   kind: "file" | "dir";
   size_bytes: number;
   mime_type: string | null;
+  // Per-file revision count for live-docs, batched per AI response
+  // (one bump per assistant turn that touched the file). Null/absent
+  // for non-live-docs runs and when the Gitea history is unavailable ;
+  // the tree renders `name (vN)` only when present.
+  version?: number | null;
 }
 
 export interface ArtifactTree {
@@ -468,6 +482,104 @@ export interface OrchestratorRun {
    *  Pipeline page so the operator sees why automatic retries gave up.
    *  Null for running/completed runs. */
   block_reason?: string | null;
+  /** Sliding window of the 200 most recent TraceEvents on the run,
+   *  newest-first (R-200-201). Older events are loaded lazily via
+   *  `GET /runs/{run_id}/trace?before=<ts>`. Empty on legacy runs. */
+  trace: TraceEvent[];
+}
+
+/** Discriminator for `TraceEvent.kind` — mirrors
+ *  `c4_orchestrator.models.TraceEventKind`. Adding a kind requires a
+ *  matching <RunTrace> formatter on the UI side. */
+export type TraceEventKind =
+  | "agent-dispatch"
+  | "gate-eval"
+  | "fix-attempt"
+  | "phase-boundary"
+  | "steer-applied";
+
+/** One entry of a run's append-only trace ledger (E-200-006, R-200-200).
+ *  `ts` is ISO-8601 UTC. `phase` is the phase at which the event fired. */
+export interface TraceEvent {
+  kind: TraceEventKind;
+  ts: string;
+  phase: OrchestratorPhase;
+  label: string;
+  duration_ms?: number | null;
+  ok?: boolean | null;
+  payload?: Record<string, unknown> | null;
+}
+
+/** Body of `POST /api/v1/orchestrator/runs/{run_id}/steer` (E-200-007,
+ *  R-200-202). A single operator hint, queued FIFO and consumed at the
+ *  next phase / sub-agent boundary (no mid-LLM-call interruption). */
+export interface OrchestratorRunSteer {
+  message: string;
+}
+
+/** Response shape of the live-docs (and source-files) structural ops :
+ *  mkdir / rename / move. Each op fills a different subset of fields ;
+ *  the UX uses `from_path` + `to_path` (or `to_dir`) for the toast. */
+export interface DocumentStructuralOpResult {
+  from_path?: string | null;
+  to_path?: string | null;
+  to_dir?: string | null;
+  path?: string | null;
+  moved?: number | null;
+}
+
+/** Recursive node returned by `GET /source/tree` (R-200-170). Mirrors
+ *  the backend `SourceTreeNode` Pydantic model. Folders carry
+ *  `children` ; files carry `size_bytes`. */
+export interface SourceTreeNode {
+  name: string;
+  kind: "file" | "dir";
+  path: string;
+  size_bytes?: number | null;
+  children?: SourceTreeNode[] | null;
+}
+
+export interface SourceTreeResponse {
+  run_id: string;
+  truncated: boolean;
+  nodes: SourceTreeNode[];
+}
+
+/** Same shape as `DocumentStructuralOpResult` plus the `run_id` of the
+ *  artifact run that was mutated (source ops are run-scoped per
+ *  Q-200-017). */
+export interface SourceStructuralOpResult extends DocumentStructuralOpResult {
+  run_id: string;
+}
+
+/** Response of `GET /source/file/{path}/meta` (R-200-173). Best-effort
+ *  Gitea commit fields may be null when Gitea is unreachable. */
+export interface SourceFileMeta {
+  path: string;
+  size: number;
+  mime_type: string;
+  modified_at?: string | null;
+  last_commit_sha?: string | null;
+  last_commit_message?: string | null;
+  last_commit_author?: string | null;
+  kg_indexed?: boolean | null;
+}
+
+/** Inclusive 1-indexed line range for an `excerpt`-kind reference
+ *  (E-200-008). */
+export interface PromptReferenceRange {
+  start_line: number;
+  end_line: number;
+}
+
+/** Operator-attached prompt reference (E-200-008 / R-200-180..184).
+ *  `source=source` is deferred to v2 per Q-200-019 — v1 UI only emits
+ *  `source=live-docs` references. */
+export interface PromptReference {
+  kind: "file" | "excerpt";
+  source: "live-docs" | "source";
+  path: string;
+  range?: PromptReferenceRange | null;
 }
 
 /** Body of `POST /api/v1/orchestrator/runs`. `domain` defaults to
@@ -486,6 +598,17 @@ export interface OrchestratorRunFeedback {
   phase: OrchestratorPhase;
   approved?: boolean | null;
   user_feedback?: string | null;
+}
+
+/** Body of `POST /api/v1/orchestrator/runs/{run_id}/resume`. Admin
+ *  override after a BLOCKED halt — `retry` re-attempts the failing
+ *  phase, `abort` marks the run terminally aborted. `skip-phase` is
+ *  spec'd but deferred to C4 v2 (Q-200-009) ; the UI does not offer
+ *  it until the backend implements it. */
+export type OrchestratorRunResumeStrategy = "retry" | "skip-phase" | "abort";
+
+export interface OrchestratorRunResume {
+  strategy: OrchestratorRunResumeStrategy;
 }
 
 /** MIME types accepted by C7's upload endpoint (R-400-024). Anything

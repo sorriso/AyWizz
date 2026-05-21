@@ -1,12 +1,18 @@
-# Version: 1
+# Version: 2
 # Path: .github/workflows/ci-tests.yml
 #
 # CI - run unit / contract / integration tests + coherence checks on every
-# push to main. Surfaces pass/fail status and line-coverage percentage on
-# the GitHub Actions UI (job summary) and exposes both as README badges.
+# push to main AND on every pull_request targeting main. Surfaces pass/fail
+# status and line-coverage percentage on the GitHub Actions UI (job summary)
+# and exposes both as README badges.
 #
 # Coverage gate (--cov-fail-under=80) is enforced by ay_platform_core's
 # pyproject.toml; this workflow does NOT re-encode the threshold.
+#
+# v2 (2026-05-20) : adds `pull_request` trigger so contributors see
+# the CI verdict BEFORE merging — closes the "PR can break main"
+# gap the UI workflow already addressed. Coverage badge publish step
+# remains main-only (no PR mutates the gist).
 #
 # @relation implements:R-100-123
 
@@ -14,6 +20,8 @@ name: ci-tests
 
 on:
   push:
+    branches: [main]
+  pull_request:
     branches: [main]
 
 permissions:

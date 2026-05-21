@@ -1,0 +1,442 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+=============================================================================
+File: 050-WORKFLOW-prompt-execution.svg
+Version: 1
+Path: requirements/050-WORKFLOW-prompt-execution.svg
+Description: Workflow diagram of a prompt execution on the AyWizz platform.
+             Two sequence diagrams stacked vertically :
+              (1) Chat-RAG path : user message in C3 conversation → C7
+                  federated retrieval (vector + KG in ArangoDB) → C8
+                  LLM gateway → SSE back to the UI ; with the optional
+                  DocGen tool-loop branch that mutates live-docs through
+                  C4's document API.
+              (2) C4 Pipeline path : operator goal on the Pipeline page →
+                  5-phase orchestrator (brainstorm/spec/plan/generate/
+                  review) with three hard gates ; each phase dispatches
+                  an agent via C8 ; generate-phase artifacts are
+                  materialised to MinIO + pushed best-effort to Gitea.
+             Numbers next to each arrow give the step ordering. Lifelines
+             are vertical dashed lines under each component header.
+             Authoritative spec sources : 200-SPEC §4.1..4.10, §5.13..
+             §5.19 ; 400-SPEC §3 (Memory & RAG) ; 800-SPEC §4 (LLM
+             gateway). Tranche B additions : 4.10 (trace+steer),
+             5.17 (live-docs ops), 5.18 (source-files), 5.19 (prompt
+             references) — surfaced as the lighter blue annotations.
+=============================================================================
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 1900" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1f2937"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1d4ed8"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#059669"/>
+    </marker>
+    <marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#b45309"/>
+    </marker>
+  </defs>
+
+  <!-- ====================================================================
+       Document title + intro band
+       ==================================================================== -->
+  <rect x="0" y="0" width="1280" height="80" fill="#0f172a"/>
+  <text x="40" y="40" fill="#f1f5f9" font-size="22" font-weight="600">AyWizz — Prompt execution workflow</text>
+  <text x="40" y="64" fill="#94a3b8" font-size="13">Two paths : (1) Chat-RAG turn in C3 ; (2) Pipeline goal driven by C4. Numbered arrows give the ordering ; dashed verticals are component lifelines.</text>
+
+  <!-- ====================================================================
+       SECTION 1 — Chat-RAG flow
+       ==================================================================== -->
+  <g id="chat-rag-flow">
+    <rect x="0" y="90" width="1280" height="40" fill="#e2e8f0"/>
+    <text x="40" y="117" fill="#0f172a" font-size="16" font-weight="600">1. Chat prompt → RAG retrieval → LLM → SSE reply (with optional DocGen tool-loop)</text>
+
+    <!-- Lifeline headers : 10 lanes, x-centers at 80, 200, 320, 440, 560, 680, 800, 920, 1040, 1160 -->
+    <!-- y of lane header box : 145..195 ; lifelines run from y=195 down to y=940 -->
+    <g font-size="11" text-anchor="middle">
+      <g transform="translate(80, 145)">
+        <rect x="-55" y="0" width="110" height="50" rx="4" fill="#1e293b" stroke="#0f172a"/>
+        <text y="22" fill="#f1f5f9" font-weight="600">Operator (UI)</text>
+        <text y="40" fill="#cbd5e1">Next.js 16 / React 19</text>
+      </g>
+      <g transform="translate(200, 145)">
+        <rect x="-55" y="0" width="110" height="50" rx="4" fill="#0f766e" stroke="#0d524d"/>
+        <text y="22" fill="#ecfeff" font-weight="600">C1 Gateway</text>
+        <text y="40" fill="#a5f3fc">Traefik v3 fwd-auth</text>
+      </g>
+      <g transform="translate(320, 145)">
+        <rect x="-55" y="0" width="110" height="50" rx="4" fill="#7c2d12" stroke="#5c1f0c"/>
+        <text y="22" fill="#fff7ed" font-weight="600">C2 Auth</text>
+        <text y="40" fill="#fed7aa">JWT + role + prefs</text>
+      </g>
+      <g transform="translate(440, 145)">
+        <rect x="-55" y="0" width="110" height="50" rx="4" fill="#1d4ed8" stroke="#1e3a8a"/>
+        <text y="22" fill="#eff6ff" font-weight="600">C3 Conversation</text>
+        <text y="40" fill="#bfdbfe">FastAPI + SSE</text>
+      </g>
+      <g transform="translate(560, 145)">
+        <rect x="-55" y="0" width="110" height="50" rx="4" fill="#16a34a" stroke="#15803d"/>
+        <text y="22" fill="#f0fdf4" font-weight="600">C7 Memory</text>
+        <text y="40" fill="#bbf7d0">Federated retrieval</text>
+      </g>
+      <g transform="translate(680, 145)">
+        <rect x="-55" y="0" width="110" height="50" rx="4" fill="#15803d" stroke="#166534"/>
+        <text y="20" fill="#f0fdf4" font-weight="600">ArangoDB</text>
+        <text y="36" fill="#bbf7d0">vector embeddings</text>
+        <text y="48" fill="#bbf7d0">(top-K cosine)</text>
+      </g>
+      <g transform="translate(800, 145)">
+        <rect x="-55" y="0" width="110" height="50" rx="4" fill="#166534" stroke="#14532d"/>
+        <text y="20" fill="#f0fdf4" font-weight="600">ArangoDB</text>
+        <text y="36" fill="#bbf7d0">knowledge graph</text>
+        <text y="48" fill="#bbf7d0">(edges / relations)</text>
+      </g>
+      <g transform="translate(920, 145)">
+        <rect x="-55" y="0" width="110" height="50" rx="4" fill="#6d28d9" stroke="#5b21b6"/>
+        <text y="22" fill="#f5f3ff" font-weight="600">C8 LLM gw</text>
+        <text y="40" fill="#ddd6fe">LiteLLM proxy</text>
+      </g>
+      <g transform="translate(1040, 145)">
+        <rect x="-55" y="0" width="110" height="50" rx="4" fill="#4c1d95" stroke="#3b0764"/>
+        <text y="22" fill="#f5f3ff" font-weight="600">LLM provider</text>
+        <text y="40" fill="#ddd6fe">Claude / Ollama</text>
+      </g>
+      <g transform="translate(1160, 145)">
+        <rect x="-55" y="0" width="110" height="50" rx="4" fill="#92400e" stroke="#78350f"/>
+        <text y="20" fill="#fff7ed" font-weight="600">MinIO + Gitea</text>
+        <text y="36" fill="#fde68a">live-docs blobs</text>
+        <text y="48" fill="#fde68a">audit mirror</text>
+      </g>
+    </g>
+
+    <!-- Vertical lifelines down to y=940 -->
+    <g stroke="#cbd5e1" stroke-dasharray="3 4" stroke-width="1">
+      <line x1="80" y1="195" x2="80" y2="940"/>
+      <line x1="200" y1="195" x2="200" y2="940"/>
+      <line x1="320" y1="195" x2="320" y2="940"/>
+      <line x1="440" y1="195" x2="440" y2="940"/>
+      <line x1="560" y1="195" x2="560" y2="940"/>
+      <line x1="680" y1="195" x2="680" y2="940"/>
+      <line x1="800" y1="195" x2="800" y2="940"/>
+      <line x1="920" y1="195" x2="920" y2="940"/>
+      <line x1="1040" y1="195" x2="1040" y2="940"/>
+      <line x1="1160" y1="195" x2="1160" y2="940"/>
+    </g>
+
+    <!-- Phase header overlay : prompt assembly band -->
+    <rect x="40" y="210" width="1200" height="20" fill="#fef3c7" opacity="0.6"/>
+    <text x="50" y="225" font-size="11" font-weight="600" fill="#92400e">Phase A — Forward-auth + identity propagation</text>
+
+    <!-- Step 1 : UI → C1 (POST /api/v1/conversations/{cid}/messages, Bearer JWT) -->
+    <g stroke="#1f2937" fill="#1f2937" font-size="11">
+      <line x1="82" y1="250" x2="198" y2="250" marker-end="url(#arrow)" stroke-width="1.5"/>
+      <text x="140" y="244" text-anchor="middle">① POST /messages + Bearer JWT (+references? +user_prompt? +project_prompt?)</text>
+    </g>
+
+    <!-- Step 2 : C1 → C2 (forward-auth /auth/verify) -->
+    <g stroke="#1f2937" fill="#1f2937" font-size="11">
+      <line x1="202" y1="280" x2="318" y2="280" marker-end="url(#arrow)" stroke-width="1.5"/>
+      <text x="260" y="274" text-anchor="middle">② /auth/verify (forward-auth)</text>
+      <line x1="318" y1="305" x2="202" y2="305" marker-end="url(#arrow)" stroke-width="1.5"/>
+      <text x="260" y="299" text-anchor="middle">③ 200 → X-User-Id / X-Tenant-Id / X-User-Roles</text>
+    </g>
+
+    <!-- Step 4 : C1 → C3 (proxied with identity headers) -->
+    <g stroke="#1f2937" fill="#1f2937" font-size="11">
+      <line x1="202" y1="335" x2="438" y2="335" marker-end="url(#arrow)" stroke-width="1.5"/>
+      <text x="320" y="329" text-anchor="middle">④ POST /messages (+identity headers propagated)</text>
+    </g>
+
+    <!-- Phase B band : retrieval -->
+    <rect x="40" y="355" width="1200" height="20" fill="#dcfce7" opacity="0.6"/>
+    <text x="50" y="370" font-size="11" font-weight="600" fill="#166534">Phase B — Federated RAG retrieval (C7 → ArangoDB vector + KG)</text>
+
+    <!-- Step 5 : C3 persists user message + (Tranche B) resolves PromptReferences via C4 documents API -->
+    <g stroke="#1d4ed8" fill="#1d4ed8" font-size="11">
+      <line x1="442" y1="395" x2="1158" y2="395" marker-end="url(#arrow-blue)" stroke-width="1.2" stroke-dasharray="6 3"/>
+      <text x="800" y="389" text-anchor="middle">⑤ (Tranche B) Resolve PromptReferences : GET /documents/{path} via C4 → MinIO bytes</text>
+    </g>
+
+    <!-- Step 6 : C3 → C7 (RetrievalRequest) -->
+    <g stroke="#059669" fill="#059669" font-size="11">
+      <line x1="442" y1="425" x2="558" y2="425" marker-end="url(#arrow-green)" stroke-width="1.5"/>
+      <text x="500" y="419" text-anchor="middle">⑥ /retrieve top-K (project_id, query)</text>
+    </g>
+
+    <!-- Step 7a : C7 → ArangoDB vector index -->
+    <g stroke="#059669" fill="#059669" font-size="11">
+      <line x1="562" y1="455" x2="678" y2="455" marker-end="url(#arrow-green)" stroke-width="1.5"/>
+      <text x="620" y="449" text-anchor="middle">⑦a cosine top-K</text>
+      <line x1="678" y1="478" x2="562" y2="478" marker-end="url(#arrow-green)" stroke-width="1.5"/>
+      <text x="620" y="472" text-anchor="middle">chunks + scores</text>
+    </g>
+
+    <!-- Step 7b : C7 → ArangoDB graph -->
+    <g stroke="#059669" fill="#059669" font-size="11">
+      <line x1="562" y1="510" x2="798" y2="510" marker-end="url(#arrow-green)" stroke-width="1.5"/>
+      <text x="680" y="504" text-anchor="middle">⑦b graph traversal (entity links, related docs)</text>
+      <line x1="798" y1="533" x2="562" y2="533" marker-end="url(#arrow-green)" stroke-width="1.5"/>
+      <text x="680" y="527" text-anchor="middle">related nodes + edges</text>
+    </g>
+
+    <!-- Step 8 : C7 merges + returns hits -->
+    <g stroke="#059669" fill="#059669" font-size="11">
+      <line x1="558" y1="565" x2="442" y2="565" marker-end="url(#arrow-green)" stroke-width="1.5"/>
+      <text x="500" y="559" text-anchor="middle">⑧ merged hits (federated)</text>
+    </g>
+
+    <!-- Phase C : prompt assembly + LLM -->
+    <rect x="40" y="585" width="1200" height="20" fill="#ede9fe" opacity="0.7"/>
+    <text x="50" y="600" font-size="11" font-weight="600" fill="#5b21b6">Phase C — Prompt assembly + C8 LLM call (streaming OR DocGen tool-loop)</text>
+
+    <!-- Step 9 : C3 assembles prompt (system + user_prompt + project_prompt + retrieved chunks + history + references block + user message) -->
+    <g font-size="11" fill="#1f2937">
+      <rect x="290" y="615" width="320" height="48" rx="4" fill="#f8fafc" stroke="#94a3b8"/>
+      <text x="300" y="630" font-weight="600">⑨ Prompt assembly (C3)</text>
+      <text x="300" y="645" font-size="10">system + user_prompt + project_prompt</text>
+      <text x="300" y="658" font-size="10">+ RAG context + history + &lt;reference&gt; block (R-200-181)</text>
+    </g>
+
+    <!-- Step 10 : C3 → C8 (chat completion) -->
+    <g stroke="#6d28d9" fill="#6d28d9" font-size="11">
+      <line x1="442" y1="685" x2="918" y2="685" marker-end="url(#arrow)" stroke-width="1.5"/>
+      <text x="680" y="679" text-anchor="middle">⑩ POST /v1/chat/completions (DocGen mode → tools[])</text>
+    </g>
+
+    <!-- Step 11 : C8 → LLM -->
+    <g stroke="#6d28d9" fill="#6d28d9" font-size="11">
+      <line x1="922" y1="710" x2="1038" y2="710" marker-end="url(#arrow)" stroke-width="1.5"/>
+      <text x="980" y="704" text-anchor="middle">⑪ provider call</text>
+      <line x1="1038" y1="733" x2="922" y2="733" marker-end="url(#arrow)" stroke-width="1.5"/>
+      <text x="980" y="727" text-anchor="middle">stream tokens</text>
+    </g>
+
+    <!-- Step 12 : C8 → C3 stream -->
+    <g stroke="#6d28d9" fill="#6d28d9" font-size="11">
+      <line x1="918" y1="760" x2="442" y2="760" marker-end="url(#arrow)" stroke-width="1.5"/>
+      <text x="680" y="754" text-anchor="middle">⑫ stream tokens (or tool_calls envelope)</text>
+    </g>
+
+    <!-- Phase D : optional DocGen mutation -->
+    <rect x="40" y="780" width="1200" height="20" fill="#fef3c7" opacity="0.7"/>
+    <text x="50" y="795" font-size="11" font-weight="600" fill="#92400e">Phase D — Optional DocGen tool-loop (D-015) : LLM emits tool_calls → C3 executes against C4 /documents</text>
+
+    <!-- Step 13 : C3 → C1 → C4 -->
+    <g stroke="#b45309" fill="#b45309" font-size="11">
+      <line x1="442" y1="820" x2="1158" y2="820" marker-end="url(#arrow-amber)" stroke-width="1.5"/>
+      <text x="800" y="814" text-anchor="middle">⑬ POST /documents | PUT /{path} | DELETE — live-docs MinIO write + Gitea single-commit push (R-200-155)</text>
+    </g>
+
+    <!-- Step 14 : SSE back to UI with inline events + assistant tokens -->
+    <g stroke="#1f2937" fill="#1f2937" font-size="11">
+      <line x1="438" y1="855" x2="202" y2="855" marker-end="url(#arrow)" stroke-width="1.5"/>
+      <text x="320" y="849" text-anchor="middle">⑭ SSE : event: inline (kind=stage|tool_call) + tokens</text>
+      <line x1="198" y1="880" x2="82" y2="880" marker-end="url(#arrow)" stroke-width="1.5"/>
+      <text x="140" y="874" text-anchor="middle">⑮ event-stream → InlineLog + tokens</text>
+    </g>
+
+    <!-- Persisted audit ledger note -->
+    <g font-size="10" fill="#475569">
+      <text x="40" y="915">Persistence : assistant message + `events` ledger (InlineEvent[]) + user message `references` (metadata only, R-200-182) in `c3_messages`.</text>
+    </g>
+  </g>
+
+  <!-- ====================================================================
+       SECTION 2 — C4 Pipeline flow
+       ==================================================================== -->
+  <g id="c4-pipeline-flow">
+    <rect x="0" y="970" width="1280" height="40" fill="#e2e8f0"/>
+    <text x="40" y="997" fill="#0f172a" font-size="16" font-weight="600">2. C4 Orchestrator pipeline — 5 phases / 3 gates / materialise to artifacts surface</text>
+
+    <!-- Lifelines : 10 lanes ; reuse the same x-centers as section 1, but swap C3 → C4. -->
+    <g font-size="11" text-anchor="middle">
+      <g transform="translate(80, 1025)">
+        <rect x="-55" y="0" width="110" height="50" rx="4" fill="#1e293b" stroke="#0f172a"/>
+        <text y="22" fill="#f1f5f9" font-weight="600">Operator (UI)</text>
+        <text y="40" fill="#cbd5e1">Pipeline page</text>
+      </g>
+      <g transform="translate(200, 1025)">
+        <rect x="-55" y="0" width="110" height="50" rx="4" fill="#0f766e" stroke="#0d524d"/>
+        <text y="22" fill="#ecfeff" font-weight="600">C1 Gateway</text>
+        <text y="40" fill="#a5f3fc">Traefik v3 fwd-auth</text>
+      </g>
+      <g transform="translate(320, 1025)">
+        <rect x="-55" y="0" width="110" height="50" rx="4" fill="#7c2d12" stroke="#5c1f0c"/>
+        <text y="22" fill="#fff7ed" font-weight="600">C2 Auth</text>
+        <text y="40" fill="#fed7aa">JWT + role + prefs</text>
+      </g>
+      <g transform="translate(440, 1025)">
+        <rect x="-55" y="0" width="110" height="50" rx="4" fill="#be123c" stroke="#9f1239"/>
+        <text y="22" fill="#fff1f2" font-weight="600">C4 Orchestrator</text>
+        <text y="40" fill="#fecdd3">state machine + trace</text>
+      </g>
+      <g transform="translate(560, 1025)">
+        <rect x="-55" y="0" width="110" height="50" rx="4" fill="#16a34a" stroke="#15803d"/>
+        <text y="22" fill="#f0fdf4" font-weight="600">C7 Memory</text>
+        <text y="40" fill="#bbf7d0">Retrieval (per phase)</text>
+      </g>
+      <g transform="translate(680, 1025)">
+        <rect x="-55" y="0" width="110" height="50" rx="4" fill="#15803d" stroke="#166534"/>
+        <text y="20" fill="#f0fdf4" font-weight="600">ArangoDB</text>
+        <text y="36" fill="#bbf7d0">vector embeddings</text>
+        <text y="48" fill="#bbf7d0">(per-phase queries)</text>
+      </g>
+      <g transform="translate(800, 1025)">
+        <rect x="-55" y="0" width="110" height="50" rx="4" fill="#166534" stroke="#14532d"/>
+        <text y="20" fill="#f0fdf4" font-weight="600">ArangoDB</text>
+        <text y="36" fill="#bbf7d0">knowledge graph</text>
+        <text y="48" fill="#bbf7d0">(spec deps, traceability)</text>
+      </g>
+      <g transform="translate(920, 1025)">
+        <rect x="-55" y="0" width="110" height="50" rx="4" fill="#6d28d9" stroke="#5b21b6"/>
+        <text y="22" fill="#f5f3ff" font-weight="600">C8 LLM gw</text>
+        <text y="40" fill="#ddd6fe">per-agent profile</text>
+      </g>
+      <g transform="translate(1040, 1025)">
+        <rect x="-55" y="0" width="110" height="50" rx="4" fill="#4c1d95" stroke="#3b0764"/>
+        <text y="22" fill="#f5f3ff" font-weight="600">LLM provider</text>
+        <text y="40" fill="#ddd6fe">Claude / Ollama</text>
+      </g>
+      <g transform="translate(1160, 1025)">
+        <rect x="-55" y="0" width="110" height="50" rx="4" fill="#92400e" stroke="#78350f"/>
+        <text y="20" fill="#fff7ed" font-weight="600">MinIO + Gitea</text>
+        <text y="36" fill="#fde68a">artifact run blobs</text>
+        <text y="48" fill="#fde68a">push on Gate B</text>
+      </g>
+    </g>
+
+    <!-- Vertical lifelines y=1075..1810 -->
+    <g stroke="#cbd5e1" stroke-dasharray="3 4" stroke-width="1">
+      <line x1="80" y1="1075" x2="80" y2="1810"/>
+      <line x1="200" y1="1075" x2="200" y2="1810"/>
+      <line x1="320" y1="1075" x2="320" y2="1810"/>
+      <line x1="440" y1="1075" x2="440" y2="1810"/>
+      <line x1="560" y1="1075" x2="560" y2="1810"/>
+      <line x1="680" y1="1075" x2="680" y2="1810"/>
+      <line x1="800" y1="1075" x2="800" y2="1810"/>
+      <line x1="920" y1="1075" x2="920" y2="1810"/>
+      <line x1="1040" y1="1075" x2="1040" y2="1810"/>
+      <line x1="1160" y1="1075" x2="1160" y2="1810"/>
+    </g>
+
+    <!-- Phase 0 : auth + run creation -->
+    <rect x="40" y="1090" width="1200" height="20" fill="#fef3c7" opacity="0.6"/>
+    <text x="50" y="1105" font-size="11" font-weight="600" fill="#92400e">Phase 0 — Auth + run creation (R-200-002)</text>
+
+    <g stroke="#1f2937" fill="#1f2937" font-size="11">
+      <line x1="82" y1="1130" x2="198" y2="1130" marker-end="url(#arrow)" stroke-width="1.5"/>
+      <text x="140" y="1124" text-anchor="middle">① POST /orchestrator/runs (goal, project_id, session_id)</text>
+      <line x1="202" y1="1155" x2="318" y2="1155" marker-end="url(#arrow)" stroke-width="1.5"/>
+      <text x="260" y="1149" text-anchor="middle">② forward-auth /auth/verify</text>
+      <line x1="318" y1="1180" x2="202" y2="1180" marker-end="url(#arrow)" stroke-width="1.5"/>
+      <text x="260" y="1174" text-anchor="middle">③ X-User-Id / X-Tenant-Id / X-User-Roles</text>
+      <line x1="202" y1="1205" x2="438" y2="1205" marker-end="url(#arrow)" stroke-width="1.5"/>
+      <text x="320" y="1199" text-anchor="middle">④ POST /runs (+identity)</text>
+    </g>
+
+    <!-- Phases 1-5 : the 5-phase pipeline ; loop per phase -->
+    <rect x="40" y="1220" width="1200" height="20" fill="#fce7f3" opacity="0.7"/>
+    <text x="50" y="1235" font-size="11" font-weight="600" fill="#9d174d">Phases 1..5 — brainstorm → spec → plan → generate → review (each phase: drain steer, retrieve, dispatch agent, evaluate gate)</text>
+
+    <!-- Loop block frame -->
+    <g stroke="#9d174d" stroke-width="1" fill="none" stroke-dasharray="6 3">
+      <rect x="50" y="1255" width="1200" height="380" rx="6" opacity="0.6"/>
+    </g>
+    <text x="62" y="1272" font-size="11" font-weight="600" fill="#9d174d">loop  for phase in [brainstorm, spec, plan, generate, review]</text>
+
+    <!-- Step 5 : C4 drains pending_steer queue -->
+    <g stroke="#be123c" fill="#be123c" font-size="11">
+      <rect x="360" y="1283" width="160" height="22" rx="3" fill="#fff1f2" stroke="#be123c"/>
+      <text x="440" y="1298" text-anchor="middle">⑤ drain pending_steer (R-200-203)</text>
+    </g>
+
+    <!-- Step 6 : C4 → C7 RAG for phase context -->
+    <g stroke="#059669" fill="#059669" font-size="11">
+      <line x1="442" y1="1325" x2="558" y2="1325" marker-end="url(#arrow-green)" stroke-width="1.5"/>
+      <text x="500" y="1319" text-anchor="middle">⑥ /retrieve (phase-scoped query)</text>
+      <line x1="562" y1="1350" x2="678" y2="1350" marker-end="url(#arrow-green)" stroke-width="1.5"/>
+      <text x="620" y="1344" text-anchor="middle">⑦a vector top-K</text>
+      <line x1="562" y1="1375" x2="798" y2="1375" marker-end="url(#arrow-green)" stroke-width="1.5"/>
+      <text x="680" y="1369" text-anchor="middle">⑦b KG traversal (requirements + prior artifacts)</text>
+      <line x1="558" y1="1400" x2="442" y2="1400" marker-end="url(#arrow-green)" stroke-width="1.5"/>
+      <text x="500" y="1394" text-anchor="middle">⑧ merged hits</text>
+    </g>
+
+    <!-- Step 9 : C4 dispatches agent via C8 (architect/planner/implementer/reviewer per phase) -->
+    <g stroke="#6d28d9" fill="#6d28d9" font-size="11">
+      <line x1="442" y1="1430" x2="918" y2="1430" marker-end="url(#arrow)" stroke-width="1.5"/>
+      <text x="680" y="1424" text-anchor="middle">⑨ dispatch agent (architect | planner | implementer | spec-reviewer | quality-reviewer)</text>
+      <line x1="922" y1="1455" x2="1038" y2="1455" marker-end="url(#arrow)" stroke-width="1.5"/>
+      <text x="980" y="1449" text-anchor="middle">⑩ provider call</text>
+      <line x1="1038" y1="1480" x2="922" y2="1480" marker-end="url(#arrow)" stroke-width="1.5"/>
+      <text x="980" y="1474" text-anchor="middle">AgentCompletion envelope (E-200-002)</text>
+      <line x1="918" y1="1505" x2="442" y2="1505" marker-end="url(#arrow)" stroke-width="1.5"/>
+      <text x="680" y="1499" text-anchor="middle">⑪ status: DONE | DONE_WITH_CONCERNS | NEEDS_CONTEXT | BLOCKED</text>
+    </g>
+
+    <!-- Step 12 : Gate evaluation + trace event -->
+    <g stroke="#be123c" fill="#be123c" font-size="11">
+      <rect x="320" y="1525" width="240" height="40" rx="3" fill="#fff1f2" stroke="#be123c"/>
+      <text x="440" y="1542" text-anchor="middle" font-weight="600">⑫ Gate eval (A/B/C)</text>
+      <text x="440" y="1557" text-anchor="middle">+ TraceEvent { kind=gate-eval | fix-attempt | phase-boundary } (R-200-200)</text>
+    </g>
+
+    <!-- Step 13 : Generate phase pass → materialise -->
+    <g stroke="#b45309" fill="#b45309" font-size="11">
+      <line x1="442" y1="1590" x2="1158" y2="1590" marker-end="url(#arrow-amber)" stroke-width="1.5"/>
+      <text x="800" y="1584" text-anchor="middle">⑬ on Gate B pass : ArtifactsService.put_file × N → mark_completed → Gitea push (R-200-150..152, R-200-146)</text>
+    </g>
+
+    <!-- End of loop frame -->
+
+    <!-- After-loop : status + UI polling -->
+    <rect x="40" y="1655" width="1200" height="20" fill="#dcfce7" opacity="0.6"/>
+    <text x="50" y="1670" font-size="11" font-weight="600" fill="#166534">After loop — Run reaches COMPLETED | BLOCKED — UI polls GET /runs/{id} (RunPublic with trace[200] window)</text>
+
+    <g stroke="#1f2937" fill="#1f2937" font-size="11">
+      <line x1="82" y1="1700" x2="438" y2="1700" marker-end="url(#arrow)" stroke-width="1.5"/>
+      <text x="260" y="1694" text-anchor="middle">⑭ GET /runs/{id} (every 2s while running)</text>
+      <line x1="438" y1="1725" x2="82" y2="1725" marker-end="url(#arrow)" stroke-width="1.5"/>
+      <text x="260" y="1719" text-anchor="middle">⑮ RunPublic { current_phase, status, trace[200], concerns, block_reason? }</text>
+    </g>
+
+    <!-- Operator steer + back-trace -->
+    <g stroke="#1d4ed8" fill="#1d4ed8" font-size="11">
+      <line x1="82" y1="1755" x2="438" y2="1755" marker-end="url(#arrow-blue)" stroke-width="1.2" stroke-dasharray="6 3"/>
+      <text x="260" y="1749" text-anchor="middle">⑯ POST /runs/{id}/steer (operator hint) — queued, drained at next ⑤</text>
+      <line x1="82" y1="1780" x2="438" y2="1780" marker-end="url(#arrow-blue)" stroke-width="1.2" stroke-dasharray="6 3"/>
+      <text x="260" y="1774" text-anchor="middle">⑰ GET /runs/{id}/trace?before=&lt;ts&gt; — lazy back-in-time scroll (R-200-201)</text>
+    </g>
+
+  </g>
+
+  <!-- ====================================================================
+       Legend
+       ==================================================================== -->
+  <g id="legend">
+    <rect x="0" y="1840" width="1280" height="60" fill="#0f172a"/>
+    <text x="40" y="1862" fill="#f1f5f9" font-size="12" font-weight="600">Legend</text>
+    <g font-size="11" fill="#e2e8f0">
+      <line x1="120" y1="1878" x2="170" y2="1878" stroke="#1f2937" stroke-width="2"/>
+      <text x="180" y="1882">core call</text>
+
+      <line x1="270" y1="1878" x2="320" y2="1878" stroke="#059669" stroke-width="2"/>
+      <text x="330" y="1882">RAG path (C7 + ArangoDB vector/KG)</text>
+
+      <line x1="560" y1="1878" x2="610" y2="1878" stroke="#6d28d9" stroke-width="2"/>
+      <text x="620" y="1882">LLM path (C8 + provider)</text>
+
+      <line x1="780" y1="1878" x2="830" y2="1878" stroke="#b45309" stroke-width="2"/>
+      <text x="840" y="1882">artifact write (MinIO + Gitea)</text>
+
+      <line x1="980" y1="1878" x2="1030" y2="1878" stroke="#1d4ed8" stroke-width="2" stroke-dasharray="6 3"/>
+      <text x="1040" y="1882">Tranche B / optional</text>
+    </g>
+  </g>
+
+</svg>

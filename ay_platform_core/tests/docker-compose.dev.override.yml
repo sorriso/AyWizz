@@ -1,6 +1,6 @@
 # =============================================================================
 # File: docker-compose.dev.override.yml
-# Version: 7
+# Version: 8
 # Path: ay_platform_core/tests/docker-compose.dev.override.yml
 # Description: Compose override layered on `docker-compose.yml` by
 #              `e2e_stack.sh dev` to flip C2 into demo-mode AND wire
@@ -8,6 +8,14 @@
 #              true same-origin experience at `http://localhost:56000`
 #              (Traefik routes `/auth/*`, `/api/v1/*`, `/ux/*` to the
 #              Python services and the catch-all `/` to the UI).
+#
+#              v8 (2026-05-20) : new opt-in `litellm` service (profile
+#              `litellm`). Off-the-shelf LiteLLM proxy mounted with the
+#              shared `infra/c8_gateway/config/litellm-config.yaml`.
+#              Operator flips `C8_GATEWAY_URL=http://litellm:4000/v1`
+#              in `.env.dev` (or `.env.secret`) to route C3/C4 LLM calls
+#              through it ; per-agent routing happens client-side via
+#              `C8_AGENT_ROUTES_YAML_PATH` (R-800-030 v1).
 #
 #              docker compose's `env_file:` directive is REPLACED (not
 #              merged) by overrides — so we re-state both files
@@ -186,3 +194,56 @@ services:
     depends_on:
       ui:
         condition: service_started
+
+  # ---------------------------------------------------------------------------
+  # LiteLLM proxy (opt-in, profile = `litellm`) — R-800-001..004.
+  # ---------------------------------------------------------------------------
+  # Off-the-shelf LiteLLM proxy. Runs alongside the existing stack but
+  # is NOT started by default (no profile = ignored) — `e2e_stack.sh
+  # dev` keeps today's direct-provider flow. Operator opts in with
+  # `--profile litellm` to flip C8_GATEWAY_URL onto the proxy and get
+  # per-agent routing (R-800-030 v1 client-side resolver) backed by a
+  # real provider cost/budget surface.
+  #
+  # The config YAML is the SAME file (`infra/c8_gateway/config/
+  # litellm-config.yaml`) the Python schema validates — single source
+  # of truth (R-800-024). `ANTHROPIC_API_KEY` is pulled from
+  # `../../.env.secret` so the Tier-2 discipline (§4.6) holds : the
+  # key never lands in a Tier-1 env file.
+  litellm:
+    profiles:
+      - litellm
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: ay-litellm
+    networks:
+      - platform
+    expose:
+      - "4000"
+    volumes:
+      - ../../infra/c8_gateway/config/litellm-config.yaml:/app/config.yaml:ro
+    env_file:
+      - path: ../../.env.secret
+        required: false
+    command:
+      - "--config"
+      - "/app/config.yaml"
+      - "--port"
+      - "4000"
+      - "--host"
+      - "0.0.0.0"
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "python -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:4000/health/liveliness\").read()'"
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
+        reservations:
+          cpus: "0.1"
+          memory: 128M

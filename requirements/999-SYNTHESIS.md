@@ -1,6 +1,6 @@
 ---
 document: 999-SYNTHESIS
-version: 5
+version: 6
 path: requirements/999-SYNTHESIS.md
 language: en
 status: draft
@@ -13,6 +13,8 @@ status: draft
 > **Version 4 changes.** Clarification of `D-001` (bumped to `version: 2`): StrictDoc is adopted as a **tooling library** (validation, traceability matrices, export), not as the **native storage format**. The native storage format is Markdown with YAML frontmatter, already used by the delivered specs. This clarification resolves an ambiguity surfaced during the `300-SPEC-REQUIREMENTS-MGMT` design discussion; no other decision is impacted.
 
 > **Version 5 changes.** New `D-014`: CI/CD platform decision — GitHub Actions on `push` to `main` for the test/coherence pipeline + GHCR (`ghcr.io/<owner>/aywizz-api`) for the API image, with image publication gated on test success via `workflow_run`. Cross-cuts §5 by introducing the supply-chain decision that was implicit until now.
+
+> **Version 6 changes.** New `D-016` (layered knowledge representation + iterative deterministic-first retrieval, **extending** `D-010`), `D-017` (evaluation as a first-class instrument), and `D-018` (two-tier intent/evidence artifact layer on MinIO). These record the architecture-evolution direction validated during the May-2026 research review. Only the **v1-compatible subset** of `D-016` (schema-guided extraction, hybrid BM25+dense+RRF retrieval, prompt-cached cumulative chunk contextualisation) lands now and is operationalised in `400` (v3); the layered-graph L2/L3 layers and the full iterative-retrieval loop remain **v2** per `D-010` staging. `D-017`/`D-018` are recorded as direction; their spec operationalisation (`600`/`700`/`800` and `100`/`050`) is queued.
 
 ---
 
@@ -563,6 +565,94 @@ When all four are true, a new ADR (D-NNN) records the migration ; D-015 is marke
 
 The synthesis-v4 design explicitly notes that the migration target (OpenHands + LiteLLM + Databricks) is "encapsulated behind a `pipeline/generate_engine.py` abstraction in C4 ; if OpenHands stops matching aywiz' needs ... the harness can be swapped". D-015 inherits this property : the DocGen v1 path is similarly encapsulated (the new `/documents` endpoints are stable across both paths), so v2 migration is a controller swap, not a surface rewrite.
 
+### D-016 — Layered knowledge representation + iterative deterministic-first retrieval
+
+```yaml
+id: D-016
+version: 1
+status: draft
+category: memory-rag
+impacts: [R-400-*, R-700-*]
+```
+
+**Decision.** The memory & knowledge layer SHALL evolve from a flat embedding index toward a **stratified knowledge graph** in ArangoDB with four vertically-linked abstraction layers, queried by an **iterative, deterministic-first retrieval loop** rather than a single-shot top-k similarity lookup:
+
+- **L0 — verbatim**: raw chunks / spans / entity bodies, stored without LLM rewriting, provenance `EXTRACTED`, confidence 1.0.
+- **L1 — structural**: deterministically extracted symbols and relations (AST for the `code` domain via D-004's tree-sitter; frontmatter + headings for specs), provenance `EXTRACTED`.
+- **L2 — semantic**: entities, relations, and topological communities with LLM-generated per-community summaries, provenance `INFERRED`.
+- **L3 — thematic**: cross-cutting themes and recursive summaries, provenance `INFERRED`.
+
+Vertical `derived-from` edges link every higher layer back to its L0 evidence, so the abstraction hierarchy is itself the traceability tree (Principle 2). Retrieval enters at the layer matching the query (thematic → L3, specific → L1/L2), then descends and traverses neighbour-to-neighbour, expanding the working set with **deterministic graph algorithms** (graph traversal / personalized-PageRank-style propagation in AQL) and invoking an LLM only to arbitrate ambiguous descend/stop decisions. The retriever **actively prunes** its working set as it traverses (context-rot mitigation).
+
+**Relationship to D-010.** This decision **extends** D-010; it does not contradict it. D-010 keeps v1 deliberately simple (text embeddings + periodic refresh; "hybrid GraphRAG deferred to v2/v3 only if v1 performance is demonstrably insufficient"). D-016 records that GraphRAG-style direction as the v2+ target and authorises the **v1-compatible subset** to land early, because it improves quality without adding graph-ML complexity:
+
+- **(a) Schema-guided extraction** — the L1 extractor SHALL use a closed entity/relation ontology for the `code` domain (`Function`, `Class`, `Module`, `Requirement`, `Decision`, `Test`, …) instead of the current open-domain extraction, which fragments semantically equivalent relations (the `KILLS`/`KILLED`/`SLAYS` problem). Schema-guided is the right call wherever the ontology is known (per the Iliad open-vs-schema study).
+- **(b) Hybrid retrieval** — BM25 (ArangoSearch) + dense vector, merged by reciprocal rank fusion, replacing the pure-cosine v1 path (R-400-011). BM25 is deterministic and recovers exact matches (IDs, names, `R-NNN`) that dense search misses.
+- **(c) Prompt-cached cumulative chunk contextualisation** — per-chunk context that situates each chunk in its document and resolves anaphora, generated with a small model (Haiku-class) and a cached document prefix (Anthropic "Contextual Retrieval" pattern).
+
+The community/summary layers (L2/L3) and the full iterative loop remain **v2** per D-010's staging gate.
+
+**Rationale.** Specs and code are inherently structured and hierarchical; flat top-k similarity loses global context and cross-references (the well-documented RAG chunking and re-derivation failures). A layered graph traversed iteratively retrieves a small focused subgraph progressively (the "research-in-a-library" model) instead of dumping many chunks at once, which both raises precision and cuts token cost. Anchoring the deterministic layers (L0/L1) and deterministic traversal first keeps the LLM as a last-resort arbiter, consistent with Principle 6 (simplicity) and the operator's deterministic-first preference.
+
+**Consequences.**
+- `400-SPEC-MEMORY-RAG.md` (v3) operationalises the v1-compatible subset (a/b/c) and records the L0–L3 layers + iterative loop as v2 requirements.
+- C7's `kg/extractor.py` migrates from open-domain to schema-guided extraction (v1 dev item).
+- C9 exposes a retrieval tool interface (`search` / `grep` / `read_document` / `prune`) so any retrieval backend (AQL-native today, a dedicated retrieval sub-agent later) is swappable behind a stable contract.
+- Active-pruning and PageRank-style propagation depend on clean L1 edges; schema-guided extraction is therefore a hard prerequisite.
+
+### D-017 — Evaluation as a first-class instrument (graded, provenance-tagged verdicts)
+
+```yaml
+id: D-017
+version: 1
+status: draft
+category: architecture
+impacts: [R-600-*, R-700-*, R-800-*]
+```
+
+**Decision.** The validation layer (C6) SHALL be extended from binary coherence findings to a **three-tier evaluation harness** emitting **graded verdicts**:
+
+- **T1 — deterministic / reference-free**: compile, type-check, lint, tests, coverage, schema conformance, and the existing traceability-coherence checks — graded into a score, not only a pass/fail finding.
+- **T2 — reference-based**: comparison against held-out, versioned golden datasets (structural/semantic match).
+- **T3 — LLM-as-judge**: subjective quality (clarity, completeness, coherence) with rubrics and pairwise comparison.
+
+Every verdict SHALL carry `score ∈ [0,1]`, `confidence`, a `method` provenance tag (`DETERMINISTIC | REFERENCE | JUDGED`), a `rationale`, and cited `evidence`. C6 SHALL persist per-entity (`R-NNN`) quality time series to enable **regression detection** (quality drift between runs), not just point-in-time gates. The T3 judge SHALL run on a **different model family** than the generator under test, exploiting D-011's provider-agnosticism to neutralise self-preference bias. Golden datasets SHALL be held-out and versioned and SHALL NOT be tuned against (anti "teaching-to-the-test").
+
+**Relationship to prior decisions.** Operationalises D-011's "systematic eval harness … scheduled for v2" and gives a home to the direction of Q10 (synthesis) and Q-400-011 (memory). Provider-quality evaluation lives in `800`; generation- and coherence-quality evaluation **extends the C6 plugin contract** (D-003, D-006) in `600`/`700`. The eval anti-gaming rules mirror CLAUDE.md §10/§11.
+
+**Rationale.** Without measurement, every architecture-evolution pattern is an unfalsifiable opinion, and a regulated platform cannot present quality evidence to an auditor (ISO 21434 / ASPICE require measurable validation). A graded, provenance-tagged verdict makes the epistemic status of each measurement explicit (a deterministic coverage number ≠ a judged clarity score) and turns the pattern backlog into a measured, prioritised one.
+
+**Consequences.**
+- `600-SPEC-CODE-QUALITY.md` / `700-SPEC-VERTICAL-COHERENCE.md` (queued) extend the `ValidationPlugin` contract with a graded `Verdict` alongside the existing binary `Finding`.
+- `800-SPEC-LLM-ABSTRACTION.md` (queued) hosts the provider-quality eval harness (resolving Q10).
+- C6 gains a quality-time-series persistence surface (ArangoDB + MinIO evidence per D-018).
+
+### D-018 — Artifact layer: two-tier intent/evidence store on MinIO
+
+```yaml
+id: D-018
+version: 1
+status: draft
+category: architecture
+impacts: [R-100-*, R-400-*]
+```
+
+**Decision.** The MinIO artifact surface SHALL distinguish two artifact classes with different lifecycles:
+
+- **Intent artifacts** (specs, plans, skills, guidance files): **versioned** (bucket versioning enabled), mutable-with-history, long-lived. Reviewed and refactored like code.
+- **Evidence artifacts** (test results, eval verdicts, CI logs, review records, execution traces): **write-once / immutable** (object lock / WORM + retention) — the tamper-evident audit trail.
+
+Every artifact object SHALL carry **provenance metadata** (originating `R-NNN`, producing run id, model/agent, eval verdict reference) that joins it to the ArangoDB knowledge graph (D-016): MinIO holds the blob, ArangoDB holds the edges, the object key is the join. Evidence artifacts feed the evaluation/regression loop (D-017).
+
+**Relationship to prior decisions.** Extends D-013 (which introduced external-source ingestion to MinIO) and the existing artifact surface (R-200-130..147, D-015's `/documents` endpoints). It does not change those flows; it adds the intent/evidence lifecycle distinction and the WORM evidence guarantee on top.
+
+**Rationale.** When agents implement, intent ("why") evaporates unless externalised durably (the "3-month wall"). Splitting intent (versioned, editable) from evidence (immutable) gives both a clean refactor story for intent and a tamper-evident audit trail for evidence — the latter is a hard requirement for ISO 21434 / ASPICE traceability, which WORM object-lock satisfies natively.
+
+**Consequences.**
+- `100-SPEC-ARCHITECTURE.md` / `050-ARCHITECTURE-OVERVIEW.md` (queued) document the two-tier bucket policy and the WORM evidence bucket.
+- `400-SPEC-MEMORY-RAG.md` provenance metadata (R-400-012) is the template for the join keys.
+- Object-lock requires MinIO buckets created with versioning + retention configured at bootstrap (`minio_init`).
+
 ---
 
 ## 6. Document Mapping
@@ -572,7 +662,7 @@ The synthesis-v4 design explicitly notes that the migration target (OpenHands + 
 | Infrastructure | `100-SPEC-ARCHITECTURE.md` | K8s topology, sandboxing, Python/Rust component split, deployment targets, domain-agnostic backbone, env-file architecture (§10) | **v3 delivered** |
 | Pipeline | `200-SPEC-PIPELINE-AGENT.md` | Five-phase pipeline, hard gates, sub-agents, escalation, LLM feature requirements per agent, domain plug-in contract | **v2 delivered** |
 | Requirements mgmt | `300-SPEC-REQUIREMENTS-MGMT.md` | Markdown+YAML storage, StrictDoc tooling, CRUD API, versioning, tailoring enforcement, import/export | **v1 delivered** |
-| Memory / RAG | `400-SPEC-MEMORY-RAG.md` | Graph-backed embeddings, short/long-term memory, external source ingestion, federated retrieval | **v2 delivered** |
+| Memory / RAG | `400-SPEC-MEMORY-RAG.md` | Graph-backed embeddings, short/long-term memory, external source ingestion, federated retrieval; layered knowledge representation + iterative retrieval (D-016) | **v3 (in progress)** |
 | UI / UX | `500-SPEC-UI-UX.md` | Conversational UI, expert mode, structured elicitation, requirements surface, source upload UX | planned (scaffold) |
 | Artifact quality | `600-SPEC-CODE-QUALITY.md` | Domain-specific quality enforcement (TDD for `code`, equivalent per-domain gates), dual review, evidence-based verification | planned (scaffold) |
 | Vertical coherence | `700-SPEC-VERTICAL-COHERENCE.md` | MUST/SHOULD/COULD checks per domain, parser internals, reporting, domain plugin registration | **v3 delivered** |
@@ -612,6 +702,7 @@ The synthesis-v4 design explicitly notes that the migration target (OpenHands + 
 - Embeddings: text-based + periodic refresh
 - External source ingestion: option (i) formats (PDF, MD, TXT, images)
 - Single active LLM provider, swappable
+- Memory (v1-compatible subset of D-016): schema-guided L1 extraction, hybrid BM25+dense+RRF retrieval, prompt-cached cumulative chunk contextualisation
 
 **v2 — Discipline, Intelligence & Documentation domain**
 - `documentation` production domain registered
@@ -622,6 +713,9 @@ The synthesis-v4 design explicitly notes that the migration target (OpenHands + 
 - External source ingestion: option (ii) formats (DOCX, PPTX, XLSX)
 - Eval harness across providers
 - Per-provider prompt library (if regression observed)
+- Memory: layered knowledge graph L2/L3 (communities + summaries) + full iterative retrieval loop (D-016)
+- Evaluation: graded three-tier verdicts + per-entity quality regression detection (D-017)
+- Artifact layer: two-tier intent/evidence MinIO store with WORM evidence bucket (D-018)
 
 **v3 — Optimisation & Presentation domain**
 - `presentation` production domain registered
@@ -638,4 +732,4 @@ The synthesis-v4 design explicitly notes that the migration target (OpenHands + 
 
 ---
 
-**End of 999-SYNTHESIS.md v4.**
+**End of 999-SYNTHESIS.md v6.**

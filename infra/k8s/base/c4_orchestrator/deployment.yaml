@@ -27,6 +27,10 @@ spec:
         app.kubernetes.io/component: c4
         app.kubernetes.io/part-of: aywizz-platform
     spec:
+      # Bind to the SA the K8sDispatcher needs (cross-namespace RBAC
+      # on Pods in c4-workers per `c4_workers/rbac.yaml`). Provisioned
+      # by the c4_workers kustomization.
+      serviceAccountName: c4-orchestrator
       containers:
         - name: api
           image: ghcr.io/sorriso/aywizz-api:latest

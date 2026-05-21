@@ -1,0 +1,245 @@
+# =============================================================================
+# File: c12-workflow-configmap.yaml
+# Path: infra/k8s/base/c12_workflow/c12-workflow-configmap.yaml
+# Description: GENERATED — do not edit by hand. The `c12-workflow-files`
+#              ConfigMap holds every n8n workflow JSON (single source:
+#              infra/c12_workflow/workflows/). Mounted at /workflows by the
+#              c12-workflow Deployment and imported by the c12-workflow-seed
+#              Job. Regenerate with:
+#                python3 infra/c12_workflow/scripts/gen_k8s_workflow_configmap.py
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: c12-workflow-files
+  namespace: aywizz
+  labels:
+    app.kubernetes.io/name: c12-workflow-files
+    app.kubernetes.io/component: c12
+    app.kubernetes.io/part-of: aywizz-platform
+data:
+  chunk_and_track.json: |-
+    {
+      "_comment": "Version: 2 | Path: infra/c12_workflow/workflows/chunk_and_track.json | Description: n8n bootstrap for the async chunking pipeline (D-013/D-016/R-400-208). Webhook -> POST C7 /sources (parse+chunk+embed) -> GET C7 /sources/{id} (status + metadata + processing_version + is_stale) -> IF the source is_stale (its stored processing_version != the pipeline's current one), POST C7 /sources/{id}/reprocess to re-run the pipeline -> respond with status + processing_version + is_stale + reprocess_triggered. v2: re-trigger now calls the real per-source reprocess endpoint (R-400-208) instead of the project-wide /refresh (still a 501 stub), and branches on the server-computed is_stale flag. Import: `docker compose exec c12 n8n import:workflow --input=/workflows/chunk_and_track.json`. @relation implements:R-400-020 @relation implements:R-400-208",
+      "name": "Chunk & track (C12 -> C7 async chunking)",
+      "nodes": [
+        {
+          "parameters": {
+            "httpMethod": "POST",
+            "path": "chunk-and-track",
+            "responseMode": "responseNode",
+            "options": {}
+          },
+          "id": "webhook-chunk-and-track",
+          "name": "Webhook — POST /chunk-and-track",
+          "type": "n8n-nodes-base.webhook",
+          "typeVersion": 2,
+          "position": [240, 360],
+          "webhookId": "chunk-and-track-v1"
+        },
+        {
+          "parameters": {
+            "method": "POST",
+            "url": "=http://c7:8000/api/v1/memory/projects/{{$json.project_id}}/sources",
+            "sendHeaders": true,
+            "headerParameters": {
+              "parameters": [
+                { "name": "X-User-Id", "value": "={{$json.uploaded_by}}" },
+                { "name": "X-Tenant-Id", "value": "={{$json.tenant_id}}" },
+                { "name": "X-User-Roles", "value": "project_editor,project_owner,admin" },
+                { "name": "Content-Type", "value": "application/json" }
+              ]
+            },
+            "sendBody": true,
+            "specifyBody": "json",
+            "jsonBody": "={\n  \"source_id\": \"{{$json.source_id}}\",\n  \"project_id\": \"{{$json.project_id}}\",\n  \"mime_type\": \"text/plain\",\n  \"content\": {{JSON.stringify($json.content)}},\n  \"size_bytes\": {{$json.content.length}},\n  \"uploaded_by\": \"{{$json.uploaded_by}}\"\n}",
+            "options": {}
+          },
+          "id": "trigger-chunking",
+          "name": "Trigger chunking — POST C7 /sources",
+          "type": "n8n-nodes-base.httpRequest",
+          "typeVersion": 4.2,
+          "position": [520, 360]
+        },
+        {
+          "parameters": {
+            "method": "GET",
+            "url": "=http://c7:8000/api/v1/memory/projects/{{$('Webhook — POST /chunk-and-track').item.json.project_id}}/sources/{{$('Webhook — POST /chunk-and-track').item.json.source_id}}",
+            "sendHeaders": true,
+            "headerParameters": {
+              "parameters": [
+                { "name": "X-User-Id", "value": "={{$('Webhook — POST /chunk-and-track').item.json.uploaded_by}}" },
+                { "name": "X-Tenant-Id", "value": "={{$('Webhook — POST /chunk-and-track').item.json.tenant_id}}" },
+                { "name": "X-User-Roles", "value": "project_viewer,project_editor,project_owner,admin" }
+              ]
+            },
+            "options": {}
+          },
+          "id": "read-status",
+          "name": "Read status — GET C7 /sources/{id}",
+          "type": "n8n-nodes-base.httpRequest",
+          "typeVersion": 4.2,
+          "position": [800, 360]
+        },
+        {
+          "parameters": {
+            "conditions": {
+              "options": { "caseSensitive": true, "typeValidation": "loose" },
+              "conditions": [
+                {
+                  "id": "is-stale",
+                  "leftValue": "={{$json.is_stale}}",
+                  "rightValue": "",
+                  "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+                }
+              ],
+              "combinator": "and"
+            },
+            "options": {}
+          },
+          "id": "if-is-stale",
+          "name": "IF source is stale",
+          "type": "n8n-nodes-base.if",
+          "typeVersion": 2,
+          "position": [1080, 360]
+        },
+        {
+          "parameters": {
+            "method": "POST",
+            "url": "=http://c7:8000/api/v1/memory/projects/{{$('Webhook — POST /chunk-and-track').item.json.project_id}}/sources/{{$('Webhook — POST /chunk-and-track').item.json.source_id}}/reprocess",
+            "sendHeaders": true,
+            "headerParameters": {
+              "parameters": [
+                { "name": "X-User-Id", "value": "={{$('Webhook — POST /chunk-and-track').item.json.uploaded_by}}" },
+                { "name": "X-Tenant-Id", "value": "={{$('Webhook — POST /chunk-and-track').item.json.tenant_id}}" },
+                { "name": "X-User-Roles", "value": "project_editor,project_owner,admin" }
+              ]
+            },
+            "options": {}
+          },
+          "id": "retrigger-reprocess",
+          "name": "Re-trigger — POST C7 reprocess",
+          "type": "n8n-nodes-base.httpRequest",
+          "typeVersion": 4.2,
+          "position": [1360, 240]
+        },
+        {
+          "parameters": {
+            "respondWith": "json",
+            "responseBody": "={\n  \"source_id\": \"{{$json.source_id}}\",\n  \"parse_status\": \"{{$json.parse_status}}\",\n  \"chunk_count\": {{$json.chunk_count}},\n  \"processing_version\": \"{{$json.processing_version}}\",\n  \"is_stale\": {{$json.is_stale}},\n  \"reprocess_triggered\": true\n}",
+            "options": {}
+          },
+          "id": "respond-reprocessed",
+          "name": "Respond (reprocess triggered)",
+          "type": "n8n-nodes-base.respondToWebhook",
+          "typeVersion": 1,
+          "position": [1620, 240]
+        },
+        {
+          "parameters": {
+            "respondWith": "json",
+            "responseBody": "={\n  \"source_id\": \"{{$json.source_id}}\",\n  \"parse_status\": \"{{$json.parse_status}}\",\n  \"chunk_count\": {{$json.chunk_count}},\n  \"processing_version\": \"{{$json.processing_version}}\",\n  \"is_stale\": {{$json.is_stale}},\n  \"reprocess_triggered\": false\n}",
+            "options": {}
+          },
+          "id": "respond-up-to-date",
+          "name": "Respond (up to date)",
+          "type": "n8n-nodes-base.respondToWebhook",
+          "typeVersion": 1,
+          "position": [1360, 480]
+        }
+      ],
+      "connections": {
+        "Webhook — POST /chunk-and-track": {
+          "main": [[{ "node": "Trigger chunking — POST C7 /sources", "type": "main", "index": 0 }]]
+        },
+        "Trigger chunking — POST C7 /sources": {
+          "main": [[{ "node": "Read status — GET C7 /sources/{id}", "type": "main", "index": 0 }]]
+        },
+        "Read status — GET C7 /sources/{id}": {
+          "main": [[{ "node": "IF source is stale", "type": "main", "index": 0 }]]
+        },
+        "IF source is stale": {
+          "main": [
+            [{ "node": "Re-trigger — POST C7 reprocess", "type": "main", "index": 0 }],
+            [{ "node": "Respond (up to date)", "type": "main", "index": 0 }]
+          ]
+        },
+        "Re-trigger — POST C7 reprocess": {
+          "main": [[{ "node": "Respond (reprocess triggered)", "type": "main", "index": 0 }]]
+        }
+      },
+      "settings": {},
+      "active": true,
+      "staticData": null,
+      "pinData": {}
+    }
+  ingest_text_source.json: |-
+    {
+      "_comment": "Version: 1 | Path: infra/c12_workflow/workflows/ingest_text_source.json | Description: Minimal n8n workflow that wires the public POST /uploads/ingest-text endpoint to C7's memory-source ingestion API. Demonstrates the C12 -> C7 contract per R-100-081. Import via `docker compose exec c12 n8n import:workflow --input=/workflows/ingest_text_source.json` after bringing the stack up. @relation implements:R-100-080 R-100-081",
+      "name": "Ingest text source (C12 -> C7)",
+      "nodes": [
+        {
+          "parameters": {
+            "httpMethod": "POST",
+            "path": "ingest-text",
+            "responseMode": "responseNode",
+            "options": {}
+          },
+          "id": "webhook-ingest-text",
+          "name": "Webhook — POST /uploads/ingest-text",
+          "type": "n8n-nodes-base.webhook",
+          "typeVersion": 2,
+          "position": [250, 300],
+          "webhookId": "ingest-text-v1"
+        },
+        {
+          "parameters": {
+            "method": "POST",
+            "url": "=http://c7:8000/api/v1/memory/projects/{{$json.project_id}}/sources",
+            "sendHeaders": true,
+            "headerParameters": {
+              "parameters": [
+                { "name": "X-User-Id", "value": "={{$json.uploaded_by}}" },
+                { "name": "X-Tenant-Id", "value": "={{$json.tenant_id}}" },
+                { "name": "X-User-Roles", "value": "project_editor,project_owner,admin" },
+                { "name": "Content-Type", "value": "application/json" }
+              ]
+            },
+            "sendBody": true,
+            "specifyBody": "json",
+            "jsonBody": "={\n  \"source_id\": \"{{$json.source_id}}\",\n  \"project_id\": \"{{$json.project_id}}\",\n  \"mime_type\": \"text/plain\",\n  \"content\": {{JSON.stringify($json.content)}},\n  \"size_bytes\": {{$json.content.length}},\n  \"uploaded_by\": \"{{$json.uploaded_by}}\"\n}",
+            "options": {}
+          },
+          "id": "forward-to-c7",
+          "name": "POST C7 /memory/sources",
+          "type": "n8n-nodes-base.httpRequest",
+          "typeVersion": 4.2,
+          "position": [550, 300]
+        },
+        {
+          "parameters": {
+            "respondWith": "json",
+            "responseBody": "={\n  \"accepted\": true,\n  \"source_id\": \"{{$('forward-to-c7').item.json.source_id}}\",\n  \"chunk_count\": {{$('forward-to-c7').item.json.chunk_count}}\n}",
+            "options": {}
+          },
+          "id": "respond-to-caller",
+          "name": "Respond to caller",
+          "type": "n8n-nodes-base.respondToWebhook",
+          "typeVersion": 1,
+          "position": [850, 300]
+        }
+      ],
+      "connections": {
+        "Webhook — POST /uploads/ingest-text": {
+          "main": [[{ "node": "POST C7 /memory/sources", "type": "main", "index": 0 }]]
+        },
+        "POST C7 /memory/sources": {
+          "main": [[{ "node": "Respond to caller", "type": "main", "index": 0 }]]
+        }
+      },
+      "settings": {},
+      "active": true,
+      "staticData": null,
+      "pinData": {}
+    }

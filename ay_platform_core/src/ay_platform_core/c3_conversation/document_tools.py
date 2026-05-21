@@ -1,6 +1,6 @@
 # =============================================================================
 # File: document_tools.py
-# Version: 3
+# Version: 4
 # Path: ay_platform_core/src/ay_platform_core/c3_conversation/document_tools.py
 # Description: Document tool catalogue + executor for the chat-direct
 #              DocGen path (D-015 / Phase 2.C.2). The C3 conversation
@@ -9,6 +9,12 @@
 #              translates each into an HTTP call against C4's document
 #              CRUD surface (R-200-153..156), forwarding the caller's
 #              forward-auth identity so C4's RBAC + tenant scoping hold.
+#
+#              v4 (2026-05-21): `execute` accepts an optional `turn_id`
+#              (the assistant-response id) and forwards it as the
+#              `X-Turn-Id` header. C4 embeds it in the live-docs commit
+#              message so the tree's per-file version batches by AI
+#              response (one bump per turn — D-015 / R-200-147).
 #
 #              v3 (2026-05-18): `_strip_json_comma_artifacts` — the
 #              real Phase 2.C.3 root cause. qwen2.5:3b emits the
@@ -175,13 +181,23 @@ class DocumentToolClient:
         await self._client.aclose()
 
     def _headers(
-        self, *, user_id: str, tenant_id: str, user_roles: str,
+        self,
+        *,
+        user_id: str,
+        tenant_id: str,
+        user_roles: str,
+        turn_id: str | None = None,
     ) -> dict[str, str]:
-        return {
+        headers = {
             "X-User-Id": user_id,
             "X-Tenant-Id": tenant_id,
             "X-User-Roles": user_roles,
         }
+        # The assistant-response id lets C4 batch the per-file version
+        # by AI response (one bump per turn, even with several writes).
+        if turn_id:
+            headers["X-Turn-Id"] = turn_id
+        return headers
 
     async def execute(
         self,
@@ -192,6 +208,7 @@ class DocumentToolClient:
         user_id: str,
         tenant_id: str,
         user_roles: str,
+        turn_id: str | None = None,
     ) -> dict[str, Any]:
         """Run one tool call. Returns a dict the caller serialises into
         the `tool` role message fed back to the LLM. Never raises for a
@@ -215,7 +232,10 @@ class DocumentToolClient:
             project_id,
         )
         headers = self._headers(
-            user_id=user_id, tenant_id=tenant_id, user_roles=user_roles,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            user_roles=user_roles,
+            turn_id=turn_id,
         )
         base = f"{self._base}/api/v1/projects/{project_id}/documents"
         try:
@@ -283,6 +303,30 @@ class DocumentToolClient:
         if r.status_code == 404:
             return {"error": f"document {path!r} not found"}
         return {"error": f"delete failed: HTTP {r.status_code}"}
+
+    async def read_document_content(
+        self,
+        *,
+        project_id: str,
+        path: str,
+        user_id: str,
+        tenant_id: str,
+        user_roles: str,
+    ) -> tuple[int, str]:
+        """Fetch a live-docs document's full text content. Returns
+        `(status_code, body)` ; on 200 the body is the document text
+        UTF-8 decoded, on a 4xx the body is the JSON error string. Used
+        by the PromptReference resolver (R-200-181) — distinct from the
+        tool surface so its semantics are predictable (no JSON wrapping,
+        no `{"error": ...}` wrapping)."""
+        headers = self._headers(
+            user_id=user_id, tenant_id=tenant_id, user_roles=user_roles,
+        )
+        url = (
+            f"{self._base}/api/v1/projects/{project_id}/documents/{path}"
+        )
+        r = await self._client.get(url, headers=headers)
+        return r.status_code, r.text
 
     # Name → bound-handler dispatch. Keeps `execute` flat (one lookup,
     # one call) so the per-tool HTTP shaping lives in focused methods.

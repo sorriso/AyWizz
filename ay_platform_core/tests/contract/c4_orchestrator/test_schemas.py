@@ -1,8 +1,11 @@
 # =============================================================================
 # File: test_schemas.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/tests/contract/c4_orchestrator/test_schemas.py
 # Description: Contract tests — C4 public schemas + registry + endpoint roster.
+#              v2 aligns EXPECTED with the Tranche-B / sub-agent contracts
+#              registered in contract_registry.py (trace/steer, source-files,
+#              sub-agent bundle).
 # =============================================================================
 
 from __future__ import annotations
@@ -70,6 +73,15 @@ class TestContractRegistration:
         "DocumentUpdate",
         "DocumentRef",
         "DocumentList",
+        # Run trace + steer surface (Tranche B) — E-200-006/007, R-200-203
+        "TraceEvent",
+        "RunSteer",
+        # Source-files surface (Tranche B) — R-200-170..174
+        "SourceTreeNode",
+        "SourceFileMeta",
+        # Sub-agent context bundle contracts — R-200-033
+        "TaskEnvelope",
+        "SubAgentRunReport",
     }
 
     def test_all_expected_contracts_registered(self) -> None:

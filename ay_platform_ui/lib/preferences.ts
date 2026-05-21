@@ -1,12 +1,16 @@
 // =============================================================================
 // File: preferences.ts
-// Version: 1
+// Version: 2
 // Path: ay_platform_ui/lib/preferences.ts
 // Description: User-scoped UI preferences (trigram avatar today, more
 //              fields later). Persisted client-side in localStorage so
 //              each browser keeps its own override per-user (`sub`).
 //              v2 will migrate to a backend C2 `/users/me/preferences`
 //              endpoint when one exists.
+//
+//              v2 (2026-05-21): `workingAreaPaneWidths` — the operator's
+//              chosen pixel widths for the working-area left (tree) and
+//              right (chat) panes, persisted across sessions (#6).
 //
 //              Default trigram derivation (French convention) :
 //                "Jean Dupont"     → "DUJ"   (2 letters of last name + 1 of first)
@@ -21,10 +25,14 @@ import type { JWTClaims } from "./auth";
 
 const PREFS_KEY_PREFIX = "aywizz.prefs.";
 
-/** Persisted prefs shape. v1 has only `trigram` ; add fields here
- *  without changing the wire format on the next iteration. */
+/** Persisted prefs shape. Add fields here without changing the wire
+ *  format on the next iteration. */
 export interface UserPreferences {
   trigram?: string;
+  /** Working-area resizable 3-pane layout : pixel widths of the left
+   *  (file tree) and right (chat) panes ; the middle viewer flexes to
+   *  fill the rest (#6). */
+  workingAreaPaneWidths?: { left: number; right: number };
 }
 
 /** Default trigram from JWT claims. Always returns a 3-4 char ASCII

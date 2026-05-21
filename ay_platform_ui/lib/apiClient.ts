@@ -46,6 +46,7 @@ import type {
   Conversation,
   ConversationList,
   ConversationResponse,
+  DocumentStructuralOpResult,
   Finding,
   FindingPage,
   InlineEvent,
@@ -53,15 +54,22 @@ import type {
   OrchestratorRun,
   OrchestratorRunCreate,
   OrchestratorRunFeedback,
+  OrchestratorRunResumeStrategy,
+  OrchestratorRunSteer,
   PlatformConfig,
   Project,
   ProjectList,
   ProjectUpdate,
+  PromptReference,
   RequirementDocumentDetail,
   RequirementDocumentList,
   RequirementEntityList,
   Source,
+  SourceFileMeta,
   SourceList,
+  SourceStructuralOpResult,
+  SourceTreeResponse,
+  TraceEvent,
   UserPreferencesResponse,
   UserPreferencesUpdate,
   ValidationPlugin,
@@ -398,6 +406,10 @@ export class ApiClient {
        *  tool_call / future). The caller accumulates them and feeds
        *  `<InlineLog>` — one entry point. */
       onInlineEvent?: (evt: InlineEvent) => void;
+      /** Prompt-attached references (R-200-180). Up to 10 entries ;
+       *  server enforces a 32K-token cap on combined resolved
+       *  content (returns 413 on overflow). */
+      references?: PromptReference[];
     } = {},
   ): Promise<void> {
     const url = this.url(`/api/v1/conversations/${encodeURIComponent(conversationId)}/messages`);
@@ -412,6 +424,9 @@ export class ApiClient {
     }
     if (options.projectPrompt != null && options.projectPrompt !== "") {
       body.project_prompt = options.projectPrompt;
+    }
+    if (options.references && options.references.length > 0) {
+      body.references = options.references;
     }
     const resp = await fetch(url, {
       method: "POST",
@@ -607,12 +622,50 @@ export class ApiClient {
 
   /** GET /api/v1/projects/{pid}/git/commits — paginated commit list
    *  proxied from the project's Gitea repo (R-200-147). Returns
-   *  empty when Gitea is not wired or the repo has no commits yet. */
-  async listProjectCommits(projectId: string, page = 1): Promise<ArtifactCommitList> {
+   *  empty when Gitea is not wired or the repo has no commits yet.
+   *  `path` (optional) restricts the list to one file's revision
+   *  history — the source for the "view a previous version" picker. */
+  async listProjectCommits(
+    projectId: string,
+    page = 1,
+    path?: string,
+  ): Promise<ArtifactCommitList> {
+    const pathQ = path ? `&path=${encodeURIComponent(path)}` : "";
     return this.request<ArtifactCommitList>(
-      `/api/v1/projects/${encodeURIComponent(projectId)}/git/commits?page=${page}`,
+      `/api/v1/projects/${encodeURIComponent(projectId)}/git/commits?page=${page}${pathQ}`,
       { method: "GET" },
     );
+  }
+
+  /** GET /api/v1/projects/{pid}/documents/{path}?ref=<sha> — read a
+   *  live-docs document as it existed at a specific commit (R-200-147
+   *  history viewer). Returns the decoded text + content type, same
+   *  shape as `getArtifactBlobText`. */
+  async getDocumentTextAtRef(
+    projectId: string,
+    path: string,
+    ref: string,
+  ): Promise<{ text: string; contentType: string }> {
+    const url = this.url(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/documents/${path
+        .split("/")
+        .map(encodeURIComponent)
+        .join("/")}?ref=${encodeURIComponent(ref)}`,
+    );
+    const headers = new Headers();
+    const token = readStoredToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const resp = await fetch(url, { method: "GET", headers, cache: "no-store" });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      if (resp.status === 401 && token) {
+        _notifySessionRevoked();
+      }
+      throw new ApiError(resp.status, url, body);
+    }
+    const text = await resp.text();
+    const contentType = resp.headers.get("Content-Type") ?? "text/plain";
+    return { text, contentType };
   }
 
   /** Auth-aware download : fetch the blob with `download=1` so the
@@ -652,6 +705,137 @@ export class ApiClient {
   }
 
   // -------------------------------------------------------------------------
+  // C4 — Live-docs operator-driven structural ops (Tranche B §5.17).
+  // R-200-160..164. NOT LLM tools — driven by the tree right-click menu.
+  // -------------------------------------------------------------------------
+
+  /** POST /api/v1/projects/{pid}/documents/mkdir — creates an empty
+   *  directory by writing a `.keep` marker (R-200-161). 409 if the
+   *  path already exists. */
+  async mkdirDocument(projectId: string, path: string): Promise<DocumentStructuralOpResult> {
+    return this.request<DocumentStructuralOpResult>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/documents/mkdir`,
+      { method: "POST", body: JSON.stringify({ path }) },
+    );
+  }
+
+  /** POST /api/v1/projects/{pid}/documents/rename — pure path change.
+   *  Works on files and directories (recursive). 404 / 409 / 400. */
+  async renameDocument(
+    projectId: string,
+    fromPath: string,
+    toPath: string,
+  ): Promise<DocumentStructuralOpResult> {
+    return this.request<DocumentStructuralOpResult>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/documents/rename`,
+      {
+        method: "POST",
+        body: JSON.stringify({ from_path: fromPath, to_path: toPath }),
+      },
+    );
+  }
+
+  /** POST /api/v1/projects/{pid}/documents/move — relocate under a
+   *  different directory. Target = `<to_dir>/<basename(from_path)>`. */
+  async moveDocument(
+    projectId: string,
+    fromPath: string,
+    toDir: string,
+  ): Promise<DocumentStructuralOpResult> {
+    return this.request<DocumentStructuralOpResult>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/documents/move`,
+      {
+        method: "POST",
+        body: JSON.stringify({ from_path: fromPath, to_dir: toDir }),
+      },
+    );
+  }
+
+  /** DELETE /api/v1/projects/{pid}/documents/{path} — remove a
+   *  document from MinIO (Gitea history retained per R-200-155). */
+  async deleteDocument(projectId: string, path: string): Promise<void> {
+    await this.request<void>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/documents/${path
+        .split("/")
+        .map(encodeURIComponent)
+        .join("/")}`,
+      { method: "DELETE" },
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // C4 — Source-files surface (Tranche B §5.18). Tree projection +
+  // operator structural ops + metadata. Scoped to one run_id at a
+  // time (Q-200-017). Editor+ RBAC on mutating endpoints.
+  // -------------------------------------------------------------------------
+
+  /** GET /api/v1/projects/{pid}/source/tree?run_id=... — recursive
+   *  source-files projection (R-200-170). */
+  async getSourceTree(projectId: string, runId: string): Promise<SourceTreeResponse> {
+    return this.request<SourceTreeResponse>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/source/tree?run_id=${encodeURIComponent(runId)}`,
+      { method: "GET" },
+    );
+  }
+
+  async mkdirSource(
+    projectId: string,
+    runId: string,
+    path: string,
+  ): Promise<SourceStructuralOpResult> {
+    return this.request<SourceStructuralOpResult>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/source/mkdir?run_id=${encodeURIComponent(runId)}`,
+      { method: "POST", body: JSON.stringify({ path }) },
+    );
+  }
+
+  async renameSource(
+    projectId: string,
+    runId: string,
+    fromPath: string,
+    toPath: string,
+  ): Promise<SourceStructuralOpResult> {
+    return this.request<SourceStructuralOpResult>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/source/rename?run_id=${encodeURIComponent(runId)}`,
+      { method: "POST", body: JSON.stringify({ from_path: fromPath, to_path: toPath }) },
+    );
+  }
+
+  async moveSource(
+    projectId: string,
+    runId: string,
+    fromPath: string,
+    toDir: string,
+  ): Promise<SourceStructuralOpResult> {
+    return this.request<SourceStructuralOpResult>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/source/move?run_id=${encodeURIComponent(runId)}`,
+      { method: "POST", body: JSON.stringify({ from_path: fromPath, to_dir: toDir }) },
+    );
+  }
+
+  async getSourceFileMeta(projectId: string, runId: string, path: string): Promise<SourceFileMeta> {
+    return this.request<SourceFileMeta>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/source/file/${path
+        .split("/")
+        .map(encodeURIComponent)
+        .join("/")}/meta?run_id=${encodeURIComponent(runId)}`,
+      { method: "GET" },
+    );
+  }
+
+  /** DELETE /api/v1/projects/{pid}/source/file/{path}?run_id=... — remove
+   *  one source file (R-200-175). Editor+ RBAC enforced server-side. */
+  async deleteSourceFile(projectId: string, runId: string, path: string): Promise<void> {
+    await this.request<void>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/source/file/${path
+        .split("/")
+        .map(encodeURIComponent)
+        .join("/")}?run_id=${encodeURIComponent(runId)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  // -------------------------------------------------------------------------
   // C4 — Orchestrator pipeline runs (trigger + plan approval).
   // The Pipeline page POSTs a goal, polls the run, then surfaces the
   // generated files in the Code-source section. Same run_id is reused
@@ -686,6 +870,53 @@ export class ApiClient {
   ): Promise<OrchestratorRun> {
     return this.request<OrchestratorRun>(
       `/api/v1/orchestrator/runs/${encodeURIComponent(runId)}/feedback`,
+      { method: "POST", body: JSON.stringify(payload) },
+    );
+  }
+
+  /** POST /api/v1/orchestrator/runs/{run_id}/resume — admin override
+   *  after a BLOCKED halt. `retry` re-attempts the failing phase ;
+   *  `abort` terminates the run. (`skip-phase` is backend-deferred,
+   *  Q-200-009, and not surfaced in the UI yet.) */
+  async resumeOrchestratorRun(
+    runId: string,
+    strategy: OrchestratorRunResumeStrategy,
+  ): Promise<OrchestratorRun> {
+    return this.request<OrchestratorRun>(
+      `/api/v1/orchestrator/runs/${encodeURIComponent(runId)}/resume`,
+      { method: "POST", body: JSON.stringify({ strategy }) },
+    );
+  }
+
+  /** GET /api/v1/orchestrator/runs/{run_id}/trace — paginated back-in-time
+   *  read of the TraceEvent ledger (R-200-201). `before` is an ISO-8601
+   *  timestamp ; omit to fetch the most-recent slice (mostly redundant with
+   *  `OrchestratorRun.trace`, but useful for explicit refreshes). Newest-first,
+   *  capped at `limit` (server enforces ≤ 200). */
+  async readOrchestratorTrace(
+    runId: string,
+    options: { before?: string; limit?: number } = {},
+  ): Promise<TraceEvent[]> {
+    const params = new URLSearchParams();
+    if (options.before) params.set("before", options.before);
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    const qs = params.toString();
+    return this.request<TraceEvent[]>(
+      `/api/v1/orchestrator/runs/${encodeURIComponent(runId)}/trace${qs ? `?${qs}` : ""}`,
+      { method: "GET" },
+    );
+  }
+
+  /** POST /api/v1/orchestrator/runs/{run_id}/steer — queue an operator
+   *  hint (R-200-202). The hint is consumed at the next phase / sub-agent
+   *  boundary (no mid-LLM-call interruption per R-200-203). Returns 409
+   *  if the run is not RUNNING. */
+  async steerOrchestratorRun(
+    runId: string,
+    payload: OrchestratorRunSteer,
+  ): Promise<OrchestratorRun> {
+    return this.request<OrchestratorRun>(
+      `/api/v1/orchestrator/runs/${encodeURIComponent(runId)}/steer`,
       { method: "POST", body: JSON.stringify(payload) },
     );
   }

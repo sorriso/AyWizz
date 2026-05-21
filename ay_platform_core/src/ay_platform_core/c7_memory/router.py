@@ -32,6 +32,7 @@ from ay_platform_core.c7_memory.models import (
     ChunkPublic,
     EntityEmbedRequest,
     KGExtractionResult,
+    KGSummary,
     QuotaStatus,
     RetrievalRequest,
     RetrievalResponse,
@@ -214,6 +215,21 @@ async def get_source(
 
 
 @router.get(
+    "/api/v1/memory/projects/{project_id}/kg/summary",
+    response_model=KGSummary,
+)
+async def kg_summary(
+    project_id: str,
+    _user: str = Depends(_require_actor),
+    tenant_id: str = Depends(_require_tenant),
+    service: MemoryService = Depends(get_service),
+) -> KGSummary:
+    """Simple graph bootstrap (R-400-200/201): entity/relation counts +
+    a sample of triples with provenance for the project's KG."""
+    return await service.kg_summary(tenant_id, project_id)
+
+
+@router.get(
     "/api/v1/memory/projects/{project_id}/sources/{source_id}/blob",
     responses={
         200: {"description": "Raw source bytes streamed back to the caller."},
@@ -261,6 +277,27 @@ async def delete_source(
     # R-400-070: source deletion requires project_owner or admin.
     _require_role(x_user_roles, required=("project_owner", "admin"))
     await service.delete_source(tenant_id, project_id, source_id)
+
+
+@router.post(
+    "/api/v1/memory/projects/{project_id}/sources/{source_id}/reprocess",
+    response_model=SourcePublic,
+)
+async def reprocess_source(
+    project_id: str,
+    source_id: str,
+    _user: str = Depends(_require_actor),
+    tenant_id: str = Depends(_require_tenant),
+    x_user_roles: str | None = Header(default=None),
+    service: MemoryService = Depends(get_service),
+) -> SourcePublic:
+    # R-400-208: re-running the pipeline is a write — same gate as upload.
+    _require_role(
+        x_user_roles, required=("project_editor", "project_owner", "admin")
+    )
+    return await service.reprocess_source(
+        tenant_id=tenant_id, project_id=project_id, source_id=source_id,
+    )
 
 
 # ---------------------------------------------------------------------------

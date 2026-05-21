@@ -145,6 +145,7 @@ async def send_message(
         user_roles=x_user_roles,
         user_prompt=payload.user_prompt,
         project_prompt=payload.project_prompt,
+        references=payload.references,
     )
     return StreamingResponse(stream, media_type="text/event-stream")
 

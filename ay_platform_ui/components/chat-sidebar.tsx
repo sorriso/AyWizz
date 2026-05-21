@@ -1,7 +1,19 @@
 // =============================================================================
 // File: chat-sidebar.tsx
-// Version: 5
+// Version: 7
 // Path: ay_platform_ui/components/chat-sidebar.tsx
+//
+// v7 (2026-05-19): composer draft is per-conversation (keyed by
+// active conversation id via the store's setDraft) — fixes a draft
+// bleeding into a freshly-created / other conversation. Loaded on
+// conversation switch ; empty for a conversation with no draft.
+//
+// v6 (2026-05-19): Increment 3b.1 — the SSE send-loop + its live
+// state (streaming / liveAssistant / liveEvents) are now
+// PROVIDER-owned per conversation (`useWorkspaceSend` +
+// `useConvRuntime`). A generation keeps running and stays visible
+// when this sidebar unmounts on tab nav ; a turnSeq effect refetches
+// the canonical rows on completion (even after a remount).
 //
 // v5 (2026-05-19): Increment 3a follow-on — composer draft + active
 // conversation mirrored into the cross-nav WorkspaceProvider store
@@ -53,10 +65,11 @@
 "use client";
 
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useProjectUi } from "@/app/(protected)/workspace-store";
+import { useConvRuntime, useProjectUi, useWorkspaceSend } from "@/app/(protected)/workspace-store";
 import { InlineLog } from "@/components/inline-log";
+import { ReferenceTray } from "@/components/reference-tray";
 import { ApiClient, ApiError } from "@/lib/apiClient";
-import type { Conversation, InlineEvent, Message, PlatformConfig } from "@/lib/types";
+import type { Conversation, Message, PlatformConfig, PromptReference } from "@/lib/types";
 
 const _DEFAULT_TITLE = "New conversation";
 
@@ -85,6 +98,13 @@ export interface ChatSidebarProps {
    *  (create / update / delete) succeeds, so the parent can refresh
    *  the document tree without a manual reload. */
   onDocsMutated?: () => void;
+  /** Operator-attached prompt references (R-200-180 / R-500-012).
+   *  Parent owns the list ; sidebar renders the tray + forwards them
+   *  to `send` ; `onClearReferences` is called after a successful
+   *  send so the parent can drop them. */
+  references?: PromptReference[];
+  onClearReferences?: () => void;
+  onRemoveReference?: (index: number) => void;
 }
 
 interface State {
@@ -102,24 +122,32 @@ export function ChatSidebar({
   onClearQuote,
   initialConversationId,
   onDocsMutated,
+  references,
+  onClearReferences,
+  onRemoveReference,
 }: ChatSidebarProps) {
   const apiClient = useMemo(() => new ApiClient(cfg), [cfg]);
   // Cross-tab-nav UI store (Increment 3a). Mirror pattern : local
   // state stays authoritative ; restore once on hydration, persist
   // on change. Survives tab switch + F5 (sessionStorage). UI-only —
   // the audit trail stays the server-side `events` ledger.
-  const { ui, setUi } = useProjectUi(projectId);
-  const composerRestoredRef = useRef(false);
+  const { ui, setUi, setDraft } = useProjectUi(projectId);
+  const loadedDraftForRef = useRef<string | null>(null);
   const convRestoredRef = useRef(false);
   const [state, setState] = useState<State>({ status: "loading" });
   const [composer, setComposer] = useState("");
-  const [streaming, setStreaming] = useState(false);
-  const [liveAssistant, setLiveAssistant] = useState<string | null>(null);
-  // Unified inline-activity for the in-flight turn (stages +
-  // tool calls + future kinds), accumulated across the
-  // conversation's turns and rendered through <InlineLog>. Reset on
-  // conversation switch only (see the messages-refresh effect).
-  const [liveEvents, setLiveEvents] = useState<InlineEvent[]>([]);
+  // Increment 3b : the SSE loop + its live state are PROVIDER-owned
+  // (keyed by conversation), so a generation keeps running and stays
+  // observable when this sidebar unmounts on tab nav. We only read
+  // the runtime here ; `liveEvents` accumulates per-conversation in
+  // the provider so switching conversation needs no manual reset.
+  const send = useWorkspaceSend();
+  const activeId = state.status === "ready" ? (state.activeId ?? null) : null;
+  const rt = useConvRuntime(activeId ?? "");
+  const streaming = rt.streaming;
+  const liveAssistant = rt.liveAssistant;
+  const liveEvents = rt.liveEvents;
+  const lastTurnSeqRef = useRef(0);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   // Load conversations on mount. NO auto-create — that masks the
@@ -164,15 +192,11 @@ export function ChatSidebar({
     };
   }, [apiClient, projectId, initialConversationId]);
 
-  // Whenever the active conversation changes, refresh its messages
-  // and drop the tool-call strip — those events are per-session
-  // telemetry (not persisted server-side), so they only make sense
-  // for the conversation that produced them. Switching away clears
-  // them ; staying in the same conversation accumulates across turns
-  // (see onSend — no per-send reset).
+  // Whenever the active conversation changes, refresh its messages.
+  // (Inline-activity is per-conversation in the provider runtime —
+  // switching conversation just reads the other slice, no reset.)
   useEffect(() => {
     if (state.status !== "ready" || !state.activeId) return;
-    setLiveEvents([]);
     let cancelled = false;
     apiClient
       .listMessages(state.activeId)
@@ -189,20 +213,28 @@ export function ChatSidebar({
     };
   }, [apiClient, state.status, state.activeId]);
 
-  // RESTORE composer draft once the store hydrates (only if the
-  // operator hasn't already typed something this mount).
+  // LOAD the active conversation's own draft : on conversation
+  // switch (and once after hydration for the current one). A new /
+  // other conversation has no entry → empty composer (fixes the
+  // draft bleeding across conversations). `loadedDraftForRef`
+  // ensures we don't clobber what the operator is typing.
   useEffect(() => {
-    if (composerRestoredRef.current) return;
-    if (ui.composerDraft && composer === "") {
-      composerRestoredRef.current = true;
-      setComposer(ui.composerDraft);
+    if (!activeId) return;
+    const stored = ui.composerDrafts[activeId] ?? "";
+    if (loadedDraftForRef.current !== activeId) {
+      loadedDraftForRef.current = activeId;
+      setComposer(stored);
+    } else if (composer === "" && stored !== "") {
+      // Hydration landed after we loaded an empty draft and the
+      // operator hasn't typed yet — adopt the restored draft.
+      setComposer(stored);
     }
-  }, [ui.composerDraft, composer]);
+  }, [activeId, ui.composerDrafts, composer]);
 
-  // PERSIST composer draft (survives tab switch / F5).
+  // PERSIST the draft under the active conversation's id.
   useEffect(() => {
-    setUi({ composerDraft: composer });
-  }, [composer, setUi]);
+    if (activeId) setDraft(activeId, composer);
+  }, [activeId, composer, setDraft]);
 
   // RESTORE the last active conversation once : only when there is
   // no explicit `?conv=` URL pre-selection, the stored id still
@@ -270,6 +302,7 @@ export function ChatSidebar({
       if (state.status !== "ready" || !state.activeId) return;
       const trimmed = composer.trim();
       if (!trimmed || streaming) return;
+      const conversationId = state.activeId;
       const quotePrefix = quoted
         ? `> from \`${quoted.path}\`\n${quoted.text
             .split("\n")
@@ -279,16 +312,13 @@ export function ChatSidebar({
       const payload = `${quotePrefix}${trimmed}`;
       setComposer("");
       onClearQuote();
-      setStreaming(true);
-      setLiveAssistant("");
-      // NOTE: deliberately NOT clearing `liveEvents` here — the
-      // operator wants the full inline activity for the conversation,
-      // not just the latest turn. It's reset only on conversation
-      // switch (see the messages-refresh effect).
-      // Optimistic append of the user message.
+      // Optimistic user row (cosmetic — the turnSeq refetch effect
+      // replaces it with the canonical server rows). If this sidebar
+      // unmounts mid-turn it's irrelevant ; the server has the real
+      // message and the provider keeps the SSE running.
       const optimisticUser: Message = {
         id: `opt-${Date.now()}`,
-        conversation_id: state.activeId,
+        conversation_id: conversationId,
         role: "user",
         content: payload,
         timestamp: new Date().toISOString(),
@@ -298,61 +328,56 @@ export function ChatSidebar({
           ? { ...prev, messages: [...(prev.messages ?? []), optimisticUser] }
           : prev,
       );
-      try {
-        let buffer = "";
-        let mutated = false;
-        await apiClient.sendMessageStream(
-          state.activeId,
-          payload,
-          (chunk) => {
-            buffer += chunk;
-            setLiveAssistant(buffer);
-          },
-          {
-            onInlineEvent: (evt) => {
-              setLiveEvents((prev) => [...prev, evt]);
-              // Refresh the document tree as soon as a mutating tool
-              // finishes — don't wait for stream end and don't gate on
-              // `ok` (qwen's ok flag is unreliable ; a harmless extra
-              // refetch is better than a missed update). `mutated`
-              // also flips so the post-stream safety-net refetch fires
-              // even if every per-event refresh was somehow dropped.
-              if (
-                evt.kind === "tool_call" &&
-                evt.status === "done" &&
-                (evt.name === "create_document" ||
-                  evt.name === "update_document" ||
-                  evt.name === "delete_document")
-              ) {
-                mutated = true;
-                onDocsMutated?.();
-              }
-            },
-          },
-        );
-        if (mutated) onDocsMutated?.();
-        // Refresh to pick up the canonical server rows (which replace
-        // the optimistic user + the live assistant).
-        const fresh = await apiClient.listMessages(state.activeId);
-        setState((prev) =>
-          prev.status === "ready" ? { ...prev, messages: fresh.messages } : prev,
-        );
-      } catch (err) {
-        setState((prev) =>
-          prev.status === "ready"
-            ? {
-                ...prev,
-                error: err instanceof ApiError ? `Send failed (${err.status})` : String(err),
-              }
-            : prev,
-        );
-      } finally {
-        setLiveAssistant(null);
-        setStreaming(false);
+      // PROVIDER-owned SSE loop : survives this component unmounting.
+      // Not awaited — the runtime (`rt`) drives the live UI ; the
+      // turnSeq effect refetches the canonical rows on completion.
+      void send({
+        cfg,
+        conversationId,
+        payload,
+        references: references && references.length > 0 ? references : undefined,
+        onMutatingTool: onDocsMutated,
+      });
+      if (references && references.length > 0 && onClearReferences) {
+        onClearReferences();
       }
     },
-    [apiClient, composer, quoted, onClearQuote, state, streaming, onDocsMutated],
+    [
+      composer,
+      quoted,
+      onClearQuote,
+      state,
+      streaming,
+      send,
+      cfg,
+      onDocsMutated,
+      references,
+      onClearReferences,
+    ],
   );
+
+  // Post-turn refresh : when the provider finishes a turn for the
+  // active conversation (turnSeq bumps), pull the canonical server
+  // rows (replacing the optimistic user + the cleared live row).
+  // Fires on remount too if a turn completed while we were away.
+  useEffect(() => {
+    if (state.status !== "ready" || !state.activeId) return;
+    if (rt.turnSeq === lastTurnSeqRef.current) return;
+    lastTurnSeqRef.current = rt.turnSeq;
+    if (rt.turnSeq === 0) return;
+    const cid = state.activeId;
+    let cancelled = false;
+    apiClient
+      .listMessages(cid)
+      .then((resp) => {
+        if (cancelled) return;
+        setState((prev) => (prev.status === "ready" ? { ...prev, messages: resp.messages } : prev));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [rt.turnSeq, state, apiClient]);
 
   if (state.status === "loading") {
     return <p className="px-4 py-6 text-sm text-neutral-500">Loading conversations…</p>;
@@ -412,21 +437,11 @@ export function ChatSidebar({
 
       <ol className="flex-1 min-h-0 overflow-y-auto px-3 py-3" data-testid="chat-messages">
         {(state.messages ?? []).map((m) => (
-          <MessageRow
-            key={m.id}
-            message={m}
-            projectId={projectId}
-            conversationId={state.activeId ?? undefined}
-          />
+          <MessageRow key={m.id} message={m} />
         ))}
         {liveEvents.length > 0 && (
           <li className="mb-2 list-none">
-            <InlineLog
-              events={liveEvents}
-              projectId={projectId}
-              conversationId={state.activeId ?? undefined}
-              hideOpenLink
-            />
+            <InlineLog events={liveEvents} />
           </li>
         )}
         {liveAssistant !== null && liveAssistant.length > 0 && (
@@ -485,6 +500,9 @@ export function ChatSidebar({
         onSubmit={onSend}
         className="border-t border-neutral-200 bg-white p-3 dark:border-neutral-700 dark:bg-neutral-900"
       >
+        {references && references.length > 0 && (
+          <ReferenceTray references={references} onRemove={(idx) => onRemoveReference?.(idx)} />
+        )}
         <textarea
           value={composer}
           onChange={(e) => setComposer(e.target.value)}
@@ -511,15 +529,7 @@ export function ChatSidebar({
   );
 }
 
-function MessageRow({
-  message,
-  projectId,
-  conversationId,
-}: {
-  message: Message;
-  projectId?: string;
-  conversationId?: string;
-}) {
+function MessageRow({ message }: { message: Message }) {
   const isUser = message.role === "user";
   return (
     <li
@@ -536,12 +546,7 @@ function MessageRow({
           the server on reload, identical to the live render. */}
       {!isUser && message.events && message.events.length > 0 ? (
         <div className="mt-2">
-          <InlineLog
-            events={message.events}
-            projectId={projectId}
-            conversationId={conversationId}
-            hideOpenLink
-          />
+          <InlineLog events={message.events} />
         </div>
       ) : null}
     </li>

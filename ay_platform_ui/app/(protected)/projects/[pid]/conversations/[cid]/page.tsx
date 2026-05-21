@@ -1,7 +1,20 @@
 // =============================================================================
 // File: page.tsx
-// Version: 14
+// Version: 16
 // Path: ay_platform_ui/app/(protected)/projects/[pid]/conversations/[cid]/page.tsx
+//
+// v16 (2026-05-19): Increment 3b.2 — SSE loop delegated to the
+// provider's `send`. A generation now survives navigating AWAY from
+// this `[cid]` route (changing tab / leaving via breadcrumb). A
+// turnSeq effect refetches the canonical rows, flashes the
+// "terminée" cue and refocuses the composer on completion ; rt.error
+// is surfaced via the existing error slot.
+//
+// v15 (2026-05-19): composer draft is per-conversation (store
+// `setDraft(conversationId, …)`) — no bleed across conversations.
+// Breadcrumb `onClick` clears removed : the list no longer
+// auto-redirects (trap fixed), so the marker must persist for the
+// list's "↩ Resume last conversation" link.
 //
 // v14 (2026-05-19): Increment 3a — marks this conversation active
 // in the cross-nav store (so re-entering the Conversations tab
@@ -116,9 +129,9 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { useProjectUi } from "@/app/(protected)/workspace-store";
+import { useConvRuntime, useProjectUi, useWorkspaceSend } from "@/app/(protected)/workspace-store";
 import { Avatar, ThinkingDots } from "@/components/avatar";
-import { InlineLog } from "@/components/inline-log";
+import { InlineLog, ModifiedDocsLinks } from "@/components/inline-log";
 import { ApiClient, ApiError } from "@/lib/apiClient";
 import { fullNameForTooltip, getEffectiveTrigram } from "@/lib/preferences";
 import type { Conversation, InlineEvent, Message, MessageRole } from "@/lib/types";
@@ -162,17 +175,21 @@ export default function ChatPage() {
   // Cross-nav store (Increment 3a). Mark THIS conversation active so
   // returning to the Conversations tab resumes it (the list page
   // reads `activeConversationId`). Composer draft persisted too.
-  const { ui, setUi } = useProjectUi(projectId);
+  const { ui, setUi, setDraft } = useProjectUi(projectId);
   const composerRestoredRef = useRef(false);
   const [state, setState] = useState<LoadState>({ status: "loading" });
   const [composer, setComposer] = useState("");
-  const [streaming, setStreaming] = useState(false);
-  const [liveAssistant, setLiveAssistant] = useState<string | null>(null);
-  // Unified inline-activity for the in-flight turn (stages + tool
-  // calls + future kinds), accumulated across this conversation's
-  // turns and rendered via <InlineLog>. The persisted copy lands in
-  // each assistant message's `events` (audit ledger) on reload.
-  const [liveEvents, setLiveEvents] = useState<InlineEvent[]>([]);
+  // Increment 3b.2 : SSE + its live state are PROVIDER-owned per
+  // conversation, so a generation keeps running and stays observable
+  // when the operator navigates AWAY from this `[cid]` route. We
+  // read the runtime here ; `liveEvents` accumulates per-conv inside
+  // the provider (audit trail still the server `events` ledger).
+  const send = useWorkspaceSend();
+  const rt = useConvRuntime(conversationId);
+  const streaming = rt.streaming;
+  const liveAssistant = rt.liveAssistant;
+  const liveEvents = rt.liveEvents;
+  const lastTurnSeqRef = useRef(0);
   const [error, setError] = useState<string | null>(null);
   // Behavioural prompts resolved by C2 — fetched once on mount and
   // forwarded on every chat message. `null` means "not yet loaded" ;
@@ -309,28 +326,51 @@ export default function ChatPage() {
     return () => clearTimeout(t);
   }, [justFinished]);
 
-  // Mark this conversation active for the cross-nav store so the
-  // Conversations tab resumes it (the list page auto-redirects).
+  // Mark this conversation as the "last active" one so the
+  // Conversations list can offer a user-initiated resume link (no
+  // auto-redirect — that was a trap).
   useEffect(() => {
     setUi({ activeConversationId: conversationId });
   }, [conversationId, setUi]);
 
-  // RESTORE composer draft once the store hydrates (only if the
-  // operator hasn't started typing this mount). PERSIST on change.
+  // RESTORE this conversation's OWN draft once the store hydrates
+  // (only if the operator hasn't started typing). PERSIST under the
+  // conversation id so it never bleeds into another conversation.
   useEffect(() => {
     if (composerRestoredRef.current) return;
-    if (ui.composerDraft && composer === "") {
+    const stored = ui.composerDrafts[conversationId] ?? "";
+    if (stored && composer === "") {
       composerRestoredRef.current = true;
-      setComposer(ui.composerDraft);
+      setComposer(stored);
     }
-  }, [ui.composerDraft, composer]);
+  }, [ui.composerDrafts, conversationId, composer]);
   useEffect(() => {
-    setUi({ composerDraft: composer });
-  }, [composer, setUi]);
+    setDraft(conversationId, composer);
+  }, [conversationId, composer, setDraft]);
 
-  async function onSend(e: FormEvent<HTMLFormElement>): Promise<void> {
+  // Provider-driven end-of-turn : when a turn completes for this
+  // conversation (turnSeq bumps), refetch the canonical rows, flash
+  // the "terminée — à vous" cue and refocus the composer. Fires on
+  // remount too if a turn completed while we were on another route.
+  useEffect(() => {
+    if (rt.turnSeq === lastTurnSeqRef.current) return;
+    lastTurnSeqRef.current = rt.turnSeq;
+    if (rt.turnSeq === 0) return;
+    void loadAll();
+    setJustFinished(true);
+    composerRef.current?.focus();
+  }, [rt.turnSeq, loadAll]);
+
+  // Surface provider-side send errors (401/429/network) so the
+  // operator sees them in the existing error slot.
+  useEffect(() => {
+    if (rt.error) setError(`Send failed: ${rt.error}`);
+  }, [rt.error]);
+
+  function onSend(e: FormEvent<HTMLFormElement>): void {
     e.preventDefault();
-    if (!apiClient || !composer.trim() || streaming) return;
+    if (!apiClient || configState.status !== "ready") return;
+    if (!composer.trim() || streaming) return;
     if (state.status !== "ready") return;
 
     const userText = composer.trim();
@@ -341,12 +381,9 @@ export default function ChatPage() {
     // assistant) pair has arrived and the live row should be hidden.
     messageCountAtSendRef.current = state.messages.length;
 
-    // First-message auto-rename : if the conversation is still on its
-    // placeholder title (set by the conversations list page when the
-    // user clicked "+ New conversation"), derive a meaningful title
-    // from the first user message and persist it. Fires AFTER the
-    // optimistic update but BEFORE the SSE stream — the rename is
-    // best-effort and never blocks the chat (errors swallowed).
+    // First-message auto-rename : best-effort, fire-and-forget. The
+    // PATCH runs even if this page unmounts (httpx in flight) — UI
+    // catches up on the next mount via getConversation.
     const isPlaceholderTitle = state.conversation.title === DEFAULT_NEW_CONVERSATION_TITLE;
     if (isPlaceholderTitle) {
       const derived = deriveTitleFromMessage(userText);
@@ -364,9 +401,10 @@ export default function ChatPage() {
         });
     }
 
-    // Optimistically append the user message to the visible list so
-    // it shows up immediately. The server response will replace it
-    // when we re-fetch after the stream ends.
+    // Optimistic user row (cosmetic — the turnSeq effect refetches
+    // the canonical server rows on completion ; if this page
+    // unmounts mid-turn it's irrelevant, the server has the real
+    // message and the provider keeps the SSE alive).
     const optimisticUser: Message = {
       id: `optimistic-${Date.now()}`,
       conversation_id: conversationId,
@@ -378,63 +416,18 @@ export default function ChatPage() {
       ...state,
       messages: [...state.messages, optimisticUser],
     });
-
-    setStreaming(true);
     setJustFinished(false);
-    setLiveAssistant("");
-    // Inline-activity accumulates across this conversation's turns
-    // (the operator wants the full trail). It resets naturally when
-    // the route changes to another conversation — this page is
-    // per-`[cid]` so a different conversation remounts the component.
-    try {
-      await apiClient.sendMessageStream(
-        conversationId,
-        userText,
-        (chunk) => {
-          setLiveAssistant((prev) => (prev ?? "") + chunk);
-        },
-        {
-          userPrompt,
-          projectPrompt,
-          onInlineEvent: (evt) => {
-            // Append every kind ; <InlineLog> groups + formats. For
-            // stages, collapse a `done` onto its matching `running`
-            // (same kind+name) so a phase shows one in-place row.
-            setLiveEvents((prev) => {
-              if (evt.kind === "stage" && evt.status === "done") {
-                const idx = prev.findIndex(
-                  (e) => e.kind === "stage" && e.name === evt.name && e.status === "running",
-                );
-                if (idx !== -1) {
-                  const next = prev.slice();
-                  next[idx] = evt;
-                  return next;
-                }
-              }
-              return [...prev, evt];
-            });
-          },
-        },
-      );
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setError(`Send failed: ${message}`);
-    } finally {
-      setStreaming(false);
-      // Keep liveAssistant + liveEvents visible briefly so the inline
-      // log survives the re-fetch ; loadAll overwrites the optimistic
-      // messages, then we clear the transient assistant text. The
-      // persisted `events` ledger then drives the render. We DO NOT
-      // clear `liveEvents` here so the user can still inspect the
-      // turn ; navigating away resets the component naturally.
-      await loadAll();
-      setLiveAssistant(null);
-      // Explicit end-of-turn signal + hand control back : flash the
-      // "terminé — à vous" cue and refocus the composer so the
-      // cursor is tangibly back with the operator.
-      setJustFinished(true);
-      composerRef.current?.focus();
-    }
+
+    // PROVIDER-owned SSE loop : survives this route unmounting.
+    // Not awaited — the runtime drives the live UI ; the turnSeq
+    // effect refocuses + refetches messages on completion.
+    void send({
+      cfg: configState.config,
+      conversationId,
+      payload: userText,
+      userPrompt,
+      projectPrompt,
+    });
   }
 
   if (state.status === "loading") {
@@ -451,7 +444,6 @@ export default function ChatPage() {
         <h2 className="text-2xl font-semibold">Conversation not found</h2>
         <Link
           href={`/projects/${encodeURIComponent(projectId)}/conversations`}
-          onClick={() => setUi({ activeConversationId: null })}
           className="mt-6 inline-block rounded-md border border-neutral-300 px-3 py-1.5 text-sm text-neutral-700 hover:bg-neutral-50"
         >
           ← Back to conversations
@@ -522,7 +514,6 @@ export default function ChatPage() {
           <nav className="text-xs text-neutral-500" aria-label="Breadcrumb">
             <Link
               href={`/projects/${encodeURIComponent(projectId)}/conversations`}
-              onClick={() => setUi({ activeConversationId: null })}
               className="hover:underline"
             >
               ← Conversations
@@ -710,9 +701,15 @@ function MessageBubble({
         {/* Unified inline-activity log (stages + tool calls + future
             kinds) — live for the in-flight turn, persisted audit
             ledger on reload. One formatter registry. */}
-        {inlineEvents.length > 0 ? (
-          <InlineLog events={inlineEvents} projectId={projectId} conversationId={conversationId} />
-        ) : null}
+        {inlineEvents.length > 0 ? <InlineLog events={inlineEvents} /> : null}
+        {/* #5 — below the response, a compact versioned deep-link per
+            modified document (the inline log itself no longer carries
+            per-tool links). */}
+        <ModifiedDocsLinks
+          events={inlineEvents}
+          projectId={projectId}
+          conversationId={conversationId}
+        />
       </div>
     </div>
   );

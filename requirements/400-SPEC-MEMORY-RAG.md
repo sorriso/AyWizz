@@ -1,10 +1,10 @@
 ---
 document: 400-SPEC-MEMORY-RAG
-version: 2
+version: 5
 path: requirements/400-SPEC-MEMORY-RAG.md
 language: en
 status: draft
-derives-from: [D-002, D-010, D-013]
+derives-from: [D-002, D-010, D-013, D-016]
 ---
 
 # Memory & RAG Specification
@@ -12,6 +12,10 @@ derives-from: [D-002, D-010, D-013]
 > **STATUS: draft v2 — first populated pass.** Derives from D-002 (stack reuse: ArangoDB for both vector and graph), D-010 (graph-backed embeddings, text-only, no node2vec in v1), D-013 (external-source ingestion via C12 + C7). AyExtractor informs the structural patterns (dual-store mental model, chunking, decontextualization) but v1 is deliberately simpler: a single ArangoDB instance, text embeddings only, linear chunking, federated read across two logical indexes.
 >
 > Open questions in §7 gate any production deployment. Alignment with the `references/data-Extractor-specifications.md` sections §26 (RAG), §29 (embedding), §30.6/§30.7 (store interfaces) is the explicit source for future enrichments.
+>
+> **STATUS: draft v3 — D-016 evolution.** §4.9 adds the layered knowledge representation + iterative deterministic-first retrieval direction (D-016), staged: the **v1-compatible subset** (schema-guided L1 extraction `R-400-200`, provenance/confidence `R-400-201`, hybrid BM25+dense+RRF `R-400-202`, prompt-cached cumulative contextualisation `R-400-203`, C9 retrieval tool interface `R-400-204`) lands now; the **v2 scope** (L0–L3 layered graph `R-400-205`, iterative traversal + active pruning `R-400-206`) is recorded but gated by D-010's "GraphRAG deferred unless v1 is demonstrably insufficient". Evaluation of retrieval quality is owned by D-017 (see Q-400-011).
+>
+> **STATUS: draft v4 — reproducible rebuild.** `R-400-207` mandates that **all** processing outputs (parsed text, chunks, contextualised chunks, embeddings, extracted KG triples) be persisted as durable MinIO artifacts, so the vector store and the graph store rebuild by **replay** without re-invoking any embedding model or LLM. `E-400-003` (v2) adds the `embeddings.json` / `kg.json` source paths. This makes the databases projections of the artifact layer (D-018) and keeps the LLM-based KG extraction (R-400-200) reproducible.
 
 ---
 
@@ -55,6 +59,7 @@ This document specifies the **Memory Service (C7)** and the ingestion pipeline t
 | D-002 (stack reuse) | ArangoDB hosts both the embeddings (vector) and the entity/source graph (unified). No ChromaDB / Qdrant / Neo4j in v1. |
 | D-010 (graph-backed embeddings, approach A + α) | Text embeddings only; no graph neural embeddings. Refresh strategy α: periodic (cron-triggered or commit-triggered); no online fine-tuning. |
 | D-013 (external source ingestion) | v1 formats = PDF, Markdown, TXT, images (with optional OCR). C12 receives uploads, dispatches parsing jobs; C7 computes embeddings and indexes. Federated retrieval with separated indexes preserves provenance. |
+| D-016 (layered KG + iterative retrieval) | §4.9 operationalises the v1-compatible subset (schema-guided L1 extraction, provenance/confidence, hybrid BM25+dense+RRF, prompt-cached contextualisation, C9 retrieval tool interface); the L0–L3 layered graph and iterative traversal are recorded as v2 scope, gated by D-010. |
 
 ---
 
@@ -464,6 +469,140 @@ Cross-tenant retrieval is PROHIBITED. A query scoped to a project SHALL only con
 
 ---
 
+### 4.9 Layered knowledge representation & iterative retrieval (D-016)
+
+> This subsection operationalises **D-016**. `R-400-200`..`R-400-204` are the **v1-compatible subset** (no graph-ML, no community detection — quality improvements over the flat v1 path). `R-400-205`..`R-400-206` record the **v2 scope** (layered graph + iterative loop), gated by D-010. They are stated here so the v1 contracts (extraction schema, provenance fields, retrieval tool interface) are designed forward-compatibly, not so they are implemented in v1.
+
+#### R-400-200
+
+```yaml
+id: R-400-200
+version: 2
+status: draft
+category: functional
+derives-from: [D-016]
+```
+
+The **structural (L1) extractor that operates over artifacts whose ontology is known a priori** — primarily the project's own `code` and `requirements` corpus — SHALL constrain extraction to a **closed, domain-specific ontology** (for the `code` domain: the entity and relation types declared in E-400-006), validated against a Pydantic schema. An extraction whose entity type or relation type is not in the ontology SHALL be rejected, NOT silently coerced or stored as a free-form type.
+
+**Rationale.** Open-domain extraction fragments semantically equivalent relations (the `KILLS` / `KILLED` / `SLAYS` problem observed in the Iliad open-vs-schema study), which degrades both queryability and downstream community detection. Where the ontology is known (the project's own code/requirements structural graph), schema-guided extraction is the correct choice.
+
+**Scope note.** The C7 **external-source extractor** (`c7_memory/kg/extractor.py`), which extracts knowledge from *arbitrary uploaded documents* whose domain is not known a priori, is a **distinct component** and is NOT governed by this requirement: per the same open-vs-schema guidance, open-domain extraction (or the hybrid two-pass: open-domain discovery → ontology refinement → schema-guided pass) is the appropriate choice there. R-400-200 governs the known-ontology structural extractor over the project's own artifacts; it is therefore a **new component**, not a migration of the existing document extractor.
+
+#### R-400-201
+
+```yaml
+id: R-400-201
+version: 1
+status: draft
+category: functional
+derives-from: [D-016]
+```
+
+Every extracted knowledge node and edge SHALL carry a `provenance` field with value in `{EXTRACTED, INFERRED}` and a `confidence` field in `[0.0, 1.0]`. Deterministically extracted records (AST / structural parsing) SHALL be tagged `EXTRACTED` with `confidence = 1.0`; LLM-inferred records SHALL be tagged `INFERRED` with the model-reported or calibrated confidence.
+
+**Rationale.** Epistemic honesty by construction: a consumer (and an auditor) must be able to distinguish a fact the system extracted from one it guessed. This is the node/edge analogue of R-400-012's chunk provenance and the basis for the future lint/audit pass.
+
+#### R-400-202
+
+```yaml
+id: R-400-202
+version: 1
+status: draft
+category: functional
+derives-from: [D-016]
+```
+
+The default retrieval mode SHALL be **hybrid**: a lexical arm (BM25 via ArangoSearch) and a dense arm (the cosine similarity of R-400-011) SHALL be computed and merged by reciprocal rank fusion (RRF). Exact-token queries (identifiers, entity IDs such as `R-400-202`, file paths) SHALL be reachable through the lexical arm even when the dense arm misses them.
+
+**Rationale.** Dense similarity alone misses exact matches (IDs, names, rare terms); RRF combines lexical recall with semantic understanding without tuning a score-fusion weight. This augments — it does not replace — the dense path of R-400-011, which remains the dense arm.
+
+#### R-400-203
+
+```yaml
+id: R-400-203
+version: 1
+status: draft
+category: functional
+derives-from: [D-016]
+```
+
+During ingestion, each chunk SHALL be augmented with a short **contextualisation** that situates it within its source document and resolves anaphora, generated by a configurable model with the document (or prior-context) prefix supplied via prompt caching. The embedded text SHALL be the contextualised chunk, not the raw chunk alone. The contextualisation model SHALL be configurable via C8 and SHOULD be a small, low-cost model (Haiku-class hosted, or a local Ollama model where privacy or cost requires it).
+
+**Rationale.** Contextual retrieval (cumulative, ambiguity-resolving per-chunk context) materially improves retrieval recall; supplying the shared document prefix via prompt caching keeps the per-chunk cost low, which is why a small model suffices. The model is a config choice within D-011 level 1 (one active provider, swappable), not task-routing (D-011 level 2, v2).
+
+#### R-400-204
+
+```yaml
+id: R-400-204
+version: 1
+status: draft
+category: functional
+derives-from: [D-016]
+```
+
+C9 SHALL expose a stable **retrieval tool interface** (E-400-007) with four operations — `search` (hybrid retrieval per R-400-202), `grep` (deterministic regex over chunk text), `read_document` (full-source retrieval by id), and `prune` (remove an item from the caller's working set). Any retrieval backend (the AQL-native implementation in v1, a dedicated retrieval sub-agent later) SHALL be swappable behind this interface without changing the tool contract.
+
+**Rationale.** An interface-first design lets a future specialised retrieval backend be adopted (or dropped) without rework, and keeps `grep` / `read_document` as pure deterministic tools. The four-operation shape mirrors the dedicated-retrieval-agent pattern (Chroma Context-1) so that pattern remains a drop-in v2+ option.
+
+#### R-400-205
+
+```yaml
+id: R-400-205
+version: 1
+status: draft
+category: functional
+derives-from: [D-016]
+```
+
+**(v2.)** The knowledge graph SHALL be organisable into four vertically-linked abstraction layers — L0 (verbatim), L1 (structural symbols/relations), L2 (semantic entities + topological communities with per-community summaries), L3 (cross-cutting themes + recursive summaries) — where every L1/L2/L3 record carries `derived-from` edges to the L0 evidence it abstracts. L2/L3 summaries SHALL NOT be returned to a consumer without their `derived-from` provenance trail.
+
+**Rationale.** The abstraction hierarchy doubles as the traceability tree (Principle 2), so a thematic answer can always be drilled down to verbatim evidence. Per D-010 this is **v2** scope (community detection + LLM summaries = GraphRAG), gated by demonstrated v1 insufficiency.
+
+#### R-400-206
+
+```yaml
+id: R-400-206
+version: 1
+status: draft
+category: functional
+derives-from: [D-016]
+```
+
+**(v2.)** The retriever SHALL support an **iterative traversal** mode that enters at the layer matching the query (thematic → L3, specific → L1/L2), then descends and traverses neighbour-to-neighbour, expanding the working set with deterministic graph algorithms (graph traversal / personalized-PageRank-style propagation in AQL) and invoking an LLM only to arbitrate ambiguous descend/stop decisions, while actively pruning irrelevant items from the working set. The loop SHALL be bounded by a maximum depth, a maximum hop count, and a confidence threshold.
+
+**Rationale.** Iterative, structure-guided retrieval (the "research-in-a-library" model) retrieves a small focused subgraph progressively rather than dumping many chunks, raising precision and cutting token cost; deterministic propagation keeps the LLM a last-resort arbiter. Per D-010 this is **v2** scope.
+
+#### R-400-207
+
+```yaml
+id: R-400-207
+version: 1
+status: draft
+category: functional
+derives-from: [D-013, D-016]
+```
+
+All processing outputs of the ingestion + knowledge-extraction pipeline — parsed text, chunk boundaries, contextualised chunks (R-400-203), embeddings, and the extracted L1 knowledge triples (R-400-200) — SHALL be persisted as durable MinIO artifacts (alongside the raw blob and the `parsed.txt` / `chunks.json` of R-400-020), and the vector store and graph store in ArangoDB SHALL be fully reconstructible by **replaying** these artifacts WITHOUT re-invoking any embedding model or LLM. Each artifact SHALL record the `model_id` (embeddings) and the extraction `model_id` + ontology version (KG triples) that produced it, so a replay reproduces the exact stored state and a model upgrade is an explicit re-processing decision rather than an implicit side effect of a rebuild.
+
+**Rationale.** The L1 KG extraction is LLM-based (R-400-200): recomputing it on a rebuild would be costly AND non-deterministic, silently mutating the graph and breaking traceability (Principle 2). Embedding recomputation is deterministic but expensive. Persisting both as replayable artifacts makes a DB rebuild a pure, free, reproducible load — the databases become projections of the artifact layer (D-018), not the source of truth. This generalises the per-step idempotency of R-400-020 to the embedding and extraction stages, which today write only to ArangoDB.
+
+#### R-400-208
+
+```yaml
+id: R-400-208
+version: 1
+status: draft
+category: functional
+derives-from: [D-016]
+```
+
+Each ingested source SHALL be stamped with a `processing_version` — a deterministic descriptor of the pipeline that produced its chunks (at minimum: the chunk window/overlap and the embedding `model_id`). The source status (`GET .../sources/{id}`) SHALL expose `processing_version` and a computed `is_stale` flag (stored version ≠ the pipeline's current version). A `POST .../sources/{id}/reprocess` endpoint SHALL re-run the pipeline for a single source from its persisted raw bytes and re-stamp the current version; it SHALL return 409 when the source has no stored raw bytes to reprocess from.
+
+**Rationale.** Operators — and the n8n ingestion workflow — need to see which processing a source received and re-trigger only what is stale, rather than blindly re-embedding a whole project (R-400-060). Per-source granularity plus an explicit version make re-processing intentional and observable. Generalises R-400-004 (re-embed on model upgrade) from the embedding model alone to the full pipeline descriptor.
+
+---
+
 ## 5. Non-Functional Requirements
 
 ### 5.1 Performance
@@ -630,7 +769,7 @@ Indexes:
 
 ```yaml
 id: E-400-003
-version: 1
+version: 2
 status: draft
 category: architecture
 ```
@@ -644,6 +783,8 @@ category: architecture
   "minio_raw_path": "sources/<pid>/<sid>/raw.pdf",
   "minio_parsed_path": "sources/<pid>/<sid>/parsed.txt",
   "minio_chunks_path": "sources/<pid>/<sid>/chunks.json",
+  "minio_embeddings_path": "sources/<pid>/<sid>/embeddings.json",
+  "minio_kg_path": "sources/<pid>/<sid>/kg.json",
   "mime_type": "application/pdf",
   "size_bytes": 423412,
   "uploaded_by": "<user-id>",
@@ -681,6 +822,60 @@ category: architecture
 
 Canonical path: `api/openapi/memory-service-v1.yaml`. Every endpoint in §6.1 SHALL be declared with request/response schemas, auth requirements (bearer JWT), and error examples.
 
+#### E-400-006: `CodeKnowledgeOntology` (schema-guided L1 extraction)
+
+```yaml
+id: E-400-006
+version: 1
+status: draft
+category: architecture
+derives-from: [D-016, D-004]
+```
+
+The closed entity/relation type set the L1 extractor (R-400-200) is constrained to for the `code` domain. Expressed as Pydantic `Literal` types so `mypy --strict` and runtime validation both reject out-of-ontology types.
+
+```python
+EntityType = Literal[
+    "MODULE", "CLASS", "FUNCTION", "METHOD",
+    "REQUIREMENT", "DECISION", "TEST", "CONTRACT",
+]
+RelationType = Literal[
+    "IMPORTS", "CALLS", "DEFINES", "INHERITS_FROM",
+    "IMPLEMENTS", "VALIDATES", "DERIVES_FROM", "REFERENCES",
+]
+```
+
+Both vocabularies are extensible per future production domain (a `documentation` domain would register its own ontology); extension requires a version bump of this entity. The relation verbs `IMPLEMENTS` / `VALIDATES` / `DERIVES_FROM` align with the `@relation` marker verbs of `meta/100-SPEC-METHODOLOGY.md` §8 and the C6 traceability checks, so the L1 graph and the coherence engine share one vocabulary.
+
+#### E-400-007: Retrieval tool interface
+
+```yaml
+id: E-400-007
+version: 1
+status: draft
+category: architecture
+derives-from: [D-016]
+```
+
+The four-operation retrieval contract exposed by C9 (R-400-204). Backend-agnostic.
+
+```python
+async def search(query: str, *, project_id: str, indexes: list[str],
+                 top_k: int = 10, filters: dict | None = None) -> list[RetrievedItem]:
+    """Hybrid BM25 + dense + RRF retrieval (R-400-202)."""
+
+async def grep(pattern: str, *, project_id: str, max_results: int = 5) -> list[RetrievedItem]:
+    """Deterministic regex over chunk text. No LLM, no embedding."""
+
+async def read_document(source_id: str, *, project_id: str) -> Source:
+    """Full-source retrieval by id (drill to L0 verbatim)."""
+
+async def prune(item_ids: list[str]) -> int:
+    """Remove items from the caller's working set; returns the count removed."""
+```
+
+`RetrievedItem` carries full provenance (entity_id/source_id, chunk_index, score, index, snippet, layer) so a caller can always trace a result to its origin. The interface is the seam at which a dedicated retrieval sub-agent (v2+) can replace the AQL-native backend without changing callers.
+
 ---
 
 ## 7. Open Questions
@@ -697,7 +892,7 @@ Canonical path: `api/openapi/memory-service-v1.yaml`. Every endpoint in §6.1 SH
 | Q-400-008 | Refresh cadence — fully admin-triggered vs per-tenant cron? | D-010 | v2 (admin-only in v1; cron arrives with Redis-backed scheduler) |
 | Q-400-009 | Source deletion semantics — hard delete vs soft delete with 30-day grace? | — | v1 (baseline: hard delete on user action; chunks and source are removed from indexes immediately, MinIO `_deleted/` holds raw for 30 days) |
 | Q-400-010 | Multi-language embedding — per-project model selection? | D-009 | v2 (corpus is English-by-default; multi-language RAG deferred) |
-| Q-400-011 | Eval harness for retrieval quality — golden query set per project? | D-010 | v2 (evaluation infrastructure lives with the v2 eval harness of 800-SPEC) |
+| Q-400-011 | Eval harness for retrieval quality — golden query set per project? | D-017 | v2 (direction now owned by D-017 — graded three-tier verdicts; the retrieval golden-set design lands with the C6 eval harness in 600/700, provider eval in 800) |
 
 ---
 
@@ -744,4 +939,4 @@ Beyond 50 000 chunks per scope, this query degrades; filters (source_id, categor
 
 ---
 
-**End of 400-SPEC-MEMORY-RAG.md v2 (first populated draft).**
+**End of 400-SPEC-MEMORY-RAG.md v5 (processing version + per-source reprocess — R-400-208).**

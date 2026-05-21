@@ -503,6 +503,43 @@ services:
     ports:
       - "${PORT_MOCK_LLM}:8000"
 
+  # NATS server with JetStream — backbone for the C4 orchestrator's
+  # hybrid-exposure event channel (R-200-070 / R-200-071) and the C3
+  # SSE relay (planned). Opt-in via profile `nats` so existing pytest
+  # e2e (which uses NullPublisher) stays lightweight. Operators enable
+  # NATS in dev/system by adding `--profile nats` to compose AND
+  # setting `C4_NATS_URL=nats://nats:4222` in .env.dev.
+  nats:
+    image: nats:2.10-alpine
+    container_name: ay-nats
+    profiles: ["nats"]
+    networks:
+      - platform
+    expose:
+      - "4222"
+    command:
+      - "-js"  # enable JetStream
+      - "-m"   # monitoring endpoint
+      - "8222"
+      - "--name"
+      - "ay-nats"
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "wget -q -O - http://127.0.0.1:8222/healthz | grep -q ok"
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.05"
+          memory: 64M
+
   # Test-tier log aggregator (R-100-120). Subscribes to live Docker log
   # streams from every `ay-*` container, buffers per service in a ring
   # buffer, and exposes /logs /errors /digest /clear endpoints on host

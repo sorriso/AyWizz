@@ -40,7 +40,7 @@ Authentication-mode coverage (`local` / `entraid` / `none`) is tested at the C2 
 
 ## 3. Endpoint catalog
 
-**88 endpoints** across 7 components. Order: by component, method, path.
+**101 endpoints** across 7 components. Order: by component, method, path.
 
 ### c2_auth
 
@@ -91,6 +91,8 @@ Authentication-mode coverage (`local` / `entraid` / `none`) is tested at the C2 
 | `GET` | `/api/v1/orchestrator/runs/{run_id}` | authenticated | tenant | any authenticated | — | — | 200 |
 | `POST` | `/api/v1/orchestrator/runs/{run_id}/feedback` | authenticated | tenant | any authenticated | — | — | 200 |
 | `POST` | `/api/v1/orchestrator/runs/{run_id}/resume` | role_gated | tenant | `admin` | `tenant_manager` | — | 200 |
+| `GET` | `/api/v1/orchestrator/runs/{run_id}/trace` | authenticated | tenant | any authenticated | — | — | 200 |
+| `POST` | `/api/v1/orchestrator/runs/{run_id}/steer` | authenticated | tenant | any authenticated | — | — | 200 |
 | `GET` | `/api/v1/projects/{project_id}/artifacts/runs` | authenticated | project | any authenticated | `tenant_manager` | arango · `c4_artifact_runs` | 200 |
 | `GET` | `/api/v1/projects/{project_id}/artifacts/runs/{run_id}/tree` | authenticated | project | any authenticated | `tenant_manager` | minio · bucket `orchestrator` | 200 |
 | `GET` | `/api/v1/projects/{project_id}/artifacts/runs/{run_id}/blob` | authenticated | project | any authenticated | `tenant_manager` | minio · bucket `orchestrator` | 200 |
@@ -101,6 +103,15 @@ Authentication-mode coverage (`local` / `entraid` / `none`) is tested at the C2 
 | `GET` | `/api/v1/projects/{project_id}/documents` | authenticated | project | any authenticated | `tenant_manager` | — | 200 |
 | `GET` | `/api/v1/projects/{project_id}/documents/{path:path}` | authenticated | project | any authenticated | `tenant_manager` | — | 200 |
 | `DELETE` | `/api/v1/projects/{project_id}/documents/{path:path}` | authenticated | project | any authenticated | `tenant_manager` | both · `c4_artifact_runs` · bucket `orchestrator` | 204 |
+| `POST` | `/api/v1/projects/{project_id}/documents/mkdir` | authenticated | project | any authenticated | `tenant_manager` | both · `c4_artifact_runs` · bucket `orchestrator` | 201 |
+| `POST` | `/api/v1/projects/{project_id}/documents/rename` | authenticated | project | any authenticated | `tenant_manager` | both · `c4_artifact_runs` · bucket `orchestrator` | 200 |
+| `POST` | `/api/v1/projects/{project_id}/documents/move` | authenticated | project | any authenticated | `tenant_manager` | both · `c4_artifact_runs` · bucket `orchestrator` | 200 |
+| `GET` | `/api/v1/projects/{project_id}/source/tree` | authenticated | project | any authenticated | `tenant_manager` | — | 200 |
+| `POST` | `/api/v1/projects/{project_id}/source/mkdir` | role_gated | project | `admin` · `project_owner` · `project_editor` | `tenant_manager` | both · `c4_artifact_runs` · bucket `orchestrator` | 201 |
+| `POST` | `/api/v1/projects/{project_id}/source/rename` | role_gated | project | `admin` · `project_owner` · `project_editor` | `tenant_manager` | both · `c4_artifact_runs` · bucket `orchestrator` | 200 |
+| `POST` | `/api/v1/projects/{project_id}/source/move` | role_gated | project | `admin` · `project_owner` · `project_editor` | `tenant_manager` | both · `c4_artifact_runs` · bucket `orchestrator` | 200 |
+| `GET` | `/api/v1/projects/{project_id}/source/file/{path:path}/meta` | authenticated | project | any authenticated | `tenant_manager` | — | 200 |
+| `DELETE` | `/api/v1/projects/{project_id}/source/file/{path:path}` | role_gated | project | `admin` · `project_owner` · `project_editor` | `tenant_manager` | both · `c4_artifact_runs` · bucket `orchestrator` | 204 |
 ### c5_requirements
 
 | Method | Path | Auth | Scope | Accepted roles | Excluded | Backend | Status |
@@ -145,7 +156,9 @@ Authentication-mode coverage (`local` / `entraid` / `none`) is tested at the C2 
 | `GET` | `/api/v1/memory/projects/{project_id}/sources` | authenticated | project | any authenticated | — | — | 200 |
 | `GET` | `/api/v1/memory/projects/{project_id}/sources/{source_id}` | authenticated | project | any authenticated | — | — | 200 |
 | `GET` | `/api/v1/memory/projects/{project_id}/sources/{source_id}/blob` | authenticated | project | any authenticated | — | — | 200 |
+| `GET` | `/api/v1/memory/projects/{project_id}/kg/summary` | authenticated | project | any authenticated | — | — | 200 |
 | `DELETE` | `/api/v1/memory/projects/{project_id}/sources/{source_id}` | role_gated | project | `admin` · `project_owner` | `tenant_manager` | arango · `c7_sources` | 204 |
+| `POST` | `/api/v1/memory/projects/{project_id}/sources/{source_id}/reprocess` | role_gated | project | `admin` · `project_editor` · `project_owner` | `tenant_manager` | both · `memory_sources` · bucket `memory` | 200 |
 | `POST` | `/api/v1/memory/entities/embed` | role_gated | tenant | `admin` | `tenant_manager` | — | 201 |
 | `GET` | `/api/v1/memory/projects/{project_id}/quota` | authenticated | project | any authenticated | — | — | 200 |
 | `POST` | `/api/v1/memory/projects/{project_id}/refresh` | role_gated | project | `admin` | `tenant_manager` | — | 501 |

@@ -1,15 +1,17 @@
 ---
 document: 200-SPEC-PIPELINE-AGENT
-version: 2
+version: 3
 path: requirements/200-SPEC-PIPELINE-AGENT.md
 language: en
 status: draft
-derives-from: [D-007, D-008, D-011, D-012]
+derives-from: [D-007, D-008, D-011, D-012, D-015]
 ---
 
 # Pipeline & Agent Specification
 
-> **STATUS: draft v2 — first populated pass.** Derives from D-007 (staff-engineer pattern), D-008 (hybrid agent exposure), D-011 (multi-LLM via LiteLLM), D-012 (domain extensibility). Open questions are explicitly enumerated in §7 and MUST be resolved before C4 is considered production-ready.
+> **STATUS: draft v3 — Tranche B expansion (2026-05-20).** Adds §4.10 (live tracing + operator steering of running pipelines), §5.17 (live-docs operator-driven CRUD beyond the LLM tool-loop), §5.18 (source-files tree projection + operator-driven dir/file rename/move), §5.19 (prompt-attached references — files and text excerpts inlined into LLM context). New contract entities E-200-006..008 in §6.3, new REST endpoints in §6.1, new questions Q-200-013..016 in §7. Earlier baseline (v2) unchanged.
+>
+> Derives from D-007 (staff-engineer pattern), D-008 (hybrid agent exposure), D-011 (multi-LLM via LiteLLM), D-012 (domain extensibility), D-015 (DocGen v1 chat-direct, extended in §5.17). Open questions in §7 MUST be resolved before C4 is considered production-ready.
 
 ---
 
@@ -229,6 +231,12 @@ The orchestrator SHALL dispatch sub-agents as **ephemeral Kubernetes pods** (per
 
 **Rationale.** D-007 (staff-engineer pattern) isolates sub-agent work to prevent context pollution across tasks. Ephemeral pods enforce this boundary at the infrastructure level.
 
+**v1 implementation note (2026-05-20).** Dispatcher selection is config-driven via `C4_DISPATCHER_BACKEND` :
+- `in-process` (default, dev fallback) — agents run in the orchestrator process via `InProcessDispatcher`. Preserves existing dev velocity (docker-compose bind-mount loop) at the cost of the spec's isolation guarantee. Suitable for the backbone dev stack ONLY.
+- `k8s` — `K8sDispatcher` schedules a Pod per dispatch in the `c4-workers` namespace (`infra/k8s/base/c4_workers/`) with the security context + NetworkPolicy + ServiceAccount the spec requires. Targets Docker Desktop K8s in dev, production K8s in prod.
+
+The two paths land on the SAME `AgentCompletion` envelope (same sub-agent runtime ; same in-process parser shared via `dispatcher.in_process` helpers — P2.1.a). A future fully-K8s dev path (R-200-030 with no in-process fallback) is a deliberate decision deferred until tooling (Skaffold/Tilt) reduces the K8s iteration penalty.
+
 #### R-200-031
 
 ```yaml
@@ -356,18 +364,28 @@ Production domains SHALL register with the orchestrator via a **domain descripto
 
 ```yaml
 id: R-200-061
-version: 1
+version: 2
 status: draft
 category: architecture
 ```
 
-The v1 implementation SHALL ship with exactly one registered domain: `code`. Its descriptor maps:
-- `artifact_mime_types`: `text/x-python`, `text/x-typescript`, and the other languages declared in R-100-XXX.
-- `validation_artifact_type`: `pytest_test` for Python, `vitest_test` for TypeScript, etc.
-- `gate_b_check`: "validation artifact exists and runs red against the current tree".
-- `gate_c_check`: "validation artifact runs green against the current tree with a timestamp newer than the last production-artifact write".
+The v1 implementation SHALL ship with **two** registered domains, selected per deployment via the `C4_DOMAIN` env var (default `code`) :
 
-**Rationale.** Concrete domain used by v1. Future domains (v2 `documentation`, v3 `presentation`) register independently.
+1. `code` — original target. Descriptor maps :
+   - `artifact_mime_types`: `text/x-python`, `text/x-typescript`, and the other languages declared in R-100-XXX.
+   - `validation_artifact_type`: `pytest_test` for Python, `vitest_test` for TypeScript, etc.
+   - `gate_b_check`: "validation artifact exists and runs red against the current tree".
+   - `gate_c_check`: "validation artifact runs green against the current tree with a timestamp newer than the last production-artifact write".
+
+2. `documentation` — markdown/spec docs target (P4.a, 2026-05-20). Descriptor maps :
+   - `artifact_mime_types`: `text/markdown`, `text/x-rst`, `text/asciidoc`.
+   - `validation_artifact_type`: `documentation_outline` (the table-of-contents shape the generated doc must fulfil).
+   - `gate_b_check`: "outline artifact exists and lists the sections the operator's prompt asks for" (analogue of "test exists and fails first").
+   - `gate_c_check`: "every outline section has a non-trivial body and the outline timestamp is older than the doc body's last write" (analogue of "test passes with fresh evidence").
+
+Per-run domain selection (a single project hosting BOTH a `code` and a `documentation` run side-by-side) is deferred to v2 per Q-200-012 — v1 binds one plugin per C4 deployment instance.
+
+**Rationale.** Two domains demonstrate the plug-in surface concretely (D-012 validation). Selection-by-deployment keeps OrchestratorService construction simple (one plugin instance, not a registry) ; runtime per-run dispatch is the v2 evolution Q-200-012 anticipates.
 
 #### R-200-062
 
@@ -451,6 +469,88 @@ category: nfr
 The orchestrator SHALL emit Prometheus metrics covering at minimum: runs started/completed/blocked per phase, phase duration percentiles, agent completion status distribution, sub-agent dispatch count and pod lifetime, three-fix-rule triggers, gate failure rate per gate.
 
 **Rationale.** Visibility on operational pipeline health.
+
+### 4.10 Live tracing & operator steering
+
+> Adds a polling-friendly trace channel and a side-band steering input on running pipelines (Tranche B, 2026-05-20). Complements §4.8 NATS events (push, expert-mode) with a poll-friendly ledger consumable by the standard polling UI, and gives the operator a way to influence a running pipeline at phase boundaries without aborting it.
+
+#### R-200-200
+
+```yaml
+id: R-200-200
+version: 1
+status: draft
+category: functional
+```
+
+The orchestrator SHALL accumulate, for every run, an append-only `trace: list[TraceEvent]` ledger (entity E-200-006) persisted on the `c4_runs` document. The ledger SHALL record at minimum, in order: sub-agent dispatch start/end, gate evaluations (A/B/C), fix-attempt invocations and outcomes, phase boundary crossings, and steering applications (R-200-203). Each event SHALL carry an ISO-8601 timestamp, the current phase, a `kind` discriminator, a short human label, and optionally `duration_ms` / `ok` / `payload`.
+
+**Rationale.** §4.8 NATS+SSE is push-only and expert-mode-scoped per D-008. A persisted ledger lets the standard polling UI render run progress incrementally without committing to a long-lived stream connection, AND survives reload regardless of NATS retention.
+
+#### R-200-201
+
+```yaml
+id: R-200-201
+version: 1
+status: draft
+category: functional
+```
+
+`GET /api/v1/orchestrator/runs/{run_id}` SHALL include in `RunPublic` the **200 most recent** TraceEvents on the run (sliding window). Older events SHALL be retrieved via `GET /api/v1/orchestrator/runs/{run_id}/trace?before=<iso_ts>&limit=<=200`, returning events strictly older than `before`, ordered newest-first, capped at 200. The full ledger SHALL remain queryable indefinitely in v1 — no server-side eviction. A future eviction policy (LRU/age-based) is tracked in Q-200-013.
+
+**Rationale.** A 200-event default keeps `GET /runs/{id}` snappy for the polling loop while letting the UX scroll back lazily. The "no eviction in v1" stance is deliberate : audit takes precedence over storage cost ; eviction will be revisited when a real cost signal emerges.
+
+#### R-200-202
+
+```yaml
+id: R-200-202
+version: 1
+status: draft
+category: functional
+```
+
+The orchestrator SHALL expose `POST /api/v1/orchestrator/runs/{run_id}/steer` with body `RunSteer` (entity E-200-007) `{ message: str }`. The endpoint SHALL append the message to a per-run `pending_steer: list[str]` queue persisted on `c4_runs`. The endpoint SHALL return 200 with the updated `RunPublic`. It SHALL return 409 when `status != "running"`. RBAC SHALL match `/feedback` (project_owner / project_editor / admin per E-100-002 v2 — tenant_manager rejected on content endpoints).
+
+**Rationale.** A side-band channel for live operator guidance ("focus the spec on REST not gRPC", "skip the README"). Separates steering from `/feedback` which is gate-bound (Gate A approval, interactive-phase user input) — `steer` is a hint accepted between phases, NOT a precondition to advancement.
+
+#### R-200-203
+
+```yaml
+id: R-200-203
+version: 1
+status: draft
+category: functional
+```
+
+The orchestrator SHALL consume the `pending_steer` queue **only at phase or sub-agent-tour boundaries**, never mid-LLM-call. At each consumption point, the orchestrator SHALL drain the queue, prepend the messages (chronological order) to the next agent's user prompt under a clearly delimited `<operator-steering>` block, clear the queue, and append a `TraceEvent { kind: "steer-applied", payload: { count: <N>, sample: <truncated first message> } }`. The previous mid-call LLM invocation SHALL NOT be interrupted, cancelled, or retried as a consequence of a steer arriving.
+
+**Rationale.** "No interruption brutale en plein appel LLM" — preserves run determinism and avoids partial-output costs. Boundary consumption is the natural extension point that already exists in the dispatcher.
+
+#### R-200-204
+
+```yaml
+id: R-200-204
+version: 1
+status: draft
+category: functional
+```
+
+The contract registry (per §8.4 of CLAUDE.md) SHALL declare `TraceEvent`, `RunSteer`, and the extended `RunPublic` (with `trace`) so consumers (UI, third-party clients) import these models directly rather than redefining them. The auth matrix catalog (`tests/e2e/auth_matrix/_catalog.py` per §13 of CLAUDE.md) SHALL include one entry for `POST /runs/{id}/steer` and one for `GET /runs/{id}/trace`.
+
+**Rationale.** Same coherence discipline applied to every other public C4 contract.
+
+#### R-200-205
+
+```yaml
+id: R-200-205
+version: 1
+status: draft
+category: nfr
+```
+
+`POST /steer` SHALL persist the queued message in ≤ 100 ms p95 (Arango single-document append). `GET /trace?before=...` SHALL return in ≤ 200 ms p95 for the 200-event window. The trace append on `R-200-200` events SHALL add ≤ 5 ms p95 to phase-transition overhead — counted inside the R-200-100 budget (200 ms p95 total).
+
+**Rationale.** Polling at 2 s intervals (current UX cadence) makes trace fetch a hot path ; the latency budget must be small to keep the perceived cost of polling negligible.
 
 ---
 
@@ -776,6 +876,226 @@ The document CRUD surface SHALL be profile-agnostic in code. The DocGen profile 
 
 **Rationale.** Keeps the v1→v2 migration a caller swap, not a surface rewrite (D-015 encapsulation property).
 
+### 5.17 Live-docs operator-driven CRUD (mkdir / rename / move)
+
+> Extends §5.16 with operator-direct REST endpoints for directory management and rename/move (Tranche B, 2026-05-20). These are operator-driven UX operations (right-click context menu on the live-docs tree), NOT LLM-tool-loop operations. Exposing them as tools to the chat is a separate decision tracked in Q-200-014.
+
+#### R-200-160
+
+```yaml
+id: R-200-160
+version: 1
+status: draft
+category: functional
+```
+
+The platform SHALL expose three additional endpoints under the live-docs surface : `POST /api/v1/projects/{project_id}/documents/mkdir` body `{ path: str }`, `POST .../documents/rename` body `{ from_path: str, to_path: str }`, and `POST .../documents/move` body `{ from_path: str, to_dir: str }`. RBAC SHALL match `R-200-153` (any project member, tenant_manager rejected). Paths SHALL follow the R-200-130 validation (POSIX relative, no `..`, no leading `/`, no backslashes) ; violations map to 400.
+
+**Rationale.** Operator-driven file management without round-tripping through the LLM. The semantic split (`rename` = pure path change, `move` = relocate under a different directory) maps cleanly onto the UX right-click menu — even if both reduce to the same primitive operation server-side.
+
+#### R-200-161
+
+```yaml
+id: R-200-161
+version: 1
+status: draft
+category: functional
+```
+
+`mkdir` SHALL materialise an empty directory by writing a zero-byte `.keep` marker at `<path>/.keep` in MinIO. Listing endpoints SHALL filter `.keep` markers from the file count BUT SHALL infer the directory's existence from the marker. Attempting to `mkdir` an existing path SHALL return 409. `mkdir` SHALL trigger a Gitea push (one commit, message `"docgen — mkdir {path}"`) per R-200-155 best-effort semantics.
+
+**Rationale.** MinIO is a flat object store ; empty directories require a placeholder. `.keep` is the standard POSIX convention. The Gitea commit keeps the tree consistent across both backends.
+
+#### R-200-162
+
+```yaml
+id: R-200-162
+version: 1
+status: draft
+category: functional
+```
+
+`rename` and `move` SHALL be atomic at the service-method level : the new path is written, then the old path deleted, in one method scope. A failure to write the new path SHALL leave the old path untouched (no partial state). A failure to delete the old path after a successful write SHALL leave both paths present, log a WARNING, and return 200 (caller sees the rename succeeded ; the orphan is cleaned by a subsequent retry or by the operator). For directories, the operation SHALL apply recursively to every blob under the directory prefix, in deterministic order. A single Gitea push (one commit, message `"docgen — rename {from} → {to}"` or `"docgen — move {from} → {to_dir}"`) SHALL be issued after MinIO success, per R-200-155 best-effort semantics.
+
+**Rationale.** Atomicity-of-intent without distributed-transaction infrastructure. The "stale-orphan tolerated over partial-rename" rule mirrors R-200-156 of the artifact materialisation (best-effort downstream, MinIO is source of truth — see Q-200-015 for the alternative).
+
+#### R-200-163
+
+```yaml
+id: R-200-163
+version: 1
+status: draft
+category: functional
+```
+
+`rename` and `move` SHALL return 409 when `to_path` (or any descendant of a directory move) already exists. They SHALL return 404 when `from_path` does not exist. They SHALL return 400 when `from_path == to_path` or when the operation would create a path traversal cycle (`from = a/b`, `to = a/b/c` and similar). Self-overwrite is NEVER silent.
+
+**Rationale.** Failure mode discipline : the UX must distinguish "missing source" from "destination conflict" to render the right confirmation dialogue.
+
+#### R-200-164
+
+```yaml
+id: R-200-164
+version: 1
+status: draft
+category: functional
+```
+
+The three operator endpoints SHALL emit one event each into the run-independent audit channel (per R-200-120 stdout JSON) AND, for any conversation currently bound to the project, an inline event `{ kind: "live-docs-op", op: "mkdir"|"rename"|"move", from_path?, to_path?, ok: bool, duration_ms }` MAY be appended to the active conversation's `MessagePublic.events` ledger only when the operation was triggered FROM the chat surface ; UX-only triggers (right-click in Working area) SHALL NOT pollute the chat ledger.
+
+**Rationale.** Auditability without conversational noise : the stdout JSON is the persistent audit, the inline ledger is the UX echo and applies only to chat-initiated operations.
+
+### 5.18 Project source-files tree projection & operator-driven CRUD
+
+> A tree-shaped UX over the source-files artifact surface (R-200-130..147), independent of how MinIO actually stores them. Operator-driven mkdir / rename / move + a metadata-read endpoint (Tranche B, 2026-05-20). Like §5.17, these are NOT tools for the LLM — they're direct UX operations.
+
+#### R-200-170
+
+```yaml
+id: R-200-170
+version: 1
+status: draft
+category: functional
+```
+
+The platform SHALL expose `GET /api/v1/projects/{project_id}/source/tree` that returns a projection of the source-files MinIO content for the project, in a recursive tree of nodes `{ name: str, kind: "file"|"dir", path: str, size?: int, modified_at?: datetime, children?: [Node] }`. The projection is computed at request time from the MinIO listing — no separate persisted tree is maintained. RBAC SHALL match `R-200-130` (any project member). Pagination is NOT required in v1 (project source trees are bounded by the artifact run cap) ; if a single response exceeds 5 MB it SHALL be truncated with a top-level `truncated: true` marker and the operator notified in the UX.
+
+**Rationale.** A tree is the UX-natural representation regardless of how MinIO stores the data (flat keys with `/`-separated prefixes). Computing it at request time keeps the model dead-simple ; a maintained-tree would duplicate state.
+
+#### R-200-171
+
+```yaml
+id: R-200-171
+version: 1
+status: draft
+category: functional
+```
+
+The platform SHALL expose `POST .../source/mkdir`, `POST .../source/rename`, `POST .../source/move` with the same body shapes, validation, and error codes as §5.17 R-200-160..163. Operations SHALL act on the project source-files surface (`orchestrator/c4-artifacts/{tenant}/{project}/`) and SHALL follow the same atomicity rules as R-200-162. RBAC : any project member with at least `project_editor`. `project_viewer` SHALL receive 403.
+
+**Rationale.** Same UX needs as live-docs ; consistent semantics minimise cognitive load. The viewer-vs-editor gate is stricter than live-docs because source files materialise into Gitea history and feed downstream review.
+
+#### R-200-172
+
+```yaml
+id: R-200-172
+version: 1
+status: draft
+category: functional
+```
+
+Mutations under R-200-171 SHALL be reflected to Gitea as best-effort single-commit pushes (one commit per operation, messages `"source — mkdir {path}"`, `"source — rename {from} → {to}"`, `"source — move {from} → {to_dir}"`) under the project's root-admin owner per R-200-146. A Gitea failure SHALL log a WARNING and SHALL NOT fail the MinIO operation. MinIO remains the source of truth per Q-200-015 (option (i)).
+
+**Rationale.** Mirrors R-200-155 incremental-push semantics so the operator gets a per-edit Gitea audit trail of structural changes, consistent with the existing per-file generate-phase push (R-200-146).
+
+#### R-200-173
+
+```yaml
+id: R-200-173
+version: 1
+status: draft
+category: functional
+```
+
+The platform SHALL expose `GET .../source/file/{path}/meta` returning `{ path, size, mime_type, modified_at, last_commit_sha?, last_commit_message?, last_commit_author?, kg_indexed?: bool }`. `last_commit_*` fields are best-effort and populated by querying Gitea for the path's most recent commit ; an unreachable Gitea SHALL omit them rather than fail the request. `kg_indexed` SHALL reflect whether the file appears in the C7 KG index for the project. `mime_type` SHALL be detected from the path extension (Python `mimetypes` fallback) — content sniffing is deferred (Q-200-016).
+
+**Rationale.** Surfaces the metadata the operator typically wants when right-clicking a source file (size, when it changed, who changed it, is it in the search index) without exposing backend identifiers.
+
+#### R-200-174
+
+```yaml
+id: R-200-174
+version: 1
+status: draft
+category: functional
+```
+
+The auth matrix catalog (`tests/e2e/auth_matrix/_catalog.py` per §13 of CLAUDE.md) SHALL include one entry per new endpoint introduced by §5.17 and §5.18, declaring the accepted-role set, the excluded-global-roles set (always including `tenant_manager` on content endpoints), and the backend persistence flag (MinIO, optionally Gitea).
+
+**Rationale.** Catalog is the SOT for the test matrix (§13) ; missing an entry is caught as a build break by the coherence test.
+
+#### R-200-175
+
+```yaml
+id: R-200-175
+version: 1
+status: draft
+category: functional
+```
+
+The platform SHALL expose `DELETE /api/v1/projects/{project_id}/source/file/{path}?run_id=<id>` for operator-driven removal of a single source file. RBAC follows R-200-171 (project_editor+). The endpoint SHALL return 204 on success, 404 when the path doesn't exist in the run, and 400 on a malformed path. The delete SHALL trigger a best-effort single-file Gitea push with message `"source — delete {path}"` (R-200-172 best-effort semantics) ; Gitea history is intentionally NOT rewritten — the deleted file survives in the git log (mirror of R-200-155 audit choice).
+
+**Rationale.** Closes Q-200-019. Symmetric with the live-docs `DELETE` route (R-200-153) — operators expect the same surface across both tree views. Recursive directory delete is deliberately NOT in v1 : multi-blob atomicity introduces failure modes the v1 UX doesn't compensate for ; per-file deletes are sufficient for the operator action set (right-click → confirm → DELETE one file at a time).
+
+### 5.19 Prompt-attached references (files + excerpts)
+
+> A first-class mechanism to attach 1..N files and/or text excerpts to a chat turn so the LLM sees them as explicit context (Tranche B, 2026-05-20). Two attach modes : whole-file reference (right-click on tree) or text-range reference (select text in an open document, right-click). References apply uniformly to live-docs and source-files surfaces.
+
+#### R-200-180
+
+```yaml
+id: R-200-180
+version: 1
+status: draft
+category: functional
+```
+
+The C3 chat `send_message` request body SHALL accept an optional `references: list[PromptReference]` field (entity E-200-008). Each reference SHALL specify `kind: "file"|"excerpt"`, `source: "live-docs"|"source"`, `path: str`, and for excerpts a `range: { start_line: int, end_line: int }` (1-indexed inclusive). A request MAY carry up to 10 references ; exceeding the cap SHALL return 400.
+
+**Rationale.** A side channel that keeps the user's `payload` (the natural prompt) clean and lets the system inline references deterministically. The 10-reference cap is a sanity floor against accidental dumps ; it can be relaxed later with usage data.
+
+#### R-200-181
+
+```yaml
+id: R-200-181
+version: 1
+status: draft
+category: functional
+```
+
+C3 SHALL resolve each `PromptReference` server-side by reading its content from the matching backend (live-docs or source-files) at request time, then inject it into the LLM context as a **separate system block** preceding the user message, formatted as `<reference path="{path}" kind="{kind}"{range_attr}>\n{content}\n</reference>`. References SHALL NOT be concatenated into the visible user `payload`. The combined inlined content SHALL NOT exceed **32 K tokens** (approximated via 4 chars/token heuristic in v1, refined when C8 surfaces real tokenizers) ; an over-cap request SHALL return 413 with a structured payload listing which references would have to be dropped or truncated.
+
+**Rationale.** Separation keeps the audit trail of "what the user typed" intact and lets the LLM treat references as authoritative context rather than user text. The token cap protects the C8 budget per R-800-022 (cost discipline).
+
+#### R-200-182
+
+```yaml
+id: R-200-182
+version: 1
+status: draft
+category: functional
+```
+
+The persisted `MessagePublic` SHALL gain an optional `references: list[PromptReference]` field carrying the **metadata only** (path, kind, range) — NEVER the resolved content. The content is reconstructable on demand by re-reading the backend at the recorded `(path, range, timestamp)`. Resolution at audit time MAY return "content no longer available" when the file has been deleted ; the metadata reference SHALL remain visible in the message timeline regardless.
+
+**Rationale.** Audit-friendliness without storage explosion. A long chat with frequent 30 K-token attachments would multiply storage cost ; storing pointers preserves traceability at constant cost.
+
+#### R-200-183
+
+```yaml
+id: R-200-183
+version: 1
+status: draft
+category: functional
+```
+
+Reference resolution SHALL enforce the same RBAC as direct access to the underlying resource : `source` references require `project_editor`+ (per R-200-171) ; `live-docs` references require any project member. A reference whose resolution would 403 SHALL fail the entire `send_message` request with 403 (no partial silent drop).
+
+**Rationale.** Avoids privilege escalation by reference. Atomic failure surfaces the issue at compose time rather than letting the LLM see a stub or nothing.
+
+#### R-200-184
+
+```yaml
+id: R-200-184
+version: 1
+status: draft
+category: functional
+```
+
+The C3 contract `PromptReference` SHALL be registered via `register_contract(...)` per §8.4 of CLAUDE.md. UX consumers SHALL import the producer's Pydantic model directly ; the auth matrix catalog SHALL declare the extended `send_message` body shape via a single representative entry (existing `POST /api/v1/conversations/{cid}/messages` row, body-shape extension only).
+
+**Rationale.** Same coherence discipline as every other public contract.
+
 ---
 
 ## 6. Interfaces & Contracts
@@ -790,7 +1110,7 @@ POST   /api/v1/orchestrator/runs
   creates a run, returns run_id, status=brainstorm
 
 GET    /api/v1/orchestrator/runs/{run_id}
-  returns the run record (RunPublic)
+  returns the run record (RunPublic — includes the 200 most recent TraceEvents per R-200-201)
 
 POST   /api/v1/orchestrator/runs/{run_id}/feedback
   body: { phase, user_feedback }
@@ -802,6 +1122,46 @@ POST   /api/v1/orchestrator/runs/{run_id}/resume   (admin-only)
 
 GET    /api/v1/orchestrator/runs/{run_id}/events?since=<ts>
   SSE-style stream of NATS events for the run (admin / expert-mode UI)
+
+GET    /api/v1/orchestrator/runs/{run_id}/trace?before=<iso_ts>&limit=<=200    (R-200-201)
+  paginated back-in-time read of the run's TraceEvent ledger, ordered newest-first
+
+POST   /api/v1/orchestrator/runs/{run_id}/steer    (R-200-202..203)
+  body: { message: str }
+  queues a steering hint, consumed at the next phase / sub-agent-tour boundary
+
+# Live-docs operator-driven CRUD — §5.17
+
+POST   /api/v1/projects/{project_id}/documents/mkdir     (R-200-160, R-200-161)
+  body: { path: str }
+
+POST   /api/v1/projects/{project_id}/documents/rename    (R-200-160, R-200-162, R-200-163)
+  body: { from_path: str, to_path: str }
+
+POST   /api/v1/projects/{project_id}/documents/move      (R-200-160, R-200-162, R-200-163)
+  body: { from_path: str, to_dir: str }
+
+# Source-files tree projection & operator-driven CRUD — §5.18
+
+GET    /api/v1/projects/{project_id}/source/tree           (R-200-170)
+  returns the recursive tree of source-files nodes
+
+POST   /api/v1/projects/{project_id}/source/mkdir          (R-200-171)
+  body: { path: str }
+
+POST   /api/v1/projects/{project_id}/source/rename         (R-200-171)
+  body: { from_path: str, to_path: str }
+
+POST   /api/v1/projects/{project_id}/source/move           (R-200-171)
+  body: { from_path: str, to_dir: str }
+
+GET    /api/v1/projects/{project_id}/source/file/{path}/meta   (R-200-173)
+  returns metadata for one source file (size, modified, last commit, kg_indexed)
+
+# C3 send-message body extension — §5.19 (the route itself is unchanged)
+
+POST   /api/v1/conversations/{cid}/messages    (existing route, body extended per R-200-180)
+  body: { ..., references?: list[PromptReference] }
 ```
 
 Full OpenAPI schema lives in E-200-005.
@@ -816,7 +1176,7 @@ See R-200-070. Payload schema in E-200-004.
 
 ```yaml
 id: E-200-001
-version: 1
+version: 2
 status: draft
 category: architecture
 ```
@@ -838,11 +1198,13 @@ category: architecture
   "fix_attempts": { "<artifact_id>": 2 },
   "enrichment_rounds": { "plan": 1 },
   "events_emitted": 42,
-  "minio_root": "c4-runs/<run_id>/"
+  "minio_root": "c4-runs/<run_id>/",
+  "trace": [ /* list[TraceEvent] — see E-200-006, R-200-200 ; append-only */ ],
+  "pending_steer": [ /* list[str] — see R-200-202..203 ; FIFO, drained at phase boundaries */ ]
 }
 ```
 
-Indexes: `(project_id, session_id)`, `(status, started_at)`.
+v2 (2026-05-20) adds `trace` and `pending_steer`. Indexes unchanged : `(project_id, session_id)`, `(status, started_at)`. `trace` SHALL NOT be indexed in v1 (the back-in-time read of R-200-201 sorts by event timestamp client-side from the embedded array ; an index becomes warranted if a run's trace grows past O(10⁴) events, which is well beyond v1 expectations).
 
 #### E-200-002: agent completion envelope
 
@@ -931,6 +1293,66 @@ category: architecture
 
 Canonical path: `api/openapi/orchestrator-v1.yaml`. Every endpoint in §6.1 SHALL be declared with request/response schemas, auth requirements (bearer JWT per E-100-001), and error examples.
 
+#### E-200-006: `TraceEvent`
+
+```yaml
+id: E-200-006
+version: 1
+status: draft
+category: architecture
+```
+
+```json
+{
+  "kind": "agent-dispatch | gate-eval | fix-attempt | phase-boundary | steer-applied",
+  "ts": "2026-05-20T12:34:56.789Z",
+  "phase": "brainstorm | spec | plan | generate | review",
+  "label": "human-readable short description",
+  "duration_ms": 1234,
+  "ok": true,
+  "payload": { /* kind-specific extra fields ; e.g. { sub_agent_id, gate, fix_round, count, sample } */ }
+}
+```
+
+`duration_ms`, `ok`, and `payload` are optional. `kind` is the discriminator ; future kinds SHALL extend the union, never reuse an existing value. The C3 `InlineEvent` (registered contract for chat) and this `TraceEvent` SHALL stay structurally siblings — both kind-discriminated, both append-only — but they are distinct contracts (chat vs orchestrator) and SHALL NOT be conflated.
+
+#### E-200-007: `RunSteer`
+
+```yaml
+id: E-200-007
+version: 1
+status: draft
+category: architecture
+```
+
+```json
+{
+  "message": "string — operator hint, ≤ 4 KB"
+}
+```
+
+A single message per request. The server appends it to `c4_runs.pending_steer` ; consumption is described in R-200-203. Multi-message batching is NOT supported — operators issue one steer per click.
+
+#### E-200-008: `PromptReference`
+
+```yaml
+id: E-200-008
+version: 1
+status: draft
+category: architecture
+```
+
+```json
+{
+  "kind": "file | excerpt",
+  "source": "live-docs | source",
+  "path": "POSIX relative path, no .. , no leading /",
+  "range": { "start_line": 12, "end_line": 47 }
+}
+```
+
+`range` SHALL be present iff `kind == "excerpt"` ; for `kind == "file"` it SHALL be absent. Line numbers are 1-indexed inclusive on both ends. The server resolves `(source, path, range?)` at `send_message` time and inlines the content per R-200-181. The persisted `MessagePublic.references` carries the metadata only (path, kind, range) per R-200-182.
+
 ---
 
 ## 7. Open Questions
@@ -949,6 +1371,14 @@ Canonical path: `api/openapi/orchestrator-v1.yaml`. Every endpoint in §6.1 SHAL
 | Q-200-010 | Architectural-review request: human response channel? Email? Slack? In-platform comment? | D-007, D-008 | v2 (baseline: in-platform comment; external channels via webhook per tenant config) |
 | Q-200-011 | Agent LLM call caching: does the orchestrator pre-populate `X-Cache-Hint: static` for architect/planner prompts? | D-011 | v1 (yes — architect/planner carry large stable system prompts that benefit from caching) |
 | Q-200-012 | Cross-domain sub-agents: can a run mix `code` and `documentation` domain tasks within one pipeline? | D-012 | v2 (a single run binds to one domain in v1; cross-domain is a v2 concern when the second domain lands) |
+| Q-200-013 | Trace ledger eviction policy: when does a run's `trace` array start truncating older events? Age-based (e.g. 90 days), size-based (e.g. 10⁴ events), or never? | — | v2 (no eviction in v1 per R-200-201 ; revisit once a real cost signal emerges from operating data) |
+| Q-200-014 | Should live-docs `mkdir` / `rename` / `move` (§5.17) also be exposed as LLM-callable tools (option B.2 of the cadrage), letting the chat issue `"renomme draft.md en final.md"` directly? | D-015 | v2 (REST-only for v1 — UX trigger ; tools deferred until a real chat use-case appears) |
+| Q-200-015 | Source-files rename/move (§5.18) backend ordering: MinIO first then Gitea best-effort (option (i), current choice) vs Gitea as source of truth then pull MinIO (option (ii)). Option (i) matches R-200-146 ; option (ii) would make the Gitea push the precondition. | D-015 | v1 (option (i) — MinIO source of truth, Gitea best-effort, consistent with R-200-146 and R-200-155) |
+| Q-200-016 | Source-file metadata (§5.18 R-200-173): should `mime_type` be detected by content-sniffing (libmagic) in addition to extension-based, and should `last_commit_*` be cached or always live-fetched? | — | v2 (extension-only + live Gitea fetch in v1 ; sniffing and caching deferred behind a benchmark) |
+| Q-200-017 | Source-files structural ops (§5.18) : project-wide aggregation across all artifact runs, OR scoped to one run_id at a time via `?run_id=` query param. v1 picks per-run scoping (current UI surfaces one run via the run picker) ; project-wide deferred. | — | v2 (per-run v1 ; aggregation v2 when the UX picks ONE canonical "live source" concept) |
+| Q-200-018 | Source-file metadata (R-200-173) `kg_indexed` field : v1 emits null (no C7 query path from C4) ; v2 will cross-call C7's `/index/lookup?path=` once that endpoint exists. | — | v2 |
+| Q-200-019 | Source-files DELETE endpoint (R-200-175 — DONE in P2.2.a, single-file delete with editor+ RBAC + Gitea push) ; source-side `PromptReference` (run_id ambiguity) STILL deferred — v1 UI rejects `source=source` references with 400. | — | source-DELETE DONE v1 ; source-ref v2 (paired with Q-200-017 resolution) |
+| Q-200-020 | Sub-agent dispatcher selection (R-200-030 v1 note) : `C4_DISPATCHER_BACKEND` env (`in-process` vs `k8s`). v1 ships both ; full K8s dev devloop with Skaffold/Tilt deferred. | — | v2 |
 
 ---
 
@@ -995,4 +1425,4 @@ See `800-SPEC-LLM-ABSTRACTION.md` §4.6 for the authoritative agent → required
 
 ---
 
-**End of 200-SPEC-PIPELINE-AGENT.md v2 (first populated draft).**
+**End of 200-SPEC-PIPELINE-AGENT.md v3 (Tranche B expansion — live tracing & steering ; live-docs operator CRUD ; source-files tree projection & operator CRUD ; prompt-attached references).**

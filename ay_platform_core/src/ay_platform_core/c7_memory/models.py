@@ -1,13 +1,15 @@
 # =============================================================================
 # File: models.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/src/ay_platform_core/c7_memory/models.py
 # Description: Pydantic v2 models for the C7 Memory Service. Mirrors the
 #              contract-critical entities E-400-001..005 from
-#              400-SPEC-MEMORY-RAG.
+#              400-SPEC-MEMORY-RAG. v2 adds provenance + confidence on KG
+#              nodes/edges (R-400-201).
 #
 # @relation implements:R-400-010
 # @relation implements:R-400-040
+# @relation implements:R-400-201
 # @relation implements:E-400-002
 # @relation implements:E-400-003
 # =============================================================================
@@ -105,6 +107,14 @@ class SourcePublic(BaseModel):
     parse_error: str | None = None
     chunk_count: int
     model_id: str | None = None
+
+    processing_version: str | None = None
+    """Descriptor of the pipeline that produced this source's chunks
+    (R-400-208) — chunk window/overlap + embedding model. None on legacy
+    sources ingested before versioning."""
+    is_stale: bool = False
+    """True when `processing_version` differs from the pipeline's current
+    version, i.e. a `reprocess` would change the result (R-400-208)."""
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +273,21 @@ class ChunkListResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class Provenance(StrEnum):
+    """Whether a knowledge node/edge was deterministically extracted or
+    LLM-inferred (R-400-201).
+
+    Provenance is the basis for the future lint/audit pass and for honest
+    reporting to auditors: an `EXTRACTED` fact (e.g. an AST symbol) is not
+    the same epistemic object as an `INFERRED` one (an LLM-derived
+    relation). The default everywhere is `INFERRED` (the safe assumption);
+    a deterministic structural extractor sets `EXTRACTED` explicitly.
+    """
+
+    EXTRACTED = "extracted"
+    INFERRED = "inferred"
+
+
 class KGEntity(BaseModel):
     """One entity extracted from a source.
 
@@ -279,6 +304,16 @@ class KGEntity(BaseModel):
     "concept"). The LLM is prompted to use a small canonical set but
     we accept whatever it returns — no enum constraint in v1."""
 
+    provenance: Provenance = Field(default=Provenance.INFERRED)
+    """How this node was obtained (R-400-201). The C7 source extractor is
+    LLM-based, so its nodes default to INFERRED; a deterministic structural
+    extractor (R-400-200, future component) sets EXTRACTED."""
+
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    """Extraction confidence in [0,1]. EXTRACTED records are 1.0; INFERRED
+    records carry the model-reported or calibrated score — v1 defaults to
+    1.0 (face value) until the extraction prompt reports per-item scores."""
+
 
 class KGRelation(BaseModel):
     """One directed relation between two entities, derived by the LLM.
@@ -292,6 +327,13 @@ class KGRelation(BaseModel):
     subject: KGEntity
     relation: str = Field(min_length=1, max_length=80)
     object: KGEntity
+
+    provenance: Provenance = Field(default=Provenance.INFERRED)
+    """How this edge was obtained (R-400-201). LLM-derived by default;
+    a deterministic extractor sets EXTRACTED."""
+
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    """Edge extraction confidence in [0,1]. See KGEntity.confidence."""
 
 
 class KGExtractionResult(BaseModel):
@@ -307,3 +349,28 @@ class KGExtractionResult(BaseModel):
     relations_added: int
     entities: list[KGEntity] = Field(default_factory=list)
     relations: list[KGRelation] = Field(default_factory=list)
+
+
+class KGRelationSample(BaseModel):
+    """One triple in the KG summary view, carrying its provenance."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    subject: str
+    relation: str
+    object: str
+    provenance: Provenance = Provenance.INFERRED
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+
+
+class KGSummary(BaseModel):
+    """Lightweight inspection view of a project's knowledge graph (the
+    'graph bootstrap'): entity/relation counts + a small sample of triples
+    with provenance. Read-only; no graph mutation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str
+    entity_count: int
+    relation_count: int
+    sample: list[KGRelationSample] = Field(default_factory=list)

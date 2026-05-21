@@ -1,6 +1,6 @@
 # =============================================================================
 # File: service.py
-# Version: 2
+# Version: 3
 # Path: ay_platform_core/src/ay_platform_core/c4_orchestrator/service.py
 # Description: Facade for the C4 Orchestrator. Drives pipeline runs through
 #              the five phases, honours the three hard gates, applies the
@@ -15,6 +15,14 @@
 #              is best-effort : failures log a WARNING but never block the
 #              pipeline (MinIO + Gitea are mirrors, not the source of
 #              truth for state machine progression).
+#
+#              v3 (2026-05-20) : Tranche B — append-only TraceEvent
+#              ledger on every run (R-200-200), paginated back-in-time
+#              read (R-200-201), and operator steer queue consumed at
+#              phase / sub-agent-tour boundaries (R-200-202..203). The
+#              steer drain is done at the very start of `_invoke_agent`,
+#              which is exactly the "next sub-agent-tour boundary" called
+#              out in R-200-203 — never mid-LLM-call.
 #
 # @relation implements:R-200-001
 # @relation implements:R-200-002
@@ -31,6 +39,10 @@
 # @relation implements:R-200-150
 # @relation implements:R-200-151
 # @relation implements:R-200-152
+# @relation implements:R-200-200
+# @relation implements:R-200-201
+# @relation implements:R-200-202
+# @relation implements:R-200-203
 # =============================================================================
 
 from __future__ import annotations
@@ -66,6 +78,9 @@ from ay_platform_core.c4_orchestrator.models import (
     RunResume,
     RunResumeStrategy,
     RunStatus,
+    RunSteer,
+    TraceEvent,
+    TraceEventKind,
 )
 from ay_platform_core.c4_orchestrator.state import decide_transition
 
@@ -140,6 +155,10 @@ class OrchestratorService:
             "events_emitted": 0,
             "minio_root": f"c4-runs/{run_id}/",
             "gate_a_approved": False,
+            # Tranche B (R-200-200 / R-200-202) — append-only ledger and
+            # FIFO steer queue. Both are persisted on the doc directly.
+            "trace": [],
+            "pending_steer": [],
         }
         await self._repo.upsert_run(row)
         await self._publish(
@@ -253,6 +272,92 @@ class OrchestratorService:
         )
 
     # ------------------------------------------------------------------
+    # Trace ledger + operator steering (R-200-200..203)
+    # ------------------------------------------------------------------
+
+    async def get_run_trace(
+        self, run_id: str, *, before_iso: str | None, limit: int,
+    ) -> list[TraceEvent]:
+        """Paginated back-in-time read of the run's TraceEvent ledger.
+
+        Returns up to `limit` events strictly older than `before_iso`,
+        newest-first. `before_iso=None` returns the `limit` most recent.
+        """
+        # Touch the run to surface a 404 ; cheap and the read path is
+        # already O(1) on the run doc.
+        if await self._repo.get_run(run_id) is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="run not found"
+            )
+        raw = await self._repo.read_trace_slice(
+            run_id, before_iso=before_iso, limit=limit,
+        )
+        return [TraceEvent.model_validate(ev) for ev in raw]
+
+    async def steer_run(self, run_id: str, payload: RunSteer) -> RunPublic:
+        """Queue a steering hint for consumption at the next phase /
+        sub-agent-tour boundary (R-200-202..203). Returns 409 when the
+        run is not RUNNING ; the hint is otherwise persisted FIFO.
+        """
+        row = await self._repo.get_run(run_id)
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="run not found"
+            )
+        if row["status"] != RunStatus.RUNNING.value:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"run is not running (status={row['status']})",
+            )
+        queue = list(row.get("pending_steer") or [])
+        queue.append(payload.message)
+        row["pending_steer"] = queue
+        await self._repo.upsert_run(row)
+        return _public(row)
+
+    def _append_trace(
+        self,
+        row: dict[str, Any],
+        *,
+        kind: TraceEventKind,
+        phase: Phase,
+        label: str,
+        duration_ms: int | None = None,
+        ok: bool | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """In-place append to the run's trace ledger (R-200-200). The
+        caller is expected to `upsert_run(row)` afterwards — we don't
+        persist here to let neighbouring mutations be batched."""
+        ev: dict[str, Any] = {
+            "kind": kind.value,
+            "ts": datetime.now(UTC).isoformat(),
+            "phase": phase.value,
+            "label": label,
+        }
+        if duration_ms is not None:
+            ev["duration_ms"] = duration_ms
+        if ok is not None:
+            ev["ok"] = ok
+        if payload is not None:
+            ev["payload"] = payload
+        trace = row.get("trace")
+        if not isinstance(trace, list):
+            trace = []
+        trace.append(ev)
+        row["trace"] = trace
+
+    def _drain_pending_steer(self, row: dict[str, Any]) -> list[str]:
+        """Drain the steer queue. Per R-200-203, called ONLY at phase /
+        sub-agent-tour boundaries — never mid-LLM-call. Returns the
+        chronological list of messages and clears the queue."""
+        queue = row.get("pending_steer") or []
+        if not isinstance(queue, list):
+            queue = []
+        row["pending_steer"] = []
+        return [str(m) for m in queue]
+
+    # ------------------------------------------------------------------
     # Phase execution core
     # ------------------------------------------------------------------
 
@@ -298,6 +403,19 @@ class OrchestratorService:
                 gate_c = await self._domain.evaluate_gate_c(
                     row["run_id"], dict(completion.output)
                 )
+                self._append_trace(
+                    row,
+                    kind=TraceEventKind.GATE_EVAL,
+                    phase=current_phase,
+                    label=f"Gate {gate_c.gate.value} {'passed' if gate_c.passed else 'failed'}",
+                    ok=gate_c.passed,
+                    payload={
+                        "gate": gate_c.gate.value,
+                        "artifact_id": gate_c.artifact_id,
+                        "reason": gate_c.reason,
+                    },
+                )
+                await self._repo.upsert_run(row)
                 if not gate_c.passed:
                     await self._handle_gate_failure(row, current_phase, gate_c)
                     if row["status"] != RunStatus.RUNNING.value:
@@ -348,6 +466,18 @@ class OrchestratorService:
 
             # Advance to next phase
             assert transition.next_phase is not None
+            self._append_trace(
+                row,
+                kind=TraceEventKind.PHASE_BOUNDARY,
+                phase=current_phase,
+                label=f"{current_phase.value} → {transition.next_phase.value}",
+                ok=True,
+                payload={
+                    "from_phase": current_phase.value,
+                    "to_phase": transition.next_phase.value,
+                    "completion_status": completion.status.value,
+                },
+            )
             row["current_phase"] = transition.next_phase.value
             row["enrichment_rounds"].setdefault(transition.next_phase.value, 0)
             await self._repo.upsert_run(row)
@@ -368,6 +498,27 @@ class OrchestratorService:
     async def _invoke_agent(
         self, row: dict[str, Any], phase: Phase
     ) -> AgentCompletion:
+        # R-200-203 : drain the pending-steer queue HERE — the natural
+        # "next sub-agent-tour boundary". The messages are prepended to
+        # the agent prompt under a delimited <operator-steering> block ;
+        # the queue is cleared and a trace event is appended.
+        steers = self._drain_pending_steer(row)
+        prompt = str(row["initial_prompt"])
+        if steers:
+            block = "<operator-steering>\n" + "\n---\n".join(steers) + "\n</operator-steering>"
+            prompt = f"{prompt}\n\n{block}"
+            self._append_trace(
+                row,
+                kind=TraceEventKind.STEER_APPLIED,
+                phase=phase,
+                label=f"steer applied ({len(steers)} message{'s' if len(steers) > 1 else ''})",
+                payload={
+                    "count": len(steers),
+                    "sample": steers[0][:200] + ("…" if len(steers[0]) > 200 else ""),
+                },
+            )
+            await self._repo.upsert_run(row)
+
         dispatch = DispatchRequest(
             run_id=row["run_id"],
             phase=phase,
@@ -376,18 +527,48 @@ class OrchestratorService:
             tenant_id=row["tenant_id"],
             user_id=row["user_id"],
             project_id=row["project_id"],
-            prompt=row["initial_prompt"],
+            prompt=prompt,
             context_bundle={
                 "domain": row["domain"],
                 "concerns_so_far": row.get("concerns", []),
             },
         )
+        # R-200-200 : begin trace marker (dispatch start). We don't
+        # persist between start and end — the end-marker write covers
+        # both. If the dispatcher raises, no end-marker is written and
+        # the start-marker stays in memory only (not persisted), which
+        # is the desired "no half-state" semantics.
+        self._append_trace(
+            row,
+            kind=TraceEventKind.AGENT_DISPATCH,
+            phase=phase,
+            label=f"{dispatch.agent.value} dispatched",
+            payload={"event": "start", "agent": dispatch.agent.value},
+        )
+
         await self._publish(
             row["run_id"],
             "agent.invoked",
             {"phase": phase.value, "agent": dispatch.agent.value},
         )
+        started = datetime.now(UTC)
         completion = await self._dispatcher.dispatch(dispatch)
+        duration_ms = int((datetime.now(UTC) - started).total_seconds() * 1000)
+        self._append_trace(
+            row,
+            kind=TraceEventKind.AGENT_DISPATCH,
+            phase=phase,
+            label=f"{completion.agent.value} completed ({completion.status.value})",
+            duration_ms=duration_ms,
+            ok=completion.status
+            in (EscalationStatus.DONE, EscalationStatus.DONE_WITH_CONCERNS),
+            payload={
+                "event": "end",
+                "agent": completion.agent.value,
+                "status": completion.status.value,
+            },
+        )
+        await self._repo.upsert_run(row)
         await self._publish(
             row["run_id"],
             "agent.completed",
@@ -418,6 +599,22 @@ class OrchestratorService:
         attempts_map: dict[str, int] = dict(row.get("fix_attempts", {}))
         attempts_map[artifact_id] = int(attempts_map.get(artifact_id, 0)) + 1
         row["fix_attempts"] = attempts_map
+        self._append_trace(
+            row,
+            kind=TraceEventKind.FIX_ATTEMPT,
+            phase=phase,
+            label=(
+                f"fix attempt {attempts_map[artifact_id]} on {gate.gate.value}"
+                f" / {artifact_id}"
+            ),
+            ok=False,
+            payload={
+                "gate": gate.gate.value,
+                "artifact_id": artifact_id,
+                "fix_attempts": attempts_map[artifact_id],
+                "reason": gate.reason,
+            },
+        )
         await self._repo.upsert_run(row)
         await self._publish(
             row["run_id"],
@@ -470,6 +667,19 @@ class OrchestratorService:
         gate_b = await self._domain.evaluate_gate_b(
             row["run_id"], dict(completion.output),
         )
+        self._append_trace(
+            row,
+            kind=TraceEventKind.GATE_EVAL,
+            phase=Phase.GENERATE,
+            label=f"Gate {gate_b.gate.value} {'passed' if gate_b.passed else 'failed'}",
+            ok=gate_b.passed,
+            payload={
+                "gate": gate_b.gate.value,
+                "artifact_id": gate_b.artifact_id,
+                "reason": gate_b.reason,
+            },
+        )
+        await self._repo.upsert_run(row)
         if not gate_b.passed:
             await self._handle_gate_failure(row, Phase.GENERATE, gate_b)
             return False
@@ -601,7 +811,18 @@ class OrchestratorService:
             "run_id": run_id,
             "payload": payload,
         }
-        await self._publisher.publish(subject, envelope)
+        # R-200-070 hybrid exposure : the publisher is best-effort from
+        # the state-machine's POV. NATS / JetStream hiccups SHALL NOT
+        # halt run progression — the trace ledger (R-200-200) keeps the
+        # audit trail intact regardless. NullPublisher never raises, so
+        # the try is no-op in legacy / opt-out deployments.
+        try:
+            await self._publisher.publish(subject, envelope)
+        except Exception as exc:  # publisher backends raise heterogeneous types
+            _log.warning(
+                "event publisher failure (subject=%s, run=%s): %s — "
+                "continuing without halt", subject, run_id, exc,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -619,7 +840,21 @@ def get_service(request: Request) -> OrchestratorService:
     return svc  # type: ignore[no-any-return]
 
 
+_PUBLIC_TRACE_WINDOW = 200  # R-200-201
+
+
 def _public(row: dict[str, Any]) -> RunPublic:
+    trace_raw = row.get("trace") or []
+    trace_window: list[TraceEvent] = []
+    if isinstance(trace_raw, list):
+        # Stored append-only (oldest first) ; public is newest-first
+        # capped at the sliding window per R-200-201.
+        window_slice = trace_raw[-_PUBLIC_TRACE_WINDOW:]
+        trace_window = [
+            TraceEvent.model_validate(ev)
+            for ev in reversed(window_slice)
+            if isinstance(ev, dict)
+        ]
     return RunPublic(
         run_id=row["run_id"],
         project_id=row["project_id"],
@@ -649,4 +884,5 @@ def _public(row: dict[str, Any]) -> RunPublic:
             if row.get("block_reason") is not None
             else None
         ),
+        trace=trace_window,
     )

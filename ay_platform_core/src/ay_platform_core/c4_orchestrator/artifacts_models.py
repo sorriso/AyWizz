@@ -1,12 +1,19 @@
 # =============================================================================
 # File: artifacts_models.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/src/ay_platform_core/c4_orchestrator/artifacts_models.py
 # Description: Pydantic models for the project-artifacts surface (Pass 1
 #              of the Code source / DocGen feature). The UX browses these
 #              via the new read-only REST surface declared in R-200-131 ;
 #              MinIO never appears in the UI — every blob transits
 #              through `GET .../blob` (R-200-133 transparent backend).
+#
+#              v2 (2026-05-21) : `ArtifactNode.version` — per-file
+#              revision count for live-docs, batched per AI response
+#              (one bump per assistant turn that modified the file, even
+#              if that turn wrote it multiple times). Derived from the
+#              Gitea commit history (R-200-147 versioning proxy) ; None
+#              for non-live-docs runs and when Gitea is unavailable.
 #
 # @relation implements:R-200-130
 # @relation implements:R-200-131
@@ -78,6 +85,10 @@ class ArtifactNode(BaseModel):
     kind: Literal["file", "dir"]
     size_bytes: int = Field(ge=0)
     mime_type: str | None = None
+    # Per-file revision count, batched per AI response (live-docs only).
+    # None when the run is not live-docs, the node is a directory, or
+    # the Gitea history is unavailable. The UX renders `name (vN)`.
+    version: int | None = Field(default=None, ge=1)
 
 
 class ArtifactTree(BaseModel):

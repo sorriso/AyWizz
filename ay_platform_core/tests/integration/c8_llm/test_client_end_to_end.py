@@ -175,6 +175,50 @@ async def test_chat_completion_round_trip(mock_gateway: LLMGatewayClient) -> Non
 
 
 @pytest.mark.asyncio
+async def test_agent_route_resolver_picks_model_from_table() -> None:
+    """R-800-030 v1 client-side resolver: when the caller leaves `model`
+    empty, the agent_name → model_name map populates it before the
+    request goes out. The mock proxy echoes `model` back so we can
+    assert end-to-end propagation."""
+    app = _build_mock_app()
+    transport = httpx.ASGITransport(app=app)
+    http_client = httpx.AsyncClient(transport=transport, base_url="http://mock/v1")
+    client = LLMGatewayClient(
+        ClientSettings(gateway_url="http://mock/v1"),
+        bearer_token="test-token",
+        http_client=http_client,
+        agent_routes={
+            "c3-rag": "llama3-3b-local",
+            "c3-docgen": "claude-haiku-fast",
+        },
+    )
+    try:
+        # No explicit `model:` on the request — resolver fills it from agent_routes.
+        payload = ChatCompletionRequest(
+            messages=[ChatMessage(role=ChatRole.USER, content="hi")],
+        )
+        resp = await client.chat_completion(
+            payload, agent_name="c3-docgen", session_id="s-2",
+        )
+        assert resp.model == "claude-haiku-fast"
+
+        # Different agent → different route.
+        resp2 = await client.chat_completion(
+            payload, agent_name="c3-rag", session_id="s-3",
+        )
+        assert resp2.model == "llama3-3b-local"
+
+        # Unknown agent + no default → no `model` field reaches the
+        # proxy ; the mock falls back to its own default string.
+        resp3 = await client.chat_completion(
+            payload, agent_name="ghost-agent", session_id="s-4",
+        )
+        assert resp3.model == "mock-model"
+    finally:
+        await http_client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_missing_agent_name_raises_before_io(
     mock_gateway: LLMGatewayClient,
 ) -> None:

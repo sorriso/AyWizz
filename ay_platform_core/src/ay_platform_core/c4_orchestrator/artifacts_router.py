@@ -189,6 +189,7 @@ async def get_artifact_blob(
 async def list_project_commits(
     project_id: str,
     page: int = 1,
+    path: str | None = None,
     _actor: str = Depends(_require_actor),
     tenant_id: str = Depends(_require_tenant),
     x_user_roles: str | None = Header(default=None),
@@ -198,10 +199,14 @@ async def list_project_commits(
     transparency : the UX never reaches Gitea directly). Returns the
     most-recent-first commits list, paginated server-side at 50 per
     page. Empty list when Gitea is not wired or the repo has no
-    commits yet — the UX renders 'no versions yet' uniformly."""
+    commits yet — the UX renders 'no versions yet' uniformly.
+
+    `path` (optional query) restricts the list to commits that touched
+    that file — the per-file revision history backing the
+    "view a previous version" UX (R-200-147)."""
     _reject_tenant_manager(x_user_roles)
     raw = await service.list_commits(
-        project_id=project_id, tenant_id=tenant_id, page=page,
+        project_id=project_id, tenant_id=tenant_id, page=page, path=path,
     )
     return ArtifactCommitList(
         commits=[ArtifactCommit(**entry) for entry in raw],

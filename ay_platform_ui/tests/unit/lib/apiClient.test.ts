@@ -1,6 +1,6 @@
 // =============================================================================
 // File: apiClient.test.ts
-// Version: 1
+// Version: 2
 // Path: ay_platform_ui/tests/unit/lib/apiClient.test.ts
 // Description: Unit tests for the HTTP client wrapper. Covers :
 //                - URL composition (relative vs absolute apiBaseUrl)
@@ -8,6 +8,11 @@
 //                - login() returns the token without persisting
 //                - ApiError thrown on non-2xx with status + body
 //                - localStorage helpers (read/write/clear)
+//
+//              v2 (2026-05-21): version-history methods (R-200-147) —
+//              `listProjectCommits` forwards an optional `path` filter
+//              and `getDocumentTextAtRef` builds the `?ref=<sha>` read
+//              URL + returns the decoded text + content type.
 // =============================================================================
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -299,5 +304,75 @@ describe("ApiClient error handling", () => {
 
     const client = new ApiClient(SAME_ORIGIN_CFG);
     await expect(client.login("a", "b")).rejects.toThrow(/empty body/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Version history (R-200-147) — per-file commits + read-at-ref
+// ---------------------------------------------------------------------------
+
+describe("ApiClient version history", () => {
+  it("listProjectCommits forwards the optional path filter", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ commits: [], page: 1 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient(SAME_ORIGIN_CFG);
+    await client.listProjectCommits("proj-d", 1, "docs/intro.md");
+
+    const url = fetchMock.mock.calls[0][0] as string;
+    expect(url).toContain("/api/v1/projects/proj-d/git/commits?page=1");
+    expect(url).toContain("&path=docs%2Fintro.md");
+  });
+
+  it("listProjectCommits omits the path query when not provided", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ commits: [], page: 1 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient(SAME_ORIGIN_CFG);
+    await client.listProjectCommits("proj-d");
+
+    const url = fetchMock.mock.calls[0][0] as string;
+    expect(url).not.toContain("&path=");
+  });
+
+  it("getDocumentTextAtRef builds the ?ref read URL and returns text + type", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: () => Promise.resolve("# v1\n"),
+      headers: new Headers({ "Content-Type": "text/markdown" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient(SAME_ORIGIN_CFG);
+    const out = await client.getDocumentTextAtRef("proj-d", "docs/intro.md", "sha-1");
+
+    const url = fetchMock.mock.calls[0][0] as string;
+    expect(url).toBe("/api/v1/projects/proj-d/documents/docs/intro.md?ref=sha-1");
+    expect(out).toEqual({ text: "# v1\n", contentType: "text/markdown" });
+  });
+
+  it("getDocumentTextAtRef throws ApiError on a 404 (unknown ref)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        text: () => Promise.resolve('{"detail":"not found at ref"}'),
+      }),
+    );
+
+    const client = new ApiClient(SAME_ORIGIN_CFG);
+    await expect(
+      client.getDocumentTextAtRef("proj-d", "docs/intro.md", "bad"),
+    ).rejects.toBeInstanceOf(ApiError);
   });
 });

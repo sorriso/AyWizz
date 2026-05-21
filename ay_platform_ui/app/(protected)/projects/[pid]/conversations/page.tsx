@@ -1,13 +1,15 @@
 // =============================================================================
 // File: page.tsx
-// Version: 4
+// Version: 5
 // Path: ay_platform_ui/app/(protected)/projects/[pid]/conversations/page.tsx
 //
-// v4 (2026-05-19): Increment 3a — on mount, resume the last active
-// conversation (cross-nav store) so re-entering the Conversations
-// tab returns the operator into their conversation (like Working
-// area) rather than the bare list. The list stays reachable via the
-// `[cid]` breadcrumb which clears the stored marker.
+// v5 (2026-05-19): the v4 auto-`router.replace` resume was a TRAP —
+// the list became unreachable (breadcrumb / URL edit bounced right
+// back into the conversation ; a Working-area-created conversation
+// also hijacked it). Replaced by a user-initiated "↩ Resume last
+// conversation" header link. The list is always a real destination.
+//
+// v4 (2026-05-19): [reverted] auto-resume redirect.
 //
 // Description: Conversations list (Phase D). One row per conversation
 //              the caller owns, scoped to the active project. A single
@@ -32,7 +34,7 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { useProjectUi } from "@/app/(protected)/workspace-store";
 import { ApiClient, ApiError } from "@/lib/apiClient";
@@ -60,12 +62,11 @@ export default function ConversationsListPage() {
   const [state, setState] = useState<ListState>({ status: "loading" });
   const [refreshCounter, setRefreshCounter] = useState(0);
   // Cross-nav store (Increment 3a). Coming back to the Conversations
-  // tab resumes the conversation the operator was in (like Working
-  // area) instead of dumping them on the list. The `[cid]` page
-  // clears `activeConversationId` when its "← Conversations"
-  // breadcrumb is used, so the list IS reachable on purpose.
+  // tab offers a USER-INITIATED "Resume last conversation" link
+  // (the previous auto-`router.replace` was a trap : the list became
+  // unreachable — clicking the breadcrumb / editing the URL bounced
+  // straight back in). The list is now always a real destination.
   const { ui } = useProjectUi(projectId);
-  const resumedRef = useRef(false);
 
   const apiClient = useMemo(() => {
     if (configState.status !== "ready") return null;
@@ -97,19 +98,15 @@ export default function ConversationsListPage() {
     };
   }, [apiClient, projectId, refreshCounter]);
 
-  // Resume the last conversation once (per mount) when the store
-  // points at one that still exists. router.replace so the list
-  // isn't left in history between it and the conversation.
-  useEffect(() => {
-    if (resumedRef.current || state.status !== "ready") return;
-    const last = ui.activeConversationId;
-    if (last && state.items.some((c) => c.id === last)) {
-      resumedRef.current = true;
-      router.replace(
-        `/projects/${encodeURIComponent(projectId)}/conversations/${encodeURIComponent(last)}`,
-      );
-    }
-  }, [state, ui.activeConversationId, projectId, router]);
+  // Last conversation still present in the list → expose a resume
+  // link in the header (rendered below). Purely informational here ;
+  // no auto-navigation (that was the trap).
+  const resumableId =
+    state.status === "ready" &&
+    ui.activeConversationId &&
+    state.items.some((c) => c.id === ui.activeConversationId)
+      ? ui.activeConversationId
+      : null;
 
   return (
     <main className="mx-auto max-w-7xl px-6 py-10">
@@ -120,11 +117,22 @@ export default function ConversationsListPage() {
             Chat with the platform's RAG-augmented assistant over this project's sources.
           </p>
         </div>
-        {state.status === "ready" ? (
-          <p className="text-sm text-neutral-500" data-testid="conversations-count">
-            {state.items.length} conversation{state.items.length === 1 ? "" : "s"}
-          </p>
-        ) : null}
+        <div className="flex items-center gap-4">
+          {resumableId ? (
+            <Link
+              href={`/projects/${encodeURIComponent(projectId)}/conversations/${encodeURIComponent(resumableId)}`}
+              className="rounded-md border border-blue-300 bg-blue-50 px-3 py-1.5 text-sm font-medium text-blue-700 hover:bg-blue-100"
+              data-testid="resume-last-conversation"
+            >
+              ↩ Resume last conversation
+            </Link>
+          ) : null}
+          {state.status === "ready" ? (
+            <p className="text-sm text-neutral-500" data-testid="conversations-count">
+              {state.items.length} conversation{state.items.length === 1 ? "" : "s"}
+            </p>
+          ) : null}
+        </div>
       </header>
 
       <NewConversationCard

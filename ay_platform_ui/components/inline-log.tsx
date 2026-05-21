@@ -1,7 +1,20 @@
 // =============================================================================
 // File: inline-log.tsx
-// Version: 2
+// Version: 4
 // Path: ay_platform_ui/components/inline-log.tsx
+//
+// v4 (2026-05-21): #5 — the per-tool "Open in Working area →" deep-link
+// is removed from the inline rows (the inline log is now pure
+// chain-of-thought). Modified-document deep-links are surfaced by the
+// new <ModifiedDocsLinks>, rendered BELOW the response, one compact
+// versioned "Open in working area (vN)" link per modified doc (version
+// read from the tool_call `done` event). InlineLog no longer needs the
+// projectId/conversationId/hideOpenLink props.
+//
+// v3 (2026-05-21): tool_call rows are now an expandable chain-of-thought
+// view (#4). A `done` row with `arguments` (or a summary) toggles open
+// to reveal the call's step/round, arguments, and result summary. The
+// arguments are size-capped server-side (C3 `_safe_tool_args`).
 //
 // v2 (2026-05-19): `hideOpenLink` — the Working-area surface
 // suppresses the tool_call "Open in Working area" deep-link (we're
@@ -118,66 +131,113 @@ function StageFormatter({ events }: { events: InlineEvent[] }): ReactNode {
   );
 }
 
-/** kind="tool_call" formatter — the amber "Document tools" strip.
- *  ⏳ running / ✅ ok / ❌ error, optional result summary, and an
- *  "Open in Working area →" deep-link for create/update with a path
- *  (when the rendering context supplies project + conversation). */
-function ToolCallFormatter({
-  events,
-  projectId,
-  conversationId,
-  hideOpenLink,
-}: {
-  events: InlineEvent[];
-  projectId?: string;
-  conversationId?: string;
-  hideOpenLink?: boolean;
-}): ReactNode {
+/** Render one tool-call argument value for the chain-of-thought
+ *  detail. Strings (already size-capped server-side) pass through ;
+ *  everything else is JSON-stringified compactly. */
+function _argValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/** One tool-call row. A `done` event with arguments or a summary is
+ *  expandable : the toggle reveals the chain-of-thought detail (step /
+ *  round, the call arguments, the result summary). Running rows stay
+ *  compact. No deep-link here — the versioned "Open in working area"
+ *  links live in <ModifiedDocsLinks>, rendered below the response (#5). */
+function ToolCallRow({ tc, index }: { tc: InlineEvent; index: number }): ReactNode {
+  const [open, setOpen] = useState(false);
+  const argEntries = tc.arguments ? Object.entries(tc.arguments) : [];
+  const expandable = tc.status === "done" && (argEntries.length > 0 || !!tc.summary);
+  const icon = tc.status === "running" ? "⏳" : tc.ok ? "✅" : "❌";
+  const stepBadge =
+    typeof tc.round === "number" ? (
+      <span className="rounded bg-amber-100 px-1 text-[10px] text-amber-700">step {tc.round}</span>
+    ) : null;
+
+  return (
+    <li
+      className="font-mono text-[11px] text-amber-900"
+      data-testid={`inline-toolcall-${tc.name}-${tc.status}`}
+    >
+      <div className="flex items-center gap-1.5">
+        <span aria-hidden="true">{icon}</span>
+        {expandable ? (
+          <button
+            type="button"
+            onClick={() => setOpen((o) => !o)}
+            aria-expanded={open}
+            className="flex items-center gap-1.5 text-left hover:underline"
+            data-testid={`inline-toolcall-toggle-${tc.name}`}
+          >
+            <span className="font-semibold">{tc.name}</span>
+            {stepBadge}
+            {tc.summary ? <span className="text-amber-700">— {tc.summary}</span> : null}
+            <span aria-hidden="true">{open ? "▾" : "▸"}</span>
+          </button>
+        ) : (
+          <span className="flex items-center gap-1.5">
+            <span className="font-semibold">{tc.name}</span>
+            {stepBadge}
+            {tc.status === "done" && tc.summary ? (
+              <span className="text-amber-700">— {tc.summary}</span>
+            ) : null}
+          </span>
+        )}
+      </div>
+      {expandable && open ? (
+        <div
+          className="mt-1 ml-5 rounded border border-amber-200 bg-white/70 p-2 dark:bg-zinc-900/40"
+          data-testid={`inline-toolcall-detail-${tc.name}-${index}`}
+        >
+          {argEntries.length > 0 ? (
+            <dl className="space-y-0.5">
+              {argEntries.map(([key, value]) => (
+                <div key={key} className="grid grid-cols-[5rem_1fr] gap-2">
+                  <dt className="text-amber-600">{key}</dt>
+                  <dd className="whitespace-pre-wrap break-words text-amber-900">
+                    {_argValue(value)}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          ) : (
+            <p className="text-amber-700">{tc.summary}</p>
+          )}
+        </div>
+      ) : null}
+    </li>
+  );
+}
+
+/** kind="tool_call" formatter — the amber tool strip, now a
+ *  chain-of-thought view : one row per tool call (in step order) that
+ *  expands to show the call's arguments + result summary. ⏳ running /
+ *  ✅ ok / ❌ error. Deep-links to modified docs are surfaced separately
+ *  by <ModifiedDocsLinks> below the response (#5). */
+function ToolCallFormatter({ events }: { events: InlineEvent[] }): ReactNode {
   return (
     <div
       className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs"
       data-testid="inline-toolcalls"
     >
-      <div className="mb-1 font-medium uppercase tracking-wide text-amber-700">Document tools</div>
+      <div className="mb-1 font-medium uppercase tracking-wide text-amber-700">
+        Chain of thought · tools
+      </div>
       <ul className="space-y-0.5">
-        {events.map((tc, i) => {
-          const canLink =
-            !hideOpenLink &&
-            tc.status === "done" &&
-            !!tc.path &&
-            !!projectId &&
-            !!conversationId &&
-            (tc.name === "create_document" || tc.name === "update_document");
-          return (
-            <li
-              // Append-only across turns ; round restarts each turn so
-              // the index is the correct stable key (order is stable).
-              // biome-ignore lint/suspicious/noArrayIndexKey: append-only, stable order
-              key={`${i}-${tc.name}-${tc.status}`}
-              className="flex items-center gap-1.5 font-mono text-[11px] text-amber-900"
-              data-testid={`inline-toolcall-${tc.name}-${tc.status}`}
-            >
-              <span aria-hidden="true">{tc.status === "running" ? "⏳" : tc.ok ? "✅" : "❌"}</span>
-              <span className="font-semibold">{tc.name}</span>
-              {tc.status === "done" && tc.summary ? (
-                <span className="text-amber-700">— {tc.summary}</span>
-              ) : null}
-              {canLink ? (
-                <Link
-                  href={`/projects/${encodeURIComponent(
-                    projectId as string,
-                  )}/working-area?conv=${encodeURIComponent(
-                    conversationId as string,
-                  )}&path=${encodeURIComponent(tc.path as string)}`}
-                  className="ml-1 rounded border border-amber-300 bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 no-underline hover:bg-amber-200"
-                  data-testid={`inline-toolcall-open-${tc.name}`}
-                >
-                  Open in Working area →
-                </Link>
-              ) : null}
-            </li>
-          );
-        })}
+        {events.map((tc, i) => (
+          <ToolCallRow
+            // Append-only across turns ; round restarts each turn so
+            // the index is the correct stable key (order is stable).
+            // biome-ignore lint/suspicious/noArrayIndexKey: append-only, stable order
+            key={`${i}-${tc.name}-${tc.status}`}
+            tc={tc}
+            index={i}
+          />
+        ))}
       </ul>
     </div>
   );
@@ -212,24 +272,9 @@ function GenericFormatter({ events }: { events: InlineEvent[] }): ReactNode {
 
 /** Per-kind formatter registry. THE extension point : a new inline
  *  event kind only needs an entry here. */
-const FORMATTERS: Record<
-  string,
-  (args: {
-    events: InlineEvent[];
-    projectId?: string;
-    conversationId?: string;
-    hideOpenLink?: boolean;
-  }) => ReactNode
-> = {
+const FORMATTERS: Record<string, (args: { events: InlineEvent[] }) => ReactNode> = {
   stage: ({ events }) => <StageFormatter events={events} />,
-  tool_call: ({ events, projectId, conversationId, hideOpenLink }) => (
-    <ToolCallFormatter
-      events={events}
-      projectId={projectId}
-      conversationId={conversationId}
-      hideOpenLink={hideOpenLink}
-    />
-  ),
+  tool_call: ({ events }) => <ToolCallFormatter events={events} />,
 };
 
 /** Unified inline-activity renderer. Feed it the live-accumulated
@@ -240,19 +285,10 @@ const FORMATTERS: Record<
  *  is ever dropped. */
 export function InlineLog({
   events,
-  projectId,
-  conversationId,
   className,
-  hideOpenLink,
 }: {
   events: InlineEvent[] | null | undefined;
-  projectId?: string;
-  conversationId?: string;
   className?: string;
-  /** Suppress the tool_call "Open in Working area" deep-link. Set
-   *  by the Working-area surface itself — we're already there, the
-   *  link would be a no-op self-navigation. */
-  hideOpenLink?: boolean;
 }): ReactNode {
   if (!events || events.length === 0) return null;
   // Group by kind, preserving the order each kind first appears.
@@ -272,10 +308,65 @@ export function InlineLog({
         const fmt = FORMATTERS[kind];
         return (
           <div key={kind}>
-            {fmt
-              ? fmt({ events: groupEvents, projectId, conversationId, hideOpenLink })
-              : GenericFormatter({ events: groupEvents })}
+            {fmt ? fmt({ events: groupEvents }) : GenericFormatter({ events: groupEvents })}
           </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Below-response deep-links to the documents a turn created/updated
+ *  (#5). One compact "Open in working area (vN)" link per distinct
+ *  modified path (last write in the turn wins the version). Reads the
+ *  path + resulting version straight from the tool_call `done` events
+ *  (no extra fetch). Rendered only where navigation makes sense
+ *  (Conversations) — the Working-area sidebar omits it (already there). */
+export function ModifiedDocsLinks({
+  events,
+  projectId,
+  conversationId,
+}: {
+  events: InlineEvent[] | null | undefined;
+  projectId?: string;
+  conversationId?: string;
+}): ReactNode {
+  if (!events || !projectId || !conversationId) return null;
+  // Distinct modified paths → resulting version (last write wins).
+  const byPath = new Map<string, number | null>();
+  for (const e of events) {
+    if (
+      e.kind === "tool_call" &&
+      e.status === "done" &&
+      e.ok &&
+      e.path &&
+      (e.name === "create_document" || e.name === "update_document")
+    ) {
+      byPath.set(e.path, typeof e.version === "number" ? e.version : null);
+    }
+  }
+  if (byPath.size === 0) return null;
+  return (
+    <div className="flex flex-col gap-1" data-testid="modified-docs-links">
+      {[...byPath.entries()].map(([path, version]) => {
+        const basename = path.split("/").pop() ?? path;
+        return (
+          <Link
+            key={path}
+            href={`/projects/${encodeURIComponent(
+              projectId,
+            )}/working-area?conv=${encodeURIComponent(
+              conversationId,
+            )}&path=${encodeURIComponent(path)}`}
+            className="inline-flex w-fit items-center gap-1 rounded border border-blue-200 bg-blue-50 px-2 py-1 text-xs font-medium text-blue-700 no-underline hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-950 dark:text-blue-300"
+            data-testid={`modified-doc-link-${path}`}
+          >
+            <span aria-hidden="true">📄</span>
+            <span>Open in working area: {basename}</span>
+            {typeof version === "number" ? (
+              <span className="text-blue-500">(v{version})</span>
+            ) : null}
+          </Link>
         );
       })}
     </div>

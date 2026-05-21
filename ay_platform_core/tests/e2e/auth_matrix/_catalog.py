@@ -670,6 +670,18 @@ _C7_MEMORY: list[EndpointSpec] = [
     ),
     EndpointSpec(
         component="c7_memory",
+        method="GET",
+        path="/api/v1/memory/projects/{project_id}/kg/summary",
+        auth=Auth.AUTHENTICATED,
+        scope=Scope.PROJECT,
+        success_status=200,
+        notes=(
+            "Simple graph bootstrap (R-400-200/201): entity/relation counts "
+            "+ a sample of triples with provenance for the project's KG."
+        ),
+    ),
+    EndpointSpec(
+        component="c7_memory",
         method="DELETE",
         path="/api/v1/memory/projects/{project_id}/sources/{source_id}",
         auth=Auth.ROLE_GATED,
@@ -680,6 +692,25 @@ _C7_MEMORY: list[EndpointSpec] = [
         excluded_global_roles=("tenant_manager",),
         backend=Backend.ARANGO,
         backend_collection="c7_sources",
+    ),
+    EndpointSpec(
+        component="c7_memory",
+        method="POST",
+        path="/api/v1/memory/projects/{project_id}/sources/{source_id}/reprocess",
+        auth=Auth.ROLE_GATED,
+        scope=Scope.PROJECT,
+        success_status=200,
+        accept_roles=("project_editor", "project_owner"),
+        accept_global_roles=("admin",),
+        excluded_global_roles=("tenant_manager",),
+        backend=Backend.BOTH,
+        backend_collection="memory_sources",
+        backend_bucket="memory",
+        notes=(
+            "R-400-208 — re-run the chunk+embed pipeline for one source "
+            "from its persisted raw bytes and re-stamp the current "
+            "processing_version. 409 when the source has no stored raw bytes."
+        ),
     ),
     EndpointSpec(
         component="c7_memory",
@@ -904,6 +935,27 @@ _C4_ORCHESTRATOR: list[EndpointSpec] = [
         accept_global_roles=("admin",),
         excluded_global_roles=("tenant_manager",),
     ),
+    # Tranche B — Trace ledger paginated read (R-200-201). Same auth
+    # shape as GET /runs/{run_id} : authenticated, tenant-scoped read,
+    # no role gate beyond actor presence.
+    EndpointSpec(
+        component="c4_orchestrator",
+        method="GET",
+        path="/api/v1/orchestrator/runs/{run_id}/trace",
+        auth=Auth.AUTHENTICATED,
+        scope=Scope.TENANT,
+        success_status=200,
+    ),
+    # Tranche B — Operator steer queue (R-200-202). RBAC matches
+    # /feedback per spec : authenticated content endpoint.
+    EndpointSpec(
+        component="c4_orchestrator",
+        method="POST",
+        path="/api/v1/orchestrator/runs/{run_id}/steer",
+        auth=Auth.AUTHENTICATED,
+        scope=Scope.TENANT,
+        success_status=200,
+    ),
     # Project artifacts surface — Pass 1 of the Code source / DocGen
     # feature (R-200-131). Read-only for any tenant member ;
     # tenant_manager is rejected because artifacts are tenant content
@@ -1034,6 +1086,130 @@ _C4_ORCHESTRATOR: list[EndpointSpec] = [
         backend_collection="c4_artifact_runs",
         backend_bucket="orchestrator",
         notes="Delete a document from MinIO ; Gitea history retained (D-015).",
+    ),
+    # Tranche B (§5.17) — operator-driven structural ops on live-docs.
+    # Same RBAC as the rest of the documents surface.
+    EndpointSpec(
+        component="c4_orchestrator",
+        method="POST",
+        path="/api/v1/projects/{project_id}/documents/mkdir",
+        auth=Auth.AUTHENTICATED,
+        scope=Scope.PROJECT,
+        success_status=201,
+        excluded_global_roles=("tenant_manager",),
+        backend=Backend.BOTH,
+        backend_collection="c4_artifact_runs",
+        backend_bucket="orchestrator",
+        notes="Create an empty directory marker in live-docs (R-200-161).",
+    ),
+    EndpointSpec(
+        component="c4_orchestrator",
+        method="POST",
+        path="/api/v1/projects/{project_id}/documents/rename",
+        auth=Auth.AUTHENTICATED,
+        scope=Scope.PROJECT,
+        success_status=200,
+        excluded_global_roles=("tenant_manager",),
+        backend=Backend.BOTH,
+        backend_collection="c4_artifact_runs",
+        backend_bucket="orchestrator",
+        notes="Rename a live-docs file or directory atomically (R-200-162).",
+    ),
+    EndpointSpec(
+        component="c4_orchestrator",
+        method="POST",
+        path="/api/v1/projects/{project_id}/documents/move",
+        auth=Auth.AUTHENTICATED,
+        scope=Scope.PROJECT,
+        success_status=200,
+        excluded_global_roles=("tenant_manager",),
+        backend=Backend.BOTH,
+        backend_collection="c4_artifact_runs",
+        backend_bucket="orchestrator",
+        notes="Move a live-docs file/dir under a different directory (R-200-162).",
+    ),
+    # Tranche B (§5.18) — source-files surface (tree projection +
+    # operator structural ops + metadata). Editor+ RBAC on mutating
+    # endpoints (R-200-171) ; reader RBAC on the tree and metadata.
+    EndpointSpec(
+        component="c4_orchestrator",
+        method="GET",
+        path="/api/v1/projects/{project_id}/source/tree",
+        auth=Auth.AUTHENTICATED,
+        scope=Scope.PROJECT,
+        success_status=200,
+        excluded_global_roles=("tenant_manager",),
+        notes="Recursive source-files tree projection (R-200-170).",
+    ),
+    EndpointSpec(
+        component="c4_orchestrator",
+        method="POST",
+        path="/api/v1/projects/{project_id}/source/mkdir",
+        auth=Auth.ROLE_GATED,
+        scope=Scope.PROJECT,
+        success_status=201,
+        accept_roles=("project_owner", "project_editor"),
+        accept_global_roles=("admin",),
+        excluded_global_roles=("tenant_manager",),
+        backend=Backend.BOTH,
+        backend_collection="c4_artifact_runs",
+        backend_bucket="orchestrator",
+        notes="Source-files mkdir — editor+ RBAC (R-200-171).",
+    ),
+    EndpointSpec(
+        component="c4_orchestrator",
+        method="POST",
+        path="/api/v1/projects/{project_id}/source/rename",
+        auth=Auth.ROLE_GATED,
+        scope=Scope.PROJECT,
+        success_status=200,
+        accept_roles=("project_owner", "project_editor"),
+        accept_global_roles=("admin",),
+        excluded_global_roles=("tenant_manager",),
+        backend=Backend.BOTH,
+        backend_collection="c4_artifact_runs",
+        backend_bucket="orchestrator",
+        notes="Source-files rename — editor+ RBAC (R-200-171).",
+    ),
+    EndpointSpec(
+        component="c4_orchestrator",
+        method="POST",
+        path="/api/v1/projects/{project_id}/source/move",
+        auth=Auth.ROLE_GATED,
+        scope=Scope.PROJECT,
+        success_status=200,
+        accept_roles=("project_owner", "project_editor"),
+        accept_global_roles=("admin",),
+        excluded_global_roles=("tenant_manager",),
+        backend=Backend.BOTH,
+        backend_collection="c4_artifact_runs",
+        backend_bucket="orchestrator",
+        notes="Source-files move — editor+ RBAC (R-200-171).",
+    ),
+    EndpointSpec(
+        component="c4_orchestrator",
+        method="GET",
+        path="/api/v1/projects/{project_id}/source/file/{path:path}/meta",
+        auth=Auth.AUTHENTICATED,
+        scope=Scope.PROJECT,
+        success_status=200,
+        excluded_global_roles=("tenant_manager",),
+        notes="Source-file metadata (size, mime, last commit) — R-200-173.",
+    ),
+    EndpointSpec(
+        component="c4_orchestrator",
+        method="DELETE",
+        path="/api/v1/projects/{project_id}/source/file/{path:path}",
+        auth=Auth.ROLE_GATED,
+        scope=Scope.PROJECT,
+        success_status=204,
+        accept_roles=("project_owner", "project_editor"),
+        accept_global_roles=("admin",),
+        excluded_global_roles=("tenant_manager",),
+        backend=Backend.BOTH,
+        backend_collection="c4_artifact_runs",
+        backend_bucket="orchestrator",
+        notes="Source-files single-file DELETE — editor+ RBAC (R-200-175).",
     ),
 ]
 

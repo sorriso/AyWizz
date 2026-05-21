@@ -1,18 +1,28 @@
 # =============================================================================
 # File: models.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/src/ay_platform_core/c4_orchestrator/models.py
 # Description: Pydantic v2 models for the C4 Orchestrator. Mirrors the
-#              contract-critical entities E-200-001..005 from
+#              contract-critical entities E-200-001..008 from
 #              200-SPEC-PIPELINE-AGENT.
+#
+#              v2 (2026-05-20) : adds Tranche B contracts — TraceEvent
+#              (E-200-006), RunSteer (E-200-007), and the extended
+#              RunPublic with the `trace` sliding window per R-200-201.
+#              PromptReference (E-200-008) lives in C3 (chat surface).
 #
 # @relation implements:R-200-001
 # @relation implements:R-200-002
 # @relation implements:R-200-020
 # @relation implements:R-200-022
+# @relation implements:R-200-200
+# @relation implements:R-200-201
+# @relation implements:R-200-202
 # @relation implements:E-200-001
 # @relation implements:E-200-002
 # @relation implements:E-200-003
+# @relation implements:E-200-006
+# @relation implements:E-200-007
 # =============================================================================
 
 from __future__ import annotations
@@ -72,6 +82,37 @@ class Gate(StrEnum):
     A_DESIGN_APPROVED = "A"
     B_VALIDATION_RED = "B"
     C_VALIDATION_FRESH_GREEN = "C"
+
+
+class TraceEventKind(StrEnum):
+    """Discriminator for the run-trace ledger (E-200-006, R-200-200).
+
+    Future kinds SHALL extend this union, never reuse an existing value.
+    """
+
+    AGENT_DISPATCH = "agent-dispatch"
+    GATE_EVAL = "gate-eval"
+    FIX_ATTEMPT = "fix-attempt"
+    PHASE_BOUNDARY = "phase-boundary"
+    STEER_APPLIED = "steer-applied"
+
+
+class TraceEvent(BaseModel):
+    """One entry of the persisted run-trace ledger (E-200-006, R-200-200).
+
+    Append-only, kind-discriminated. `payload` carries kind-specific
+    extras and SHALL stay JSON-serialisable (Arango persistence).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: TraceEventKind
+    ts: datetime
+    phase: Phase
+    label: str
+    duration_ms: int | None = Field(default=None, ge=0)
+    ok: bool | None = None
+    payload: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +211,11 @@ class RunPublic(BaseModel):
     # (parse failure / unknown status / three-fix-rule / gate guard /
     # admin abort). None on running and completed runs.
     block_reason: str | None = None
+    # Sliding-window of the 200 most recent TraceEvents on the run
+    # (R-200-201). Older events are read back via the paginated
+    # `GET /runs/{id}/trace?before=<ts>` endpoint. Empty on legacy
+    # runs created before Tranche B.
+    trace: list[TraceEvent] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +260,18 @@ class RunResume(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     strategy: RunResumeStrategy
+
+
+class RunSteer(BaseModel):
+    """POST /runs/{run_id}/steer body (E-200-007, R-200-202).
+
+    A single operator hint, capped at 4 KB. Multiple steers are issued
+    one POST at a time ; batching is not supported (per spec).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    message: str = Field(min_length=1, max_length=4096)
 
 
 # ---------------------------------------------------------------------------

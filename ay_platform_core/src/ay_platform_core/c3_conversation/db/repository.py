@@ -154,6 +154,7 @@ class ConversationRepository:
         role: str,
         content: str,
         events: list[dict[str, Any]] | None = None,
+        references: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         msg_id = uuid4()
         now = datetime.now(UTC).isoformat()
@@ -173,6 +174,10 @@ class ConversationRepository:
         # `events` so no migration is needed.
         if events:
             doc["events"] = events
+        # Tranche B (R-200-182) : prompt-attached references — metadata
+        # only (path, kind, range), NEVER the resolved content.
+        if references:
+            doc["references"] = references
         self._db.collection(COLL_MESSAGES).insert(doc)
         # Increment message_count on the parent conversation. OLD is not bound
         # in the WITH clause of `UPDATE @key`; bind the current document via
@@ -195,6 +200,7 @@ class ConversationRepository:
         role: str,
         content: str,
         events: list[dict[str, Any]] | None = None,
+        references: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         return await asyncio.to_thread(
             self._append_message_sync,
@@ -202,6 +208,7 @@ class ConversationRepository:
             role,
             content,
             events,
+            references,
         )
 
     def _list_messages_sync(self, conversation_id: UUID) -> list[dict[str, Any]]:

@@ -29,6 +29,7 @@ resources:
   - c2_auth
   - c3_conversation
   - c4_orchestrator
+  - c4_workers    # Sub-agent dispatch namespace + SAs + RBAC + NetworkPolicy.
   - c5_requirements
   - c6_validation
   - c7_memory

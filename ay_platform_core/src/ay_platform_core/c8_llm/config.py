@@ -1,6 +1,6 @@
 # =============================================================================
 # File: config.py
-# Version: 1
+# Version: 2
 # Path: ay_platform_core/src/ay_platform_core/c8_llm/config.py
 # Description: Pydantic schema for `litellm-config.yaml` (R-800-020, R-800-024).
 #              Two jobs: (1) strict validation of the structure LiteLLM
@@ -9,8 +9,14 @@
 #              Client-side settings (gateway URL, timeouts) live in the
 #              ClientSettings class also defined here.
 #
+#              v2 (2026-05-20) : ClientSettings gains `agent_routes_*` env
+#              keys that feed `LLMGatewayClient`'s client-side route
+#              resolver (R-800-030 v1 note — resolver MAY live in the SDK
+#              in v1 ; Q-800-011 tracks the proxy-side admission move).
+#
 # @relation implements:R-800-020
 # @relation implements:R-800-024
+# @relation implements:R-800-030
 # =============================================================================
 
 from __future__ import annotations
@@ -143,3 +149,17 @@ class ClientSettings(BaseSettings):
     # model alias) ; the mock LLM ignores `model`. Leave empty in
     # K8s prod, set per-environment via env_file.
     default_model: str = ""
+    # ------------------------------------------------------------------
+    # Client-side per-agent routing (R-800-030 v1 note).
+    # ------------------------------------------------------------------
+    # Path to the litellm config YAML. When set AND readable, the
+    # gateway client loads its `agent_routes:` section at construction
+    # and resolves `agent_name → model_name` BEFORE every call. When
+    # the file is absent or `agent_routes:` is empty, the client falls
+    # back to `default_model` per R-800-030 step 3.
+    agent_routes_yaml_path: str | None = None
+    # Inline override of agent_routes — useful for dev/test scenarios
+    # without a YAML on disk. Parsed as JSON ; takes precedence over
+    # `agent_routes_yaml_path` when set. Example value :
+    # `{"c3-rag":"llama3-3b-local","c3-docgen":"claude-haiku-fast"}`.
+    agent_routes_inline: str | None = None

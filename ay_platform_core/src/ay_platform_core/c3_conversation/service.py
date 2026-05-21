@@ -1,9 +1,28 @@
 # =============================================================================
 # File: service.py
-# Version: 11
+# Version: 14
 # Path: ay_platform_core/src/ay_platform_core/c3_conversation/service.py
 # Description: C3 Conversation Service facade.
 #              Orchestrates CRUD and the SSE message-send flow.
+#
+#              v14 (2026-05-21): the tool_call `done` event also carries
+#              the resulting document `version` (from C4's DocumentRef)
+#              so the chat can render a versioned "Open in working area
+#              (vN)" link below the response (#5 / R-200-147).
+#
+#              v13 (2026-05-21): the tool_call `done` inline event now
+#              carries the (size-capped) call `arguments` so the UI
+#              inline log can expand each tool call into its chain-of-
+#              thought detail (#4). `_safe_tool_args` truncates large
+#              string values (e.g. document `content`) to a preview so
+#              the persisted events ledger never duplicates whole docs.
+#
+#              v12 (2026-05-21): generate one `response_turn_id` per AI
+#              response (up-front, before the tool loop) and forward it
+#              to every document tool call. C4 embeds it in the live-docs
+#              commit message so the tree's per-file version batches by
+#              response — N writes to a file in one turn = one version
+#              bump (D-015 / R-200-147).
 #
 #              v11 (2026-05-19): hardened `_DOCGEN_TOOL_DIRECTIVE` —
 #              step-numbered modify workflow + an explicit FORBIDDEN
@@ -95,8 +114,8 @@ import logging
 import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Any
-from uuid import UUID
+from typing import Any, ClassVar
+from uuid import UUID, uuid4
 
 from fastapi import HTTPException, status
 
@@ -113,6 +132,7 @@ from ay_platform_core.c3_conversation.models import (
     ConversationUpdate,
     MessagePublic,
     MessageRole,
+    PromptReference,
 )
 from ay_platform_core.c7_memory.models import IndexKind, RetrievalRequest
 from ay_platform_core.c7_memory.remote import RemoteMemoryService
@@ -179,6 +199,36 @@ def _legacy_stage_to_inline(stage: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _assemble_chat_messages(
+    *,
+    system_content: str,
+    history_msgs: list[ChatMessage],
+    reference_blocks: list[str] | None,
+    user_message: str,
+) -> list[ChatMessage]:
+    """Compose the final LLM message list.
+
+    Order : (system) ; recent history ; optional <reference> system
+    block per R-200-181 ; user message. Keeping this out of
+    `_rag_stream._generate` keeps that closure under ruff's
+    `PLR0915` ceiling AND makes the prompt assembly independently
+    testable when the unit-test suite gets there.
+    """
+    out: list[ChatMessage] = [
+        ChatMessage(role=ChatRole.SYSTEM, content=system_content),
+        *history_msgs,
+    ]
+    if reference_blocks:
+        ref_system = (
+            "The operator has pinned the following references to this "
+            "turn — treat them as authoritative context for the user's "
+            "question :\n\n" + "\n\n".join(reference_blocks)
+        )
+        out.append(ChatMessage(role=ChatRole.SYSTEM, content=ref_system))
+    out.append(ChatMessage(role=ChatRole.USER, content=user_message))
+    return out
+
+
 def _msg_doc_to_public(doc: dict[str, Any]) -> MessagePublic:
     # `events` is optional — absent on user messages. Pydantic
     # validates per-item when present ; a corrupt entry raises here
@@ -193,6 +243,7 @@ def _msg_doc_to_public(doc: dict[str, Any]) -> MessagePublic:
             if legacy_stages
             else None
         )
+    raw_refs = doc.get("references")
     return MessagePublic(
         id=UUID(doc["id"]),
         conversation_id=UUID(doc["conversation_id"]),
@@ -200,6 +251,7 @@ def _msg_doc_to_public(doc: dict[str, Any]) -> MessagePublic:
         content=doc["content"],
         timestamp=doc["timestamp"],
         events=raw_events if raw_events else None,
+        references=raw_refs if raw_refs else None,
     )
 
 
@@ -315,6 +367,7 @@ class ConversationService:
         user_roles: str = "project_editor",
         user_prompt: str | None = None,
         project_prompt: str | None = None,
+        references: list[PromptReference] | None = None,
     ) -> AsyncIterator[str]:
         """Persist the user message and yield SSE chunks for the
         assistant reply.
@@ -334,12 +387,40 @@ class ConversationService:
         """
         conv = await self._require_access(conversation_id, user_id)
 
+        # Tranche B (R-200-180..184) — resolve prompt-attached references
+        # NOW, BEFORE persisting the user message, so an RBAC 403 or a
+        # 413 token-cap reject prevents the message landing in history
+        # without its references. Atomic-at-the-request-level.
+        project_id_local = conv.get("project_id")
+        resolved_ref_blocks: list[str] = []
+        if references:
+            if self._doc_tools is None or not project_id_local or not tenant_id:
+                # Per R-200-183 atomicity: rather than silently drop,
+                # 503 makes the wiring gap explicit.
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=(
+                        "references require live-docs wiring (project + "
+                        "tenant + DocumentToolClient) — not configured"
+                    ),
+                )
+            resolved_ref_blocks = await self._resolve_references(
+                references=references,
+                project_id=project_id_local,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                user_roles=user_roles,
+            )
+
         # Persist user message FIRST so a downstream LLM failure still
         # leaves the user's input in the history.
         await self._repo.append_message(
             conversation_id=conversation_id,
             role=MessageRole.USER,
             content=content,
+            references=(
+                [r.model_dump() for r in references] if references else None
+            ),
         )
 
         project_id = conv.get("project_id")
@@ -358,8 +439,103 @@ class ConversationService:
                 user_message=content,
                 user_prompt=user_prompt,
                 project_prompt=project_prompt,
+                reference_blocks=resolved_ref_blocks,
             )
         return self._stub_stream(conversation_id)
+
+    # ------------------------------------------------------------------
+    # Prompt-attached references resolver (R-200-180..184)
+    # ------------------------------------------------------------------
+
+    _PROMPT_REF_TOKEN_CAP: ClassVar[int] = 32_000
+    """Approximate token cap per R-200-181 — 4 chars/token heuristic in
+    v1. Switches to a real C8 tokenizer when one becomes available
+    (Q-500-005)."""
+
+    async def _resolve_references(
+        self,
+        *,
+        references: list[PromptReference],
+        project_id: str,
+        tenant_id: str,
+        user_id: str,
+        user_roles: str,
+    ) -> list[str]:
+        """Fetch each reference's content from C4, slice excerpts by
+        line range, accumulate <reference> blocks under the 32K-token
+        approximate cap. Raises HTTPException 403 on a reference whose
+        resolution fails RBAC (atomic per R-200-183) and 413 when the
+        combined content would exceed the cap (R-200-181)."""
+        assert self._doc_tools is not None  # narrowed by caller
+        blocks: list[str] = []
+        total_chars = 0
+        char_cap = self._PROMPT_REF_TOKEN_CAP * 4
+        for idx, ref in enumerate(references):
+            if ref.source != "live-docs":
+                # Q-200-019 : `source` references are deferred (run_id
+                # ambiguity). Reject explicitly rather than silently drop.
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"reference[{idx}] source 'source' not supported in v1 "
+                        "(Q-200-019)"
+                    ),
+                )
+            sc, body = await self._doc_tools.read_document_content(
+                project_id=project_id,
+                path=ref.path,
+                user_id=user_id,
+                tenant_id=tenant_id,
+                user_roles=user_roles,
+            )
+            if sc == 403:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=(
+                        f"reference[{idx}] {ref.path!r} resolution forbidden "
+                        "(RBAC denied access to underlying resource)"
+                    ),
+                )
+            if sc == 404:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"reference[{idx}] {ref.path!r} not found in live-docs"
+                    ),
+                )
+            if sc != 200:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=(
+                        f"reference[{idx}] resolution failed: C4 HTTP {sc}"
+                    ),
+                )
+            content = body
+            range_attr = ""
+            if ref.kind == "excerpt" and ref.range is not None:
+                lines = content.splitlines()
+                start_idx = max(0, ref.range.start_line - 1)
+                end_idx = min(len(lines), ref.range.end_line)
+                content = "\n".join(lines[start_idx:end_idx])
+                range_attr = (
+                    f' lines="{ref.range.start_line}-{ref.range.end_line}"'
+                )
+            block = (
+                f'<reference path="{ref.path}" kind="{ref.kind}"'
+                f'{range_attr}>\n{content}\n</reference>'
+            )
+            total_chars += len(block)
+            if total_chars > char_cap:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=(
+                        "combined reference content exceeds the 32K-token "
+                        "approximate cap (R-200-181) — drop or shorten "
+                        f"references[{idx}:] and retry"
+                    ),
+                )
+            blocks.append(block)
+        return blocks
 
     def _stub_stream(self, conversation_id: UUID) -> AsyncIterator[str]:
         stub_reply = (
@@ -392,6 +568,7 @@ class ConversationService:
         user_message: str,
         user_prompt: str | None,
         project_prompt: str | None,
+        reference_blocks: list[str] | None = None,
     ) -> AsyncIterator[str]:
         async def _generate() -> AsyncIterator[str]:
             # The SSE protocol mixes two event kinds :
@@ -503,11 +680,12 @@ class ConversationService:
                 # instead of printing the edited content as text.
                 docgen_tools_active=self._doc_tools is not None,
             )
-            messages: list[ChatMessage] = [
-                ChatMessage(role=ChatRole.SYSTEM, content=system_content),
-                *history_msgs,
-                ChatMessage(role=ChatRole.USER, content=user_message),
-            ]
+            messages = _assemble_chat_messages(
+                system_content=system_content,
+                history_msgs=history_msgs,
+                reference_blocks=reference_blocks,
+                user_message=user_message,
+            )
 
             # 3. Generation phase.
             t_generate = time.perf_counter()
@@ -517,6 +695,12 @@ class ConversationService:
                 label="Asking the language model",
             )
             collected_tokens: list[str] = []
+            # One id per AI response, generated up-front (the tool loop
+            # runs before the assistant message is persisted). C4 embeds
+            # it in each live-docs commit so the tree's per-file version
+            # batches by response — every write this turn shares the id,
+            # so N writes to a file collapse to one version bump.
+            response_turn_id = str(uuid4())
 
             if self._doc_tools is not None:
                 # 3a. Chat-direct DocGen tool loop (D-015 / Phase 2.C.2).
@@ -536,6 +720,7 @@ class ConversationService:
                     user_roles=user_roles,
                     collected_tokens=collected_tokens,
                     collected_events=collected_events,
+                    turn_id=response_turn_id,
                 ):
                     yield sse
             else:
@@ -631,6 +816,7 @@ class ConversationService:
         user_roles: str,
         collected_tokens: list[str],
         collected_events: list[dict[str, Any]],
+        turn_id: str | None = None,
     ) -> AsyncIterator[str]:
         """Bounded non-streaming tool-execution loop (D-015). Yields
         SSE strings : one unified `event: inline` (kind='tool_call')
@@ -742,6 +928,7 @@ class ConversationService:
                     user_id=user_id,
                     tenant_id=tenant_id,
                     user_roles=user_roles,
+                    turn_id=turn_id,
                 )
                 ok = "error" not in result
                 summary = _summarise_tool_result(tool_name, result)
@@ -749,6 +936,7 @@ class ConversationService:
                 # so the UI can deep-link the inline log to the Working
                 # area viewer (D-015 / Phase 2.C.3).
                 doc_path = _tool_result_path(tool_name, result)
+                doc_version = _tool_result_version(tool_name, result)
                 done_event: dict[str, Any] = {
                     "kind": "tool_call",
                     "status": "done",
@@ -757,9 +945,20 @@ class ConversationService:
                     "ok": ok,
                     "round": round_idx + 1,
                     "summary": summary,
+                    # The (size-capped) call arguments so the UI inline
+                    # log can expand each tool call into its chain-of-
+                    # thought detail (R-500-014 ; #4). Large string
+                    # values like `content` are truncated to a preview
+                    # so the audit ledger doesn't duplicate whole docs.
+                    "arguments": _safe_tool_args(tc["arguments"]),
                 }
                 if doc_path is not None:
                     done_event["path"] = doc_path
+                # Resulting per-file version (R-200-147) so the chat can
+                # render a versioned "Open in working area (vN)" link
+                # below the response (#5).
+                if doc_version is not None:
+                    done_event["version"] = doc_version
                 yield _inline_sse(done_event)
                 # Persist the terminal event into the shared audit
                 # ledger (done-only policy, same as stages).
@@ -1021,6 +1220,24 @@ def _summarise_tool_result(tool: str, result: dict[str, Any]) -> str:
     return summaries.get(tool, "ok")
 
 
+def _safe_tool_args(
+    arguments: dict[str, Any], *, max_len: int = 280,
+) -> dict[str, Any]:
+    """Size-capped copy of a tool call's arguments for the inline-log
+    chain-of-thought detail (#4). Long string values (notably the
+    `content` of create/update_document, which is the whole document)
+    are truncated to a preview + a `(N chars)` note so the persisted
+    `events` ledger never duplicates a full document body. Non-string
+    values pass through unchanged (they are small : paths, flags)."""
+    out: dict[str, Any] = {}
+    for key, value in arguments.items():
+        if isinstance(value, str) and len(value) > max_len:
+            out[key] = f"{value[:max_len]}… ({len(value)} chars)"
+        else:
+            out[key] = value
+    return out
+
+
 def _tool_result_path(tool: str, result: dict[str, Any]) -> str | None:
     """Extract the affected document path from a mutating tool result,
     for the SSE `done` payload `path` field. Returns ``None`` for
@@ -1037,6 +1254,22 @@ def _tool_result_path(tool: str, result: dict[str, Any]) -> str | None:
     else:
         return None
     return path if isinstance(path, str) and path else None
+
+
+def _tool_result_version(tool: str, result: dict[str, Any]) -> int | None:
+    """Extract the resulting per-file version from a create/update
+    document tool result (the C4 `DocumentRef.version`, R-200-147) for
+    the SSE `done` payload `version` field. None for non-mutating tools,
+    errors, or when C4 could not compute it (Gitea unavailable)."""
+    if "error" in result:
+        return None
+    if tool == "create_document":
+        version = result.get("created", {}).get("version")
+    elif tool == "update_document":
+        version = result.get("updated", {}).get("version")
+    else:
+        return None
+    return version if isinstance(version, int) else None
 
 
 def _extract_delta_content(chunk: dict[str, Any]) -> str:

@@ -1,6 +1,6 @@
 # =============================================================================
 # File: service.py
-# Version: 2
+# Version: 3
 # Path: ay_platform_core/src/ay_platform_core/c7_memory/service.py
 # Description: Facade for the C7 Memory Service. Wires ingestion (parse +
 #              chunk + embed + index), federated retrieval, entity-event
@@ -24,6 +24,8 @@
 # @relation implements:R-400-042
 # @relation implements:R-400-070
 # @relation implements:R-400-071
+# @relation implements:R-400-207
+# @relation implements:R-400-208
 # =============================================================================
 
 from __future__ import annotations
@@ -37,6 +39,14 @@ from typing import Any
 
 from fastapi import HTTPException, Request, status
 
+from ay_platform_core.c7_memory.artifacts import (
+    CHUNKS_ARTIFACT,
+    KG_ARTIFACT,
+    deserialize_chunks,
+    deserialize_kg,
+    serialize_chunks,
+    serialize_kg,
+)
 from ay_platform_core.c7_memory.config import MemoryConfig
 from ay_platform_core.c7_memory.db.repository import MemoryRepository
 from ay_platform_core.c7_memory.embedding.base import EmbeddingProvider
@@ -57,7 +67,10 @@ from ay_platform_core.c7_memory.models import (
     EntityEmbedRequest,
     IndexKind,
     KGExtractionResult,
+    KGRelationSample,
+    KGSummary,
     ParseStatus,
+    Provenance,
     QuotaStatus,
     RetrievalHit,
     RetrievalRequest,
@@ -264,6 +277,14 @@ class MemoryService:
             index_kind=IndexKind.CONVERSATIONS,
         )
 
+    def _current_processing_version(self) -> str:
+        """Pipeline descriptor a fresh ingestion would stamp now (R-400-208)."""
+        return _format_processing_version(
+            self._config.chunk_token_size,
+            self._config.chunk_overlap,
+            self._embedder.model_id,
+        )
+
     async def _index_parsed_source(
         self,
         *,
@@ -293,6 +314,7 @@ class MemoryService:
             uploaded_by=uploaded_by,
         )
 
+        version = self._current_processing_version()
         chunks = chunk_text(
             parsed_text,
             token_size=self._config.chunk_token_size,
@@ -305,9 +327,10 @@ class MemoryService:
                 model_id=self._embedder.model_id,
                 chunk_count=0,
                 parse_status=ParseStatus.PARSED,
+                processing_version=version,
             )
             await self._repo.upsert_source(source_row)
-            return _source_public(source_row)
+            return _source_public(source_row, current_version=version)
 
         vectors = await self._embedder.embed_batch([c.text for c in chunks])
         if len(vectors) != len(chunks):
@@ -351,15 +374,30 @@ class MemoryService:
                 "metadata": {"mime_type": mime_type},
             })
         await self._repo.upsert_chunks(chunk_rows)
+
+        # R-400-207: persist the embedded chunk rows as a durable MinIO
+        # artifact so the vector store can be rebuilt by replay without
+        # re-embedding. External sources only (conversation memory is not
+        # a rebuildable "source"), and only when blob storage is wired.
+        if self._storage is not None and index_kind is IndexKind.EXTERNAL_SOURCES:
+            await self._storage.put_artifact(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                source_id=source_id,
+                name=CHUNKS_ARTIFACT,
+                data=serialize_chunks(source_id, self._embedder.model_id, chunk_rows),
+            )
+
         source_row = _source_row(
             payload=synth_payload,
             tenant_id=tenant_id,
             model_id=self._embedder.model_id,
             chunk_count=len(chunks),
             parse_status=ParseStatus.INDEXED,
+            processing_version=version,
         )
         await self._repo.upsert_source(source_row)
-        return _source_public(source_row)
+        return _source_public(source_row, current_version=version)
 
     async def extract_kg(
         self,
@@ -429,6 +467,19 @@ class MemoryService:
             entities=entities,
             relations=relations,
         )
+        # R-400-207: persist the extracted triples (with provenance per
+        # R-400-201) as a durable MinIO artifact so the graph store can be
+        # rebuilt by replay WITHOUT re-invoking the LLM. The triples are
+        # already in Arango; this snapshot is the replay source of truth.
+        if self._storage is not None:
+            await self._storage.put_artifact(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                source_id=source_id,
+                name=KG_ARTIFACT,
+                data=serialize_kg(source_id, entities, relations),
+            )
+
         return KGExtractionResult(
             source_id=source_id,
             entities_added=added_entities,
@@ -436,6 +487,79 @@ class MemoryService:
             entities=entities,
             relations=relations,
         )
+
+    async def rebuild_from_artifacts(
+        self,
+        *,
+        tenant_id: str,
+        project_id: str,
+        source_id: str,
+    ) -> dict[str, int]:
+        """Replay a source's persisted MinIO artifacts into ArangoDB
+        WITHOUT re-embedding or re-invoking the LLM (R-400-207).
+
+        `chunks.json` -> vector store (required; 404 if absent).
+        `kg.json` -> graph store (optional; skipped when the source had
+        no KG extracted). The databases are projections of the artifact
+        layer, so this rebuild is pure, deterministic, and free.
+
+        Note (v1 scope): restores the two stores (chunks + KG), which is
+        the literal R-400-207 guarantee. Reconstructing the
+        `memory_sources` listing row from artifacts is a follow-up;
+        retrieval scans `memory_chunks` directly, so it works without it.
+        """
+        if self._storage is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="blob storage not configured — rebuild requires MinIO",
+            )
+
+        try:
+            raw_chunks = await self._storage.get_artifact(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                source_id=source_id,
+                name=CHUNKS_ARTIFACT,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    f"no chunks artifact for source {source_id} — nothing "
+                    "to replay (was it ingested with blob storage wired?)"
+                ),
+            ) from exc
+
+        chunks_artifact = deserialize_chunks(raw_chunks)
+        await self._repo.upsert_chunks(chunks_artifact.chunks)
+
+        entities_restored = 0
+        relations_restored = 0
+        if self._kg_repo is not None:
+            try:
+                raw_kg = await self._storage.get_artifact(
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                    source_id=source_id,
+                    name=KG_ARTIFACT,
+                )
+            except FileNotFoundError:
+                raw_kg = None
+            if raw_kg is not None:
+                kg_artifact = deserialize_kg(raw_kg)
+                entities_restored, relations_restored = await self._kg_repo.persist(
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                    source_id=source_id,
+                    entities=kg_artifact.entities,
+                    relations=kg_artifact.relations,
+                )
+
+        return {
+            "chunks": len(chunks_artifact.chunks),
+            "entities": entities_restored,
+            "relations": relations_restored,
+        }
 
     async def download_source(
         self, tenant_id: str, project_id: str, source_id: str,
@@ -504,7 +628,10 @@ class MemoryService:
         self, tenant_id: str, project_id: str
     ) -> SourceListResponse:
         rows = await self._repo.list_sources(tenant_id, project_id)
-        return SourceListResponse(sources=[_source_public(r) for r in rows])
+        current = self._current_processing_version()
+        return SourceListResponse(
+            sources=[_source_public(r, current_version=current) for r in rows]
+        )
 
     async def get_source(
         self, tenant_id: str, project_id: str, source_id: str
@@ -514,7 +641,121 @@ class MemoryService:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="source not found"
             )
-        return _source_public(row)
+        return _source_public(row, current_version=self._current_processing_version())
+
+    async def reprocess_source(
+        self, *, tenant_id: str, project_id: str, source_id: str
+    ) -> SourcePublic:
+        """Re-run the chunk + embed pipeline for one source from its
+        persisted raw bytes and re-stamp the current processing version
+        (R-400-208). Used to refresh a single stale source instead of
+        re-embedding the whole project (R-400-060).
+
+        Errors:
+          - 503 if blob storage isn't wired.
+          - 404 if the source row doesn't exist.
+          - 409 if the source has no stored raw bytes (e.g. string-ingested
+            via the JSON `POST /sources` path) — there is nothing to
+            reprocess from.
+        """
+        if self._storage is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="blob storage not configured — reprocess requires MinIO",
+            )
+        row = await self._repo.get_source(tenant_id, project_id, source_id)
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="source not found"
+            )
+        mime_type = row["mime_type"]
+        try:
+            content_bytes = await self._storage.get_source_blob(
+                tenant_id=tenant_id,
+                project_id=project_id,
+                source_id=source_id,
+                mime_type=mime_type,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "source has no stored raw bytes to reprocess from "
+                    "(string-ingested sources cannot be reprocessed)"
+                ),
+            ) from exc
+
+        try:
+            text = parse(mime_type, content_bytes)
+        except UnsupportedMimeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc)
+            ) from exc
+        except ParseFailureError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+            ) from exc
+
+        public = await self._index_parsed_source(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            source_id=source_id,
+            mime_type=mime_type,
+            uploaded_by=row["uploaded_by"],
+            size_bytes=row["size_bytes"],
+            parsed_text=text,
+        )
+        # Re-extract the KG too when configured, so the graph reflects the
+        # re-chunked source (best-effort, mirrors the upload path).
+        if (
+            self._config.auto_extract_kg_on_upload
+            and self._kg_repo is not None
+            and self._llm is not None
+        ):
+            with contextlib.suppress(Exception):
+                await self.extract_kg(
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                    source_id=source_id,
+                )
+        return public
+
+    async def kg_summary(
+        self, tenant_id: str, project_id: str, *, sample_limit: int = 10
+    ) -> KGSummary:
+        """Project-level knowledge-graph inspection view (the simple graph
+        bootstrap): entity/relation counts + a small sample of triples with
+        provenance. Requires the KG repo wired; 503 otherwise."""
+        if self._kg_repo is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="knowledge graph not configured — wire KGRepository",
+            )
+        raw = await self._kg_repo.summary(
+            tenant_id, project_id, sample_limit=sample_limit,
+        )
+        sample = [
+            KGRelationSample(
+                subject=r.get("subject") or "",
+                relation=r.get("relation") or "",
+                object=r.get("object") or "",
+                provenance=(
+                    Provenance(r["provenance"])
+                    if r.get("provenance")
+                    else Provenance.INFERRED
+                ),
+                confidence=(
+                    r["confidence"] if r.get("confidence") is not None else 1.0
+                ),
+            )
+            for r in raw["sample"]
+        ]
+        return KGSummary(
+            project_id=project_id,
+            entity_count=raw["entity_count"],
+            relation_count=raw["relation_count"],
+            sample=sample,
+        )
 
     # ------------------------------------------------------------------
     # Entity embedding (R-400-030) — triggered by requirements events.
@@ -757,6 +998,18 @@ class MemoryService:
 # ---------------------------------------------------------------------------
 
 
+def _format_processing_version(
+    chunk_token_size: int, chunk_overlap: int, model_id: str | None
+) -> str:
+    """Deterministic descriptor of the chunk + embed pipeline (R-400-208).
+
+    A source is 'stale' when its stored descriptor differs from the one a
+    fresh ingestion would produce — i.e. the chunk window/overlap or the
+    embedding model changed since it was last processed.
+    """
+    return f"chunk={chunk_token_size}/{chunk_overlap};embed={model_id or 'unknown'}"
+
+
 def _source_row(
     *,
     payload: SourceIngestRequest,
@@ -764,6 +1017,7 @@ def _source_row(
     model_id: str,
     chunk_count: int,
     parse_status: ParseStatus,
+    processing_version: str,
 ) -> dict[str, Any]:
     now = datetime.now(UTC).isoformat()
     return {
@@ -782,10 +1036,15 @@ def _source_row(
         "parse_error": None,
         "chunk_count": chunk_count,
         "model_id": model_id,
+        "processing_version": processing_version,
     }
 
 
-def _source_public(row: dict[str, Any]) -> SourcePublic:
+def _source_public(
+    row: dict[str, Any], *, current_version: str | None = None
+) -> SourcePublic:
+    stored_version = row.get("processing_version")
+    is_stale = current_version is not None and stored_version != current_version
     return SourcePublic(
         source_id=row["source_id"],
         project_id=row["project_id"],
@@ -797,6 +1056,8 @@ def _source_public(row: dict[str, Any]) -> SourcePublic:
         parse_error=row.get("parse_error"),
         chunk_count=row.get("chunk_count", 0),
         model_id=row.get("model_id"),
+        processing_version=stored_version,
+        is_stale=is_stale,
     )
 
 
